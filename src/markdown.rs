@@ -381,7 +381,7 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
     }
 }
 
-/// Body is a relative markdown image embed of the sibling media file. 
+/// Body is a relative markdown image embed of the sibling media file.
 /// A relative link (rather than a
 /// `![[wikilink]]`) renders in plain markdown viewers too and is unambiguous
 /// because the photo is in the same directory as the note. The embed uses the

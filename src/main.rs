@@ -1,4 +1,6 @@
 mod album;
+#[cfg(test)]
+mod boundary_tests;
 mod classify;
 mod db_cmd;
 mod dedup;
