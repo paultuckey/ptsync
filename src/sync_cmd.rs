@@ -105,15 +105,12 @@ pub(crate) fn main(
                             let sync_md_r = sync_markdown(
                                 dry_run,
                                 media,
-                                &derived,
+                                &final_path,
                                 &album_names,
                                 output_container,
                             );
                             if let Err(e) = sync_md_r {
-                                warn!(
-                                    "Error writing markdown file: {:?}, error: {}",
-                                    derived.desired_media_path, e
-                                );
+                                warn!("Error writing markdown file beside {final_path:?}: {e}");
                             }
                         }
                     }
@@ -261,7 +258,7 @@ pub(crate) fn write_media(
 mod tests {
     use super::*;
     use crate::test_util::build_zip;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::fs::read_to_string;
     use std::path::{Path, PathBuf};
@@ -367,8 +364,7 @@ mod tests {
         let output = Some(archive.to_string_lossy().to_string());
         let input = TAKEOUT_BASIC.to_string();
 
-        // First run populates the archive: media files, markdown sidecars and
-        // album files.
+        // First run populates the archive
         main(false, &input, &output, false, false, false)?;
         let first = mtimes_under(&archive)?;
         assert!(
@@ -378,14 +374,97 @@ mod tests {
             "first run should have written media, sidecar and album files"
         );
 
-        // Re-running over identical input must be a no-op in writes: every
-        // file keeps its modified time because nothing was rewritten - not even
-        // the album and markdown files that are regenerated in memory each run.
+        // Re-running over identical input must be a no-op in writes
         main(false, &input, &output, false, false, false)?;
         let second = mtimes_under(&archive)?;
         assert_eq!(
             first, second,
             "re-running over unchanged input must not rewrite any output file"
+        );
+        Ok(())
+    }
+
+    /// Different photos taken at the same time must each get their own
+    /// sidecar. The date-based name collides, so the second gains a
+    /// checksum suffix, the md should match.
+    #[test]
+    fn sync_same_instant_photos_each_get_a_sidecar() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+
+        // Two distinct photos at the same photoTakenTime, so both want 2023/11/14/2213-20000.
+        let base = fs::read("test/Canon_40D.jpg")?;
+        for (name, marker) in [("a.jpg", "X"), ("b.jpg", "YY")] {
+            let mut bytes = base.clone();
+            bytes.extend_from_slice(marker.as_bytes());
+            fs::write(input.join(name), &bytes)?;
+            fs::write(
+                input.join(format!("{name}.supplemental-metadata.json")),
+                r#"{"photoTakenTime":{"timestamp":"1700000000"}}"#,
+            )?;
+        }
+
+        let input_s = input.to_string_lossy().to_string();
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(false, &input_s, &output_s, false, false, false)?;
+
+        // Both photos written, one keeps bare date name, the other is suffixed.
+        let media: Vec<PathBuf> = files_under(&output)?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "jpg"))
+            .collect();
+        assert_eq!(media.len(), 2, "both same-instant photos must be written");
+        assert!(
+            output.join("2023/11/14/2213-20000.jpg").exists(),
+            "one photo should keep the bare date name"
+        );
+
+        // Exactly one sidecar per media file
+        let sidecars: BTreeSet<PathBuf> = files_under(&output)?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+            .collect();
+        let expected: BTreeSet<PathBuf> = media.iter().map(|p| p.with_extension("md")).collect();
+        assert_eq!(
+            sidecars, expected,
+            "each media file must have exactly one matching sibling sidecar"
+        );
+
+        // Each sidecar embeds its *own* photo by name and records that photo's details
+        let mut sources = BTreeSet::new();
+        for photo in &media {
+            let file_name = photo
+                .file_name()
+                .ok_or_else(|| anyhow!("media path has no file name: {photo:?}"))?
+                .to_string_lossy()
+                .to_string();
+            let md = read_to_string(photo.with_extension("md"))?;
+            assert!(
+                md.contains(&format!("![]({file_name})")),
+                "sidecar for {file_name} should embed its own photo, got:\n{md}"
+            );
+            for src in ["a.jpg", "b.jpg"] {
+                if md.contains(&format!("- {src}")) {
+                    sources.insert(src);
+                }
+            }
+        }
+        assert_eq!(
+            sources,
+            BTreeSet::from(["a.jpg", "b.jpg"]),
+            "each source photo should be recorded in its own sidecar"
+        );
+
+        // re-running over the same input rewrites nothing.
+        let first = mtimes_under(&output)?;
+        main(false, &input_s, &output_s, false, false, false)?;
+        let second = mtimes_under(&output)?;
+        assert_eq!(
+            first, second,
+            "re-running over same-instant input must not rewrite any output file"
         );
         Ok(())
     }

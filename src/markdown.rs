@@ -1,5 +1,5 @@
 use crate::fs::{FileSystem, OsFileSystem};
-use crate::media::{MediaFileDerivedInfo, MediaFileInfo, best_guess_taken_dt};
+use crate::media::{MediaFileInfo, best_guess_taken_dt};
 use crate::util::name_part;
 use anyhow::anyhow;
 use std::io::{Cursor, Read};
@@ -86,23 +86,22 @@ pub(crate) struct PhotoSorterFrontMatter {
 pub(crate) fn sync_markdown(
     dry_run: bool,
     media_file: &MediaFileInfo,
-    derived: &MediaFileDerivedInfo,
+    resolved_media_path: &str,
     album_names: &[String],
     output_c: &mut OsFileSystem,
 ) -> anyhow::Result<()> {
-    let Some(desired_media_path) = derived.desired_media_path.clone() else {
-        warn!(
-            "No desired media path for media file: {:?}",
-            media_file.original_path
-        );
-        return Ok(());
-    };
-    let output_path = get_desired_markdown_path(desired_media_path.clone())?;
+    // The sidecar is placed beside the *resolved* media file (the path
+    // `write_media` actually wrote to), not the bare date path. Same-instant
+    // photos collide on the date name and all but the first carry a checksum
+    // suffix (`2213-20000-ccf63c8.jpg`); deriving the sidecar from the resolved
+    // path gives each its own note (`2213-20000-ccf63c8.md`) instead of having
+    // them all clobber a single `2213-20000.md`.
+    let output_path = get_desired_markdown_path(resolved_media_path)?;
     let mfm = mfm_from_media_file_info(media_file, album_names);
     // On first creation the body embeds the photo itself, so opening the note in
     // A markdown viewer shows the image. The body is preserved
     // verbatim on later runs, so user notes and this embed are never clobbered.
-    let mut e_md = new_note_body(&desired_media_path, &derived.desired_media_extension);
+    let mut e_md = new_note_body(resolved_media_path);
     let mut e_yaml = None;
 
     if output_c.exists(&output_path) {
@@ -382,24 +381,34 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
     }
 }
 
-/// The starting body for a freshly created sidecar: a relative markdown image
-/// embed of the sibling media file. A relative link (rather than a
+/// Body is a relative markdown image embed of the sibling media file.
+/// A relative link (rather than a
 /// `![[wikilink]]`) renders in plain markdown viewers too and is unambiguous
-/// because the photo sits in the same directory as the note.
-fn new_note_body(desired_media_path: &str, desired_media_extension: &str) -> String {
-    let file_name = format!(
-        "{}.{}",
-        name_part(&desired_media_path.to_string()),
-        desired_media_extension
-    );
+/// because the photo is in the same directory as the note. The embed uses the
+/// resolved media file name (including any collision-resolving checksum suffix)
+/// so each same-instant photo embeds its own file, not a shared bare name.
+fn new_note_body(resolved_media_path: &str) -> String {
+    let file_name = name_part(&resolved_media_path.to_string());
     format!("\n![]({file_name})\n")
 }
 
-pub(crate) fn get_desired_markdown_path(desired_media_path: String) -> anyhow::Result<String> {
-    if desired_media_path.is_empty() {
-        return Err(anyhow!("Desired media path is empty"));
+/// The sidecar markdown path for a media file: the media file's own path with
+/// its extension swapped for `.md`, so the note is a sibling of the photo even
+/// when the photo's name carries a collision-resolving checksum suffix
+/// (`2213-20000-ccf63c8.jpg` -> `2213-20000-ccf63c8.md`).
+pub(crate) fn get_desired_markdown_path(resolved_media_path: &str) -> anyhow::Result<String> {
+    if resolved_media_path.is_empty() {
+        return Err(anyhow!("Resolved media path is empty"));
     }
-    Ok(desired_media_path + ".md")
+    // Swap the trailing extension for `.md`. The file name carries exactly one
+    // dot (the extension); date-based names, checksums and the `undated` folder
+    // contain none, so the final dot - when it sits in the file name - is the
+    // extension separator.
+    let last_slash = resolved_media_path.rfind('/').map_or(0, |i| i + 1);
+    match resolved_media_path[last_slash..].rfind('.') {
+        Some(dot) => Ok(format!("{}.md", &resolved_media_path[..last_slash + dot])),
+        None => Ok(format!("{resolved_media_path}.md")),
+    }
 }
 
 #[cfg(test)]
@@ -559,22 +568,36 @@ checksum: abcdefg
     #[test]
     fn test_desired_md_path() {
         crate::test_util::setup_log();
-        assert_eq!(get_desired_markdown_path("".to_string()).ok(), None);
+        assert_eq!(get_desired_markdown_path("").ok(), None);
+        // The media extension is swapped for `.md`, so the sidecar is a sibling
+        // of the photo it describes...
         assert_eq!(
-            get_desired_markdown_path("abc".to_string()).ok(),
-            Some("abc.md".to_string())
+            get_desired_markdown_path("2025/02/09/1818-44000.jpg").ok(),
+            Some("2025/02/09/1818-44000.md".to_string())
         );
+        // ...including when the name carries a collision-resolving checksum suffix.
         assert_eq!(
-            get_desired_markdown_path("abc.def.ghi.jkl".to_string()).ok(),
-            Some("abc.def.ghi.jkl.md".to_string())
+            get_desired_markdown_path("2025/02/09/1818-44000-ccf63c8.jpg").ok(),
+            Some("2025/02/09/1818-44000-ccf63c8.md".to_string())
+        );
+        // A name without an extension just gains `.md` (dots only ever appear in
+        // the file name, never in the date directories).
+        assert_eq!(
+            get_desired_markdown_path("abc").ok(),
+            Some("abc.md".to_string())
         );
     }
 
     #[test]
     fn test_new_note_body_embeds_sibling_photo() {
         assert_eq!(
-            new_note_body("2025/02/09/1818-44000", "jpg"),
+            new_note_body("2025/02/09/1818-44000.jpg"),
             "\n![](1818-44000.jpg)\n"
+        );
+        // The embed uses the resolved (suffixed) file name, not the bare date name.
+        assert_eq!(
+            new_note_body("2025/02/09/1818-44000-ccf63c8.jpg"),
+            "\n![](1818-44000-ccf63c8.jpg)\n"
         );
     }
 
