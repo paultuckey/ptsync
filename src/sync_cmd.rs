@@ -317,6 +317,22 @@ mod tests {
         Ok(out)
     }
 
+    /// Recursively copy a directory tree so a test can run against a copy
+    fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if from.is_dir() {
+                copy_dir_all(&from, &to)?;
+            } else {
+                fs::copy(&from, &to)?;
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn sync_dates_media_from_supplemental_metadata() -> anyhow::Result<()> {
         let (_temp, archive) = run_sync(TAKEOUT_BASIC)?;
@@ -380,6 +396,37 @@ mod tests {
         assert_eq!(
             first, second,
             "re-running over unchanged input must not rewrite any output file"
+        );
+        Ok(())
+    }
+
+    /// A sync must never modify, delete, or add anything in the input tree. Snapshot the
+    /// input before the run and assert it is byte-for-byte identical afterward.
+    #[test]
+    fn sync_never_modifies_input() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        copy_dir_all(Path::new(TAKEOUT_BASIC), &input)?;
+
+        let before = output_tree(&input)?;
+        assert!(!before.is_empty(), "copy should contain files");
+
+        let output = temp.path().join("archive");
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(
+            false,
+            &input.to_string_lossy().to_string(),
+            &output_s,
+            false,
+            false,
+            false,
+        )?;
+
+        let after = output_tree(&input)?;
+        assert_eq!(
+            before, after,
+            "sync must not add, remove, or modify any file in the input tree"
         );
         Ok(())
     }
