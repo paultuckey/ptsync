@@ -112,13 +112,23 @@ pub(crate) fn timestamp_to_rfc3339(ts: i64) -> Option<String> {
     DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())
 }
 
+/// Pair up a latitude/longitude only when both are present and not the `(0, 0)`
+/// "null island" sentinel. EXIF and Google Takeout both emit zeros when they
+/// have no fix rather than omitting the value, so we treat that as absent.
+pub(crate) fn non_zero_coords(lat: Option<f64>, long: Option<f64>) -> Option<(f64, f64)> {
+    match (lat, long) {
+        (Some(lat), Some(long)) if lat != 0.0 || long != 0.0 => Some((lat, long)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fs::ZipFileSystem;
 
     #[test]
-    fn test_zip() -> anyhow::Result<()> {
+    fn test_zip() -> Result<()> {
         use anyhow::anyhow;
         crate::test_util::setup_log();
         let c = ZipFileSystem::new("test/Canon_40D.jpg.zip")?;
@@ -138,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn test_files_checksum() -> anyhow::Result<()> {
+    fn test_files_checksum() -> Result<()> {
         let c = OsFileSystem::new("test");
         let mut b = c.open("Canon_40D.jpg")?;
         let csm = checksum_bytes(&mut b)?;

@@ -2,7 +2,7 @@ use crate::classify::{classify_dir, classify_file};
 use crate::file_type::QuickFileType;
 use crate::fs::{FileSystem, OsFileSystem, ZipFileSystem};
 use crate::inspect::inspect_media_files;
-use crate::media::{MediaFileInfo, best_guess_taken_dt};
+use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
 use crate::progress::Progress;
 use crate::util::{ScanInfo, scan_fs};
 use anyhow::anyhow;
@@ -169,6 +169,26 @@ pub(crate) struct HashInfo {
 fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
     let media_info_json = serde_json::to_string(&info)?;
     let guessed_datetime = best_guess_taken_dt(info);
+    let (latitude, longitude) = match best_guess_lat_long(info) {
+        Some((lat, long)) => (Some(lat), Some(long)),
+        None => (None, None),
+    };
+    // Camera and dimensions come from EXIF for images; for videos they live in
+    // the track metadata, so fall back to that when EXIF has nothing.
+    let exif = info.exif_info.as_ref();
+    let track = info.track_info.as_ref();
+    let camera_make = exif
+        .and_then(crate::exif_util::camera_make)
+        .or_else(|| track.and_then(|t| t.make.clone()));
+    let camera_model = exif
+        .and_then(crate::exif_util::camera_model)
+        .or_else(|| track.and_then(|t| t.model.clone()));
+    let width = exif
+        .and_then(crate::exif_util::image_width)
+        .or_else(|| track.and_then(|t| t.width).map(|w| w as i64));
+    let height = exif
+        .and_then(crate::exif_util::image_height)
+        .or_else(|| track.and_then(|t| t.height).map(|h| h as i64));
     let long_hash = &info.hash_info.long_checksum;
     let short_hash = &info.hash_info.short_checksum;
     let item = DbMediaItem {
@@ -182,6 +202,12 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         accurate_file_type: info.accurate_file_type.clone().to_string(),
         guessed_datetime,
         file_size: info.file_size as i64,
+        latitude,
+        longitude,
+        camera_make,
+        camera_model,
+        width,
+        height,
     };
     let mut stmt = conn.prepare_cached(DB_MEDIA_ITEM_INSERT)?;
     stmt.execute((
@@ -195,7 +221,25 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         &item.modified_at,
         &item.created_at,
         &item.file_size,
+        &item.latitude,
+        &item.longitude,
+        &item.camera_make,
+        &item.camera_model,
+        &item.width,
+        &item.height,
     ))?;
+
+    // Named people come from Google supplemental metadata; store each as its own
+    // row against the media item just inserted so they can be queried and joined.
+    let media_item_id = conn.last_insert_rowid();
+    if let Some(supp) = &info.supp_info {
+        let mut stmt_person = conn.prepare_cached(DB_MEDIA_PERSON_INSERT)?;
+        for person in &supp.people {
+            if let Some(name) = &person.name {
+                stmt_person.execute((media_item_id, name))?;
+            }
+        }
+    }
 
     Ok(())
 }
@@ -214,6 +258,15 @@ struct DbMediaItem {
     created_at: i64,
     // file size in bytes
     file_size: i64,
+    // best-guess GPS coordinates, None if unknown
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    // EXIF camera details, None if unknown
+    camera_make: Option<String>,
+    camera_model: Option<String>,
+    // image dimensions in pixels, None if unknown
+    width: Option<i64>,
+    height: Option<i64>,
 }
 const DB_MEDIA_ITEM_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS media_item  (
@@ -227,17 +280,36 @@ const DB_MEDIA_ITEM_CREATE: &str = "
         guessed_datetime DATETIME,
         modified_at DATETIME DEFAULT CURRENT_TIMESTAMP, -- file last modified
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP, -- file created
-        file_size INTEGER -- size of the file in bytes
+        file_size INTEGER, -- size of the file in bytes
+        latitude REAL, -- best-guess GPS latitude, NULL if unknown
+        longitude REAL, -- best-guess GPS longitude, NULL if unknown
+        camera_make TEXT, -- EXIF camera manufacturer, NULL if unknown
+        camera_model TEXT, -- EXIF camera model, NULL if unknown
+        width INTEGER, -- image width in pixels, NULL if unknown
+        height INTEGER -- image height in pixels, NULL if unknown
     )
 ";
 const DB_MEDIA_ITEM_INSERT: &str = "
     INSERT INTO media_item (media_path, long_hash, short_hash, quick_file_type,
-        accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
+        latitude, longitude, camera_make, camera_model, width, height)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
 ";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
     DELETE FROM media_item
 ";
+
+const DB_MEDIA_PERSON_CREATE: &str = "
+    CREATE TABLE IF NOT EXISTS media_person (
+        media_item_id INTEGER,
+        name TEXT NOT NULL,
+        FOREIGN KEY(media_item_id) REFERENCES media_item(media_item_id)
+    )
+";
+const DB_MEDIA_PERSON_INSERT: &str = "
+    INSERT INTO media_person (media_item_id, name) VALUES (?1, ?2)
+";
+const DB_MEDIA_PERSON_DELETE_ALL: &str = "DELETE FROM media_person";
 
 const DB_ALBUM_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS album (
@@ -302,6 +374,7 @@ fn db_conn(path: &str) -> anyhow::Result<Connection> {
 
 fn db_prepare(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(DB_MEDIA_ITEM_CREATE, ())?;
+    conn.execute(DB_MEDIA_PERSON_CREATE, ())?;
     conn.execute(DB_ALBUM_CREATE, ())?;
     conn.execute(DB_ALBUM_FILE_CREATE, ())?;
     conn.execute(DB_CLASSIFIED_FILE_CREATE, ())?;
@@ -309,6 +382,7 @@ fn db_prepare(conn: &Connection) -> anyhow::Result<()> {
 
     // Clear existing rows before re-scanning. Delete children before parents so
     // foreign keys hold.
+    conn.execute(DB_MEDIA_PERSON_DELETE_ALL, ())?;
     conn.execute(DB_MEDIA_ITEM_DELETE_ALL, ())?;
     conn.execute(DB_ALBUM_FILE_DELETE_ALL, ())?;
     conn.execute(DB_ALBUM_DELETE_ALL, ())?;
@@ -369,6 +443,24 @@ mod tests {
                 .iter()
                 .any(|(path, ftype)| path == "Hello.mp4" && ftype == "Media")
         );
+
+        // Video dimensions are pulled from track metadata into the columns.
+        let (w, h): (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT width, height FROM media_item WHERE media_path = ?1",
+            ["Hello.mp4"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!(w, Some(854));
+        assert_eq!(h, Some(480));
+
+        // With no supplemental or EXIF date, the video's guessed date comes from
+        // its embedded track creation time rather than the file timestamps.
+        let guessed: Option<String> = conn.query_row(
+            "SELECT guessed_datetime FROM media_item WHERE media_path = ?1",
+            ["Hello.mp4"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(guessed.as_deref(), Some("2024-04-18T11:24:26+00:00"));
 
         Ok(())
     }
@@ -521,6 +613,75 @@ mod tests {
         }
 
         // Cleanup
+        fs::remove_dir_all(test_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_db_scan_records_people_and_location() -> anyhow::Result<()> {
+        use std::io::Write;
+        crate::test_util::setup_log();
+        let test_dir = Path::new("target/test_db_people_location");
+        if test_dir.exists() {
+            fs::remove_dir_all(test_dir)?;
+        }
+        fs::create_dir_all(test_dir)?;
+
+        // A media file with an adjacent Google supplemental json carrying named
+        // people and geo coordinates. Canon_40D.jpg has no EXIF GPS coords, so
+        // the location must come from the supplemental data.
+        fs::copy("test/Canon_40D.jpg", test_dir.join("Canon_40D.jpg"))?;
+        let mut supp = fs::File::create(test_dir.join("Canon_40D.jpg.supplemental-metadata.json"))?;
+        write!(
+            supp,
+            r#"{{
+                "geoData": {{ "latitude": -21.6303194, "longitude": 152.2605444 }},
+                "people": [{{ "name": "Tim Tam" }}, {{ "name": "Ada Lovelace" }}]
+            }}"#
+        )?;
+
+        let conn = Connection::open_in_memory()?;
+        let test_dir_str = test_dir.to_string_lossy();
+        let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
+        run_db_scan(container, &conn)?;
+
+        // Location promoted into columns.
+        let (lat, long): (Option<f64>, Option<f64>) = conn.query_row(
+            "SELECT latitude, longitude FROM media_item WHERE media_path = ?1",
+            ["Canon_40D.jpg"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!(lat.map(|v| format!("{v:.4}")).as_deref(), Some("-21.6303"));
+        assert_eq!(long.map(|v| format!("{v:.4}")).as_deref(), Some("152.2605"));
+
+        // EXIF camera and dimension details promoted into columns.
+        let (make, model, width, height): (
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        ) = conn.query_row(
+            "SELECT camera_make, camera_model, width, height
+             FROM media_item WHERE media_path = ?1",
+            ["Canon_40D.jpg"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        assert_eq!(make.as_deref(), Some("Canon"));
+        assert_eq!(model.as_deref(), Some("Canon EOS 40D"));
+        assert!(width.is_some_and(|w| w > 0), "width recorded");
+        assert!(height.is_some_and(|h| h > 0), "height recorded");
+
+        // People promoted into their own queryable table, joined by media_item_id.
+        let mut stmt = conn.prepare(
+            "SELECT p.name FROM media_person p
+             JOIN media_item m ON m.media_item_id = p.media_item_id
+             WHERE m.media_path = ?1 ORDER BY p.name",
+        )?;
+        let names: Vec<String> = stmt
+            .query_map(["Canon_40D.jpg"], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(names, vec!["Ada Lovelace", "Tim Tam"]);
+
         fs::remove_dir_all(test_dir)?;
         Ok(())
     }
