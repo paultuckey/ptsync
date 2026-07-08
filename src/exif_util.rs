@@ -59,12 +59,15 @@ pub(crate) fn parse_exif_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<O
                 }
                 m.insert(tag_name, s);
             }
-            if let Some(gps_info) = exif_iter.parse_gps().ok().flatten() {
-                lat = gps_info.latitude_decimal();
-                long = gps_info.longitude_decimal();
-                if lat.is_some() && long.is_some() {
-                    ps_gps_info = Some(gps_info.to_iso6709());
-                }
+            if let Some(gps_info) = exif_iter.parse_gps().ok().flatten()
+                && let Some((la, lo)) = crate::util::non_zero_coords(
+                    gps_info.latitude_decimal(),
+                    gps_info.longitude_decimal(),
+                )
+            {
+                lat = Some(la);
+                long = Some(lo);
+                ps_gps_info = Some(gps_info.to_iso6709());
             }
         }
         Err(e) => {
@@ -97,6 +100,32 @@ fn field_to_opt_string(field: &ExifIterEntry) -> Option<String> {
 
 fn field_value(exif: &PsExifInfo, code: ExifTag) -> Option<String> {
     exif.tags.get(&code.to_string()).cloned()
+}
+
+/// Camera manufacturer (EXIF `Make`), e.g. `Canon`.
+pub(crate) fn camera_make(exif: &PsExifInfo) -> Option<String> {
+    field_value(exif, ExifTag::Make)
+}
+
+/// Camera model (EXIF `Model`), e.g. `Canon EOS 40D`.
+pub(crate) fn camera_model(exif: &PsExifInfo) -> Option<String> {
+    field_value(exif, ExifTag::Model)
+}
+
+/// Image width in pixels. Prefers the Exif-IFD pixel dimension, falling back to
+/// the IFD0 `ImageWidth`. `None` when neither is present or numeric.
+pub(crate) fn image_width(exif: &PsExifInfo) -> Option<i64> {
+    field_value(exif, ExifTag::ExifImageWidth)
+        .or_else(|| field_value(exif, ExifTag::ImageWidth))
+        .and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// Image height in pixels. Prefers the Exif-IFD pixel dimension, falling back to
+/// the IFD0 `ImageHeight`. `None` when neither is present or numeric.
+pub(crate) fn image_height(exif: &PsExifInfo) -> Option<i64> {
+    field_value(exif, ExifTag::ExifImageHeight)
+        .or_else(|| field_value(exif, ExifTag::ImageHeight))
+        .and_then(|s| s.trim().parse::<i64>().ok())
 }
 
 pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>) -> Option<String> {
@@ -203,6 +232,21 @@ mod tests {
             .get(&ExifTag::SubSecTimeOriginal.to_string())
             .ok_or_else(|| anyhow!("SubSecTimeOriginal tag not found"))?;
         assert_eq!(sub_sec_time_original.clone(), "00".to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn test_camera_and_dimensions_accessors() -> anyhow::Result<()> {
+        use anyhow::anyhow;
+        crate::test_util::setup_log();
+        let c = OsFileSystem::new("test");
+        let reader = c.open("Canon_40D.jpg")?;
+        let info = parse_exif_info(reader)?.ok_or_else(|| anyhow!("Failed to parse exif"))?;
+
+        assert_eq!(camera_make(&info).as_deref(), Some("Canon"));
+        assert_eq!(camera_model(&info).as_deref(), Some("Canon EOS 40D"));
+        assert!(image_width(&info).is_some_and(|w| w > 0), "width parsed");
+        assert!(image_height(&info).is_some_and(|h| h > 0), "height parsed");
         Ok(())
     }
 

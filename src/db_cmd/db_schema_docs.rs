@@ -10,6 +10,7 @@ const DOC_PATH: &str = "docs/db-schema.md";
 fn create_statements() -> Vec<&'static str> {
     vec![
         super::DB_MEDIA_ITEM_CREATE,
+        super::DB_MEDIA_PERSON_CREATE,
         super::DB_ALBUM_CREATE,
         super::DB_ALBUM_FILE_CREATE,
         super::DB_CLASSIFIED_FILE_CREATE,

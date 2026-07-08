@@ -5,6 +5,7 @@
 
 ```mermaid
 erDiagram
+    media_item ||--o{ media_person : "media_item_id"
     album ||--o{ album_file : "album_id"
     media_item {
         INTEGER media_item_id PK
@@ -18,6 +19,16 @@ erDiagram
         DATETIME modified_at
         DATETIME created_at
         INTEGER file_size
+        REAL latitude
+        REAL longitude
+        TEXT camera_make
+        TEXT camera_model
+        INTEGER width
+        INTEGER height
+    }
+    media_person {
+        INTEGER media_item_id FK
+        TEXT name
     }
     album {
         INTEGER album_id PK
