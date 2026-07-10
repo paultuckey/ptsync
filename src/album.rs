@@ -217,7 +217,7 @@ pub(crate) fn build_album_md(
     md.push_str(&generated_note);
     md.push_str(&format!("# {}", &album.title));
     md.push_str("\n\n");
-    for f in album.files.clone() {
+    for f in &album.files {
         let target_path_o: Option<String>;
         if let Some(all_media) = all_media_o {
             target_path_o = all_media
@@ -225,7 +225,7 @@ pub(crate) fn build_album_md(
                 .find(|m| {
                     m.accurate_file_type != AccurateFileType::Unsupported
                         && m.quick_file_type == QuickFileType::Media
-                        && m.original_path.iter().any(|p| p.eq(&f))
+                        && m.original_path.iter().any(|p| p.eq(f))
                 })
                 .and_then(|m| {
                     let long_checksum = &m.hash_info.long_checksum;
@@ -239,7 +239,7 @@ pub(crate) fn build_album_md(
             // intentionally use the original path
             target_path_o = Some(f.clone());
         }
-        if let Some(target_path) = target_path_o.clone() {
+        if let Some(target_path) = target_path_o {
             let alt_text = "Photo";
             let path = format!("{media_relative_path}{target_path}");
             md.push_str(&format!("\n![{alt_text}]({path})"));

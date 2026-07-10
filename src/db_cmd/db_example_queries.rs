@@ -1,9 +1,8 @@
 //! Verifies that every SQL snippet in `docs/db-example-queries.md` is valid by
 //! running it against a freshly scanned database.
 
-use super::run_db_scan;
+use super::{open_conn, run_db_scan};
 use crate::fs::{FileSystem, OsFileSystem};
-use rusqlite::Connection;
 use std::sync::Arc;
 
 const DOC_PATH: &str = "docs/db-example-queries.md";
@@ -33,14 +32,14 @@ fn extract_sql_blocks(markdown: &str) -> Vec<String> {
     blocks
 }
 
-#[test]
-fn db_example_queries_are_valid() -> anyhow::Result<()> {
+#[tokio::test]
+async fn db_example_queries_are_valid() -> anyhow::Result<()> {
     crate::test_util::setup_log();
 
     // Build a database with the current schema from the test fixtures.
-    let conn = Connection::open_in_memory()?;
+    let (_db, conn) = open_conn(":memory:").await?;
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-    run_db_scan(container, &conn)?;
+    run_db_scan(container, &conn, false, "test").await?;
 
     let markdown = std::fs::read_to_string(DOC_PATH)?;
     let queries = extract_sql_blocks(&markdown);
@@ -51,14 +50,14 @@ fn db_example_queries_are_valid() -> anyhow::Result<()> {
     );
 
     for (i, sql) in queries.iter().enumerate() {
-        // prepare() compiles the SQL; iterating the rows executes it fully.
-        let run = || -> rusqlite::Result<()> {
-            let mut stmt = conn.prepare(sql)?;
-            let mut rows = stmt.query([])?;
-            while rows.next()?.is_some() {}
+        // query() compiles the SQL; draining the rows executes it fully.
+        let result: turso::Result<()> = async {
+            let mut rows = conn.query(sql, ()).await?;
+            while rows.next().await?.is_some() {}
             Ok(())
-        };
-        run().map_err(|e| {
+        }
+        .await;
+        result.map_err(|e| {
             anyhow::anyhow!(
                 "example query #{} in {DOC_PATH} failed: {e}\n\n{sql}",
                 i + 1

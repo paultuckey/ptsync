@@ -1,13 +1,20 @@
-use crate::db_cmd::HashInfo;
 use crate::file_type::{QuickFileType, find_quick_file_type};
 use crate::fs::{FileSystem, OsFileSystem};
 use anyhow::Result;
 use chrono::DateTime;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use tracing::{debug, warn};
 use unicode_normalization::UnicodeNormalization;
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all(serialize = "camelCase"))]
+pub(crate) struct HashInfo {
+    pub(crate) short_checksum: String,
+    pub(crate) long_checksum: String,
+}
 
 /// Similar to github generate a short and long hash from the bytes
 pub(crate) fn checksum_bytes<R: Read + Seek>(reader: &mut R) -> Result<HashInfo> {

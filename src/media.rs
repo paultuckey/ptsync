@@ -1,4 +1,3 @@
-use crate::db_cmd::HashInfo;
 use crate::exif_util::{PsExifInfo, best_guess_taken_exif, parse_exif_info};
 use crate::file_type::{
     AccurateFileType, MetadataType, QuickFileType, determine_file_type, file_ext_from_file_type,
@@ -6,15 +5,15 @@ use crate::file_type::{
 };
 use crate::supplemental_info::PsSupplementalInfo;
 use crate::track_util::{PsTrackInfo, parse_track_info};
-use crate::util::ScanInfo;
+use crate::util::{HashInfo, ScanInfo};
 use anyhow::anyhow;
 use chrono::{DateTime, Datelike, Timelike};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::{Read, Seek};
 use tracing::warn;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all(serialize = "camelCase"))]
 pub(crate) struct MediaFileInfo {
     pub(crate) original_file_this_run: String,
     pub(crate) original_path: Vec<String>,
@@ -31,7 +30,7 @@ pub(crate) struct MediaFileInfo {
     pub(crate) file_size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MediaFileDerivedInfo {
     /// Desired path relative to output directory, minus the dot and file extension (eg, 2025/09/10/1234-56-789)
     pub(crate) desired_media_path: Option<String>,

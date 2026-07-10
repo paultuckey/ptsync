@@ -169,8 +169,8 @@ fn merge_into(canonical: &mut MediaFileInfo, dup: MediaFileInfo) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_cmd::HashInfo;
     use crate::fs::OsFileSystem;
+    use crate::util::HashInfo;
     use anyhow::anyhow;
 
     /// Build a media entry with a controllable source path and content hash so

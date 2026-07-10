@@ -1,5 +1,5 @@
 use nom_exif::{ExifIter, ExifIterEntry, ExifTag, MediaKind, MediaParser, MediaSource};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use tracing::debug;
@@ -15,8 +15,8 @@ store in db as json
 
  */
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all(serialize = "camelCase"))]
 pub(crate) struct PsExifInfo {
     // dates as ISO 8601
     pub(crate) tags: HashMap<String, String>,

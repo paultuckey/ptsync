@@ -8,15 +8,7 @@ const DOC_PATH: &str = "docs/db-schema.md";
 
 /// Every `CREATE TABLE` statement, in the order the tables are created.
 fn create_statements() -> Vec<&'static str> {
-    vec![
-        super::DB_MEDIA_ITEM_CREATE,
-        super::DB_PERSON_CREATE,
-        super::DB_MEDIA_PERSON_CREATE,
-        super::DB_ALBUM_CREATE,
-        super::DB_ALBUM_FILE_CREATE,
-        super::DB_CLASSIFIED_FILE_CREATE,
-        super::DB_CLASSIFIED_DIR_CREATE,
-    ]
+    super::SCHEMA_TABLE_STATEMENTS.to_vec()
 }
 
 struct Column {

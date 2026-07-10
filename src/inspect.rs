@@ -120,12 +120,12 @@ pub(crate) fn analyze_file(
     media_si: &ScanInfo,
 ) -> anyhow::Result<Option<MediaFileInfo>> {
     let mut supp_info_o = None;
-    let supp_info_path_o = detect_supplemental_info(&media_si.file_path.clone(), root);
+    let supp_info_path_o = detect_supplemental_info(&media_si.file_path, root);
     if let Some(supp_info_path) = supp_info_path_o {
         supp_info_o = load_supplemental_info(&supp_info_path, root);
     }
 
-    let mut reader = root.open(&media_si.file_path.clone())?;
+    let mut reader = root.open(&media_si.file_path)?;
     let hash_info_o = checksum_bytes(&mut reader).ok();
     let Some(hash_info) = hash_info_o else {
         debug!(

@@ -1,10 +1,10 @@
 use nom_exif::{MediaKind, MediaParser, MediaSource, TrackInfo, TrackInfoTag};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
 use tracing::{info, warn};
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all(serialize = "camelCase"))]
 pub(crate) struct PsTrackInfo {
     pub width: Option<u64>,
     pub height: Option<u64>,

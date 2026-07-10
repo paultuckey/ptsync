@@ -63,6 +63,11 @@ enum Commands {
         /// Path to the sqlite database file to write
         #[arg(short, long, default_value = "db.sqlite")]
         output: String,
+
+        /// Clear existing rows before scanning; also rebuilds the database if
+        /// its schema is out of date
+        #[arg(long, action = clap::ArgAction::Set, default_value_t = false)]
+        clear: bool,
     },
     /// Sync files in an archive or directory into a standardised directory structure
     Sync {
@@ -117,9 +122,10 @@ fn go() -> anyhow::Result<()> {
             debug,
             input,
             output,
+            clear,
         } => {
             enable_debug(debug);
-            db_cmd::main(&input, &output)?
+            db_cmd::main(&input, &output, clear)?
         }
         Commands::Sync {
             debug,
@@ -148,7 +154,10 @@ fn go() -> anyhow::Result<()> {
 fn enable_debug(debug: bool) {
     let filter = tracing_subscriber::filter::Targets::new()
         .with_default(if debug { Level::DEBUG } else { Level::INFO })
-        .with_target("nom_exif", Level::ERROR);
+        .with_target("nom_exif", Level::ERROR)
+        .with_target("turso_core", Level::WARN)
+        .with_target("turso_sdk_kit", Level::WARN)
+        .with_target("turso_sync_engine", Level::WARN);
     let registry_layer = tracing_subscriber::fmt::layer()
         .with_writer(progress::IndicatifWriter)
         .with_target(false);
