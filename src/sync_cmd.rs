@@ -245,10 +245,10 @@ pub(crate) fn write_media(
         };
     info!("Output {:?}", desired_output_path_with_ext);
     let reader = input_container.open(&media_file.original_file_this_run)?;
-    output_container.write(dry_run, &desired_output_path_with_ext.clone(), reader);
+    output_container.write(dry_run, &desired_output_path_with_ext, reader);
     output_container.set_modified(
         dry_run,
-        &desired_output_path_with_ext.clone(),
+        &desired_output_path_with_ext,
         &media_file.modified,
     );
     Ok(desired_output_path_with_ext)

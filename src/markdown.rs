@@ -346,16 +346,18 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
     if let Some(value_o) = root.get(&Yaml::String(key.clone())) {
         match value_o.clone() {
             Yaml::Array(po) => {
-                let mut new_po = po.clone();
+                let mut additions = Vec::new();
                 for v in arr {
                     if po.contains(&Yaml::String(v.clone())) {
                         debug!("Path original {v} already exists in {key}");
                     } else {
                         debug!("Adding {v} to {key}");
-                        new_po.push(Yaml::String(v.to_string()));
+                        additions.push(Yaml::String(v.to_string()));
                     }
                 }
-                if !new_po.is_empty() {
+                if !additions.is_empty() {
+                    let mut new_po = po;
+                    new_po.extend(additions);
                     root[&Yaml::String(key.to_string())] = Yaml::Array(new_po);
                 }
                 return;
@@ -372,7 +374,6 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
     }
     debug!("Adding {key} to YAML");
     let arr_y = arr
-        .clone()
         .iter()
         .map(|x| Yaml::String(x.to_string()))
         .collect::<Vec<Yaml>>();

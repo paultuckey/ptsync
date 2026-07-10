@@ -102,13 +102,13 @@ mod tests {
         // long lat limited to 6 decimal places
         let latitude = r
             .geo_data
-            .clone()
+            .as_ref()
             .ok_or_else(|| anyhow!("Missing geo_data"))?
             .latitude
             .ok_or_else(|| anyhow!("Missing latitude"))?;
         let longitude = r
             .geo_data
-            .clone()
+            .as_ref()
             .ok_or_else(|| anyhow!("Missing geo_data"))?
             .longitude
             .ok_or_else(|| anyhow!("Missing longitude"))?;
@@ -116,7 +116,6 @@ mod tests {
         assert_eq!(format!("{longitude:.4}"), "152.2605".to_string());
         let p = r
             .people
-            .clone()
             .first()
             .ok_or_else(|| anyhow!("Missing person"))?
             .clone();
