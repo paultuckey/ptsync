@@ -17,3 +17,4 @@ target/
 output/
 input/
 db.sqlite
+db.sqlite-journal

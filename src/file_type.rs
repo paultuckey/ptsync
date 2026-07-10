@@ -63,6 +63,20 @@ pub(crate) fn file_ext_from_file_type(ff: &AccurateFileType) -> String {
     }
 }
 
+/// Coarse photo/video classification for the `media_item.kind` column:
+/// `Some("p")` for images, `Some("v")` for videos, and `None` for anything that
+/// is neither (e.g. an unidentifiable file that slipped through the media filter).
+pub(crate) fn media_kind(ff: &AccurateFileType) -> Option<&'static str> {
+    match ff {
+        AccurateFileType::Jpg
+        | AccurateFileType::Png
+        | AccurateFileType::Heic
+        | AccurateFileType::Gif => Some("p"),
+        AccurateFileType::Mp4 | AccurateFileType::Mov => Some("v"),
+        AccurateFileType::Json | AccurateFileType::Csv | AccurateFileType::Unsupported => None,
+    }
+}
+
 pub(crate) enum MetadataType {
     ExifTags,
     Track,
