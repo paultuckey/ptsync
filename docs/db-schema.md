@@ -10,7 +10,7 @@ erDiagram
     album ||--o{ album_file : "album_id"
     media_item ||--o{ album_file : "media_item_id"
     media_item {
-        INTEGER media_item_id PK
+        TEXT media_item_id PK
         TEXT media_path
         TEXT long_hash
         TEXT short_hash
@@ -39,7 +39,7 @@ erDiagram
         TEXT name
     }
     media_person {
-        INTEGER media_item_id FK
+        TEXT media_item_id FK
         TEXT person_id FK
     }
     album {
@@ -49,7 +49,7 @@ erDiagram
     }
     album_file {
         TEXT album_id FK
-        INTEGER media_item_id FK
+        TEXT media_item_id FK
     }
     classified_file {
         INTEGER classified_file_id PK

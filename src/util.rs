@@ -199,12 +199,24 @@ pub(crate) fn person_id_for(name: &str) -> String {
     stable_hash16(&normalized)
 }
 
-/// Stable identifier for an album from its path. Paths are case-sensitive, so
-/// only surrounding whitespace and Unicode form (NFC) are normalized before
-/// hashing.
-pub(crate) fn album_id_for(album_path: &str) -> String {
-    let normalized: String = album_path.trim().nfc().collect();
+/// Stable id derived from a path: trimmed and Unicode-normalized (NFC) before
+/// hashing. Paths are case-sensitive, so case is preserved. Reproducible across
+/// machines, runs, and database rebuilds for the same archive layout.
+fn path_id(path: &str) -> String {
+    let normalized: String = path.trim().nfc().collect();
     stable_hash16(&normalized)
+}
+
+/// Stable identifier for an album from its path (see [`path_id`]).
+pub(crate) fn album_id_for(album_path: &str) -> String {
+    path_id(album_path)
+}
+
+/// Stable identifier for a media item from its path within the archive. Keyed on
+/// the path, not the content, so duplicate files (same bytes, different paths)
+/// stay as distinct rows (one row per file).
+pub(crate) fn media_item_id_for(media_path: &str) -> String {
+    path_id(media_path)
 }
 
 #[cfg(test)]
@@ -275,6 +287,23 @@ mod tests {
         let decomposed = "Jose\u{0301}";
         assert_ne!(precomposed.as_bytes(), decomposed.as_bytes());
         assert_eq!(person_id_for(precomposed), person_id_for(decomposed));
+    }
+
+    #[test]
+    fn test_media_item_id_stable() {
+        let a = media_item_id_for("Google Photos/Holiday/IMG_0001.jpg");
+        assert_eq!(a.len(), 16);
+        // Deterministic and path-derived; different paths differ.
+        assert_eq!(
+            a,
+            media_item_id_for("  Google Photos/Holiday/IMG_0001.jpg  ")
+        );
+        assert_ne!(a, media_item_id_for("Google Photos/Holiday/IMG_0002.jpg"));
+        // Path-keyed, not content-keyed: two paths never share an id.
+        assert_ne!(
+            media_item_id_for("a/IMG.jpg"),
+            media_item_id_for("b/IMG.jpg")
+        );
     }
 
     #[test]

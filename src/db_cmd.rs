@@ -100,12 +100,12 @@ fn run_db_scan(container: Arc<dyn FileSystem>, conn: &Connection) -> anyhow::Res
                 // Album members reference scanned file paths; link them to the
                 // media_item row for that path. Skip any that weren't indexed as
                 // media (e.g. an unsupported type).
-                let media_item_id: Option<i64> = album_tx
+                let media_item_id: Option<String> = album_tx
                     .query_row(DB_MEDIA_ITEM_ID_BY_PATH, [file.as_str()], |r| r.get(0))
                     .optional()?;
                 match media_item_id {
                     Some(id) => {
-                        album_tx.execute(DB_ALBUM_FILE_INSERT, (&album_id, id))?;
+                        album_tx.execute(DB_ALBUM_FILE_INSERT, (&album_id, &id))?;
                     }
                     None => debug!("Album {:?} references unindexed file {file:?}", album.title),
                 }
@@ -217,7 +217,9 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
 
     let long_hash = &info.hash_info.long_checksum;
     let short_hash = &info.hash_info.short_checksum;
+    let media_item_id = crate::util::media_item_id_for(&info.original_file_this_run);
     let item = DbMediaItem {
+        media_item_id: media_item_id.clone(),
         media_path: info.original_file_this_run.clone(),
         long_hash: long_hash.to_string(),
         short_hash: short_hash.to_string(),
@@ -266,12 +268,12 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         &item.display_rotate,
         &item.geohash,
         &item.kind,
+        &item.media_item_id,
     ])?;
 
     // Named people come from Google supplemental metadata. Each name resolves to
     // a stable, content-derived person id (shared across items and rebuilds), so
     // we upsert the person then link it to this media item.
-    let media_item_id = conn.last_insert_rowid();
     if let Some(supp) = &info.supp_info {
         let mut stmt_person = conn.prepare_cached(DB_PERSON_INSERT)?;
         let mut stmt_media_person = conn.prepare_cached(DB_MEDIA_PERSON_INSERT)?;
@@ -279,7 +281,7 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
             if let Some(name) = &person.name {
                 let person_id = crate::util::person_id_for(name);
                 stmt_person.execute((&person_id, name))?;
-                stmt_media_person.execute((media_item_id, &person_id))?;
+                stmt_media_person.execute((&media_item_id, &person_id))?;
             }
         }
     }
@@ -289,6 +291,8 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
 
 #[derive(Debug)]
 struct DbMediaItem {
+    // stable hash of media_path; reproducible across runs/machines/clears
+    media_item_id: String,
     media_path: String,
     long_hash: String,
     short_hash: String,
@@ -325,7 +329,7 @@ struct DbMediaItem {
 }
 const DB_MEDIA_ITEM_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS media_item  (
-        media_item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_item_id TEXT PRIMARY KEY, -- stable hash of the media path
         media_path TEXT NOT NULL,
         long_hash TEXT,
         short_hash TEXT,
@@ -354,8 +358,8 @@ const DB_MEDIA_ITEM_INSERT: &str = "
     INSERT INTO media_item (media_path, long_hash, short_hash, quick_file_type,
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
         latitude, longitude, camera_make, camera_model, width, height,
-        duration_ms, orientation, display_mirrored, display_rotate, geohash, kind)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+        duration_ms, orientation, display_mirrored, display_rotate, geohash, kind, media_item_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
 ";
 const DB_MEDIA_ITEM_ID_BY_PATH: &str = "SELECT media_item_id FROM media_item WHERE media_path = ?1";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
@@ -375,7 +379,7 @@ const DB_PERSON_DELETE_ALL: &str = "DELETE FROM person";
 
 const DB_MEDIA_PERSON_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS media_person (
-        media_item_id INTEGER,
+        media_item_id TEXT,
         person_id TEXT,
         FOREIGN KEY(media_item_id) REFERENCES media_item(media_item_id),
         FOREIGN KEY(person_id) REFERENCES person(person_id)
@@ -397,7 +401,7 @@ const DB_ALBUM_CREATE: &str = "
 const DB_ALBUM_FILE_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS album_file (
         album_id TEXT,
-        media_item_id INTEGER,
+        media_item_id TEXT,
         FOREIGN KEY(album_id) REFERENCES album(album_id),
         FOREIGN KEY(media_item_id) REFERENCES media_item(media_item_id)
     )
@@ -570,7 +574,11 @@ mod tests {
             ["Hello.mp4"],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        assert_eq!(video_display, (false, 0), "no EXIF defaults to no transform");
+        assert_eq!(
+            video_display,
+            (false, 0),
+            "no EXIF defaults to no transform"
+        );
 
         // With no supplemental or EXIF date, the video's guessed date comes from
         // its embedded track creation time rather than the file timestamps.
@@ -828,6 +836,14 @@ mod tests {
         )?;
         assert_eq!(tim_id, crate::util::person_id_for("TIM TAM"));
 
+        // media_item_id is the stable hash of the media path.
+        let mid: String = conn.query_row(
+            "SELECT media_item_id FROM media_item WHERE media_path = ?1",
+            ["Canon_40D.jpg"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(mid, crate::util::media_item_id_for("Canon_40D.jpg"));
+
         fs::remove_dir_all(test_dir)?;
         Ok(())
     }
@@ -854,8 +870,17 @@ mod tests {
         let test_dir_str = test_dir.to_string_lossy();
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
 
+        let media_item_id = |conn: &Connection| -> anyhow::Result<String> {
+            Ok(conn.query_row(
+                "SELECT media_item_id FROM media_item WHERE media_path = ?1",
+                ["Canon_40D.jpg"],
+                |r| r.get(0),
+            )?)
+        };
+
         // First run populates album (1 row) and album_file (1 row).
         run_db_scan(container.clone(), &conn)?;
+        let id_first = media_item_id(&conn)?;
 
         // Second run must not hit "FOREIGN KEY constraint failed" while clearing
         // the previous run's rows.
@@ -867,6 +892,14 @@ mod tests {
         let album_file_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM album_file", [], |r| r.get(0))?;
         assert_eq!(album_file_count, 1, "album_file rows after re-run");
+
+        // The media_item id is reproducible: a clear + rescan yields the same id,
+        // unlike the previous autoincrement rowid.
+        assert_eq!(
+            id_first,
+            media_item_id(&conn)?,
+            "media_item_id stable across runs"
+        );
 
         fs::remove_dir_all(test_dir)?;
         Ok(())

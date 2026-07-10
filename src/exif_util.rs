@@ -149,7 +149,7 @@ fn orientation_transform(raw: &str) -> (bool, i32) {
         "4" => (true, 180),
         "5" => (true, -90), // mirror horizontal + rotate 270 CW
         "6" => (false, 90),
-        "7" => (true, 90), // mirror horizontal + rotate 90 CW
+        "7" => (true, 90),   // mirror horizontal + rotate 90 CW
         "8" => (false, -90), // rotate 270 CW
         _ => (false, 0),
     }
