@@ -10,6 +10,8 @@ Let's use the most basic rust we can to make the code as approachable as possibl
 - Only use `unwrap()` in tests
 - Use `.clone()` to avoid hard things
 - Don't use `async`/`await` (this type of I/O heavy work may not benefit that much)
+- Use `anyhow::Result` for fallible functions and propagate errors with `?`.
+- Write unit tests within the module (typically a `tests` module at the bottom of the file), and call `crate::test_util::setup_log()` at the start of tests to enable logging output.
 
 ## Technical goals
 
@@ -18,6 +20,41 @@ Let's use the most basic rust we can to make the code as approachable as possibl
 - It should run as quickly as possible
 - It should work and be documented clearly for the languages of at least half to world population: 
   - English (primary language, source code comments), Mandarin, Hindi, Spanish
+
+## Tech Stack
+
+Keep the tech stack as small and as simple as possible. Use only the basics.
+
+- **Language**: Rust
+- **CLI Framework**: `clap`
+- **Logging**: `tracing`
+- **Database**: `rusqlite` (SQLite)
+- **Error Handling**: `anyhow`
+- **Serialization**: `serde`, `serde_json`, `yaml-rust2`
+- **Regex**: `regex` (for file pattern matching)
+
+## Project Structure
+
+The source code is located in `src/`:
+
+-   **`main.rs`**: Entry point. Defines the CLI structure using `clap` and orchestrates subcommands.
+-   **`*_cmd.rs`**: Implementations for specific CLI commands:
+  -   `sync_cmd.rs`: Core logic for syncing files, deduplication, and writing to the output directory.
+  -   `db_cmd.rs`: Logic for scanning files and populating a SQLite database with metadata. Also stores each file/directory's known-pattern classification (via `classify.rs`) in the `classified_file`/`classified_dir` tables.
+  -   `info_cmd.rs`: Inspects and displays details for a single file.
+-   **`classify.rs`**: Classifies input directory/zip paths against known Google Takeout / iCloud file and directory patterns using regex. Consumed by `db_cmd.rs` (not a standalone command).
+-   **`media.rs`**: Core data structures (`MediaFileInfo`, `MediaFileDerivedInfo`) and logic for extracting metadata, calculating checksums, and deriving target paths/dates.
+-   **`album.rs`**: Logic for parsing album metadata (from CSV or JSON) and generating album Markdown files.
+-   **`markdown.rs`**: Utilities for reading/writing Markdown files and managing YAML frontmatter.
+-   **`util.rs`**: General utilities, including the `PsContainer` trait which abstracts file system access (supporting both directories and zip files).
+-   **`test_util.rs`**: Helper functions for testing, primarily logging setup.
+
+## Key Concepts
+
+-   **PsContainer**: An abstraction to treat directories and zip files uniformly.
+-   **ScanInfo**: Basic information about a file found during a scan.
+-   **MediaFileInfo**: detailed metadata about a media file (EXIF, checksum, etc.).
+-   **Supplemental Info**: JSON sidecar files (often from Google Takeout) containing metadata like creation time and GPS coordinates.
 
 ## Commands
 
