@@ -67,10 +67,6 @@ cargo clippy --tests
 ```
 
 ```shell
-cargo run
-```
-
-```shell
 cargo test
 ```
 

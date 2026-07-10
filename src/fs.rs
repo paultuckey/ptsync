@@ -18,10 +18,7 @@ impl<T: Read + Seek> ReadSeek for T {}
 
 #[derive(Debug, Clone)]
 pub struct FileMetadata {
-    #[allow(dead_code)]
     pub len: u64,
-    #[allow(dead_code)]
-    pub is_dir: bool,
     pub modified: Option<i64>,
     pub created: Option<i64>,
 }
@@ -157,7 +154,6 @@ impl FileSystem for OsFileSystem {
         let m = fs::metadata(&p)?;
         Ok(FileMetadata {
             len: m.len(),
-            is_dir: m.is_dir(),
             modified: m
                 .modified()
                 .ok()
@@ -201,8 +197,6 @@ fn scan_dir_recursively(files: &mut Vec<String>, dir_path: &Path, root_path: &Pa
 }
 
 pub struct ZipFileSystem {
-    #[allow(dead_code)]
-    zip_file: String,
     zip: Mutex<ZipArchive<File>>,
     file_names: Vec<String>,
     metadata_cache: HashMap<String, FileMetadata>,
@@ -245,14 +239,12 @@ impl ZipFileSystem {
                 name_s,
                 FileMetadata {
                     len: file.size(),
-                    is_dir: false,
                     modified,
                     created,
                 },
             );
         }
         Ok(Self {
-            zip_file: zip_file.to_string(),
             zip: Mutex::new(zip),
             file_names,
             metadata_cache,
