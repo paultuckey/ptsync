@@ -148,7 +148,10 @@ fn go() -> anyhow::Result<()> {
 fn enable_debug(debug: bool) {
     let filter = tracing_subscriber::filter::Targets::new()
         .with_default(if debug { Level::DEBUG } else { Level::INFO })
-        .with_target("nom_exif", Level::ERROR);
+        .with_target("nom_exif", Level::ERROR)
+        .with_target("turso_core", Level::WARN)
+        .with_target("turso_sdk_kit", Level::WARN)
+        .with_target("turso_sync_engine", Level::WARN);
     let registry_layer = tracing_subscriber::fmt::layer()
         .with_writer(progress::IndicatifWriter)
         .with_target(false);
