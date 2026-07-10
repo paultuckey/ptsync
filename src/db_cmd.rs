@@ -4,7 +4,7 @@ use crate::fs::{FileSystem, OsFileSystem, ZipFileSystem};
 use crate::inspect::inspect_media_files;
 use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
 use crate::progress::Progress;
-use crate::util::{ScanInfo, scan_fs, geohash_encode, orientation, GEOHASH_PRECISION};
+use crate::util::{GEOHASH_PRECISION, ScanInfo, geohash_encode, orientation, scan_fs};
 use anyhow::anyhow;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -188,8 +188,7 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         Some((lat, long)) => (Some(lat), Some(long)),
         None => (None, None),
     };
-    let geohash =
-        lat_long.map(|(lat, long)| geohash_encode(lat, long, GEOHASH_PRECISION));
+    let geohash = lat_long.map(|(lat, long)| geohash_encode(lat, long, GEOHASH_PRECISION));
     // Camera and dimensions come from EXIF for images; for videos they live in
     // the track metadata, so fall back to that when EXIF has nothing.
     let exif = info.exif_info.as_ref();
@@ -207,7 +206,12 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         .and_then(crate::exif_util::image_height)
         .or_else(|| track.and_then(|t| t.height).map(|h| h as i64));
     let duration_ms = track.and_then(|t| t.duration_ms).map(|d| d as i64);
+    // Videos carry a track duration; photos do not. Store the resolved kind so
+    // queries can filter on 'p'/'v' instead of inspecting duration_ms.
+    let kind = if duration_ms.is_some() { "v" } else { "p" };
     let orientation = orientation(width, height).map(str::to_string);
+    // Raw EXIF rotation/mirror flag; distinct from the derived aspect orientation.
+    let rotation = exif.and_then(crate::exif_util::exif_orientation);
     let long_hash = &info.hash_info.long_checksum;
     let short_hash = &info.hash_info.short_checksum;
     let item = DbMediaItem {
@@ -229,9 +233,11 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         height,
         duration_ms,
         orientation,
+        rotation,
         geohash,
+        kind,
     };
-    // 19 columns exceeds rusqlite's tuple Params impl (max 16), so use params!.
+    // 21 columns exceeds rusqlite's tuple Params impl (max 16), so use params!.
     let mut stmt = conn.prepare_cached(DB_MEDIA_ITEM_INSERT)?;
     stmt.execute(rusqlite::params![
         &item.media_path,
@@ -252,7 +258,9 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         &item.height,
         &item.duration_ms,
         &item.orientation,
+        &item.rotation,
         &item.geohash,
+        &item.kind,
     ])?;
 
     // Named people come from Google supplemental metadata. Each name resolves to
@@ -301,8 +309,12 @@ struct DbMediaItem {
     duration_ms: Option<i64>,
     // portrait/landscape/square, None if dimensions unknown
     orientation: Option<String>,
+    // raw EXIF Orientation value ("1"-"8"), None if no EXIF
+    rotation: Option<String>,
     // geohash of the coordinates, None if no location
     geohash: Option<String>,
+    // 'p' for photo, 'v' for video
+    kind: &'static str,
 }
 const DB_MEDIA_ITEM_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS media_item  (
@@ -325,15 +337,17 @@ const DB_MEDIA_ITEM_CREATE: &str = "
         height INTEGER, -- image/video height in pixels, NULL if unknown
         duration_ms INTEGER, -- video duration in ms, NULL for photos
         orientation TEXT, -- portrait/landscape/square, NULL if dimensions unknown
-        geohash TEXT -- geohash of the coordinates, NULL if no location
+        rotation TEXT, -- raw EXIF Orientation value 1-8, NULL if no EXIF
+        geohash TEXT, -- geohash of the coordinates, NULL if no location
+        kind TEXT -- 'p' for photo, 'v' for video
     )
 ";
 const DB_MEDIA_ITEM_INSERT: &str = "
     INSERT INTO media_item (media_path, long_hash, short_hash, quick_file_type,
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
         latitude, longitude, camera_make, camera_model, width, height,
-        duration_ms, orientation, geohash)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+        duration_ms, orientation, rotation, geohash, kind)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
 ";
 const DB_MEDIA_ITEM_ID_BY_PATH: &str = "SELECT media_item_id FROM media_item WHERE media_path = ?1";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
@@ -519,6 +533,34 @@ mod tests {
             |r| r.get(0),
         )?;
         assert_eq!(photo_dur, None, "photos have no duration");
+
+        // `kind` tags each item as photo ('p') or video ('v').
+        let video_kind: String = conn.query_row(
+            "SELECT kind FROM media_item WHERE media_path = ?1",
+            ["Hello.mp4"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(video_kind, "v");
+        let photo_kind: String = conn.query_row(
+            "SELECT kind FROM media_item WHERE media_path = ?1",
+            ["Canon_40D.jpg"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(photo_kind, "p");
+
+        // Raw EXIF Orientation lands in `rotation` for photos; videos have none.
+        let photo_rot: Option<String> = conn.query_row(
+            "SELECT rotation FROM media_item WHERE media_path = ?1",
+            ["Canon_40D.jpg"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(photo_rot.as_deref(), Some("1"));
+        let video_rot: Option<String> = conn.query_row(
+            "SELECT rotation FROM media_item WHERE media_path = ?1",
+            ["Hello.mp4"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(video_rot, None, "videos have no EXIF orientation");
 
         // With no supplemental or EXIF date, the video's guessed date comes from
         // its embedded track creation time rather than the file timestamps.
@@ -825,3 +867,8 @@ mod tests {
 /// above and verifies the committed copy is current.
 #[cfg(test)]
 mod db_schema_docs;
+
+/// Test-only: checks every SQL snippet in `docs/db-example-queries.md` runs
+/// against a scanned database.
+#[cfg(test)]
+mod db_example_queries;

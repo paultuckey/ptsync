@@ -128,6 +128,13 @@ pub(crate) fn image_height(exif: &PsExifInfo) -> Option<i64> {
         .and_then(|s| s.trim().parse::<i64>().ok())
 }
 
+/// Raw EXIF `Orientation` tag as a string (`"1"`–`"8"`): the rotation/mirror
+/// flag for display. Distinct from the derived aspect orientation, and absent
+/// for media without EXIF (e.g. videos).
+pub(crate) fn exif_orientation(exif: &PsExifInfo) -> Option<String> {
+    field_value(exif, ExifTag::Orientation)
+}
+
 pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>) -> Option<String> {
     match exif {
         Some(exif) => {
@@ -247,6 +254,8 @@ mod tests {
         assert_eq!(camera_model(&info).as_deref(), Some("Canon EOS 40D"));
         assert!(image_width(&info).is_some_and(|w| w > 0), "width parsed");
         assert!(image_height(&info).is_some_and(|h| h > 0), "height parsed");
+        // Raw EXIF Orientation tag: "1" = normal for this sample.
+        assert_eq!(exif_orientation(&info).as_deref(), Some("1"));
         Ok(())
     }
 

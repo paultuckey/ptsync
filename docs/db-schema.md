@@ -29,7 +29,9 @@ erDiagram
         INTEGER height
         INTEGER duration_ms
         TEXT orientation
+        TEXT rotation
         TEXT geohash
+        TEXT kind
     }
     person {
         TEXT person_id PK
