@@ -6,7 +6,6 @@ use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
 use crate::progress::Progress;
 use crate::util::{GEOHASH_PRECISION, ScanInfo, geohash_encode, orientation, scan_fs};
 use anyhow::anyhow;
-use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -208,13 +207,6 @@ async fn db_classify_paths(
 
     conn.execute("COMMIT", ()).await?;
     Ok(())
-}
-
-#[derive(Serialize, Debug, Clone)]
-#[serde(rename_all(serialize = "camelCase"))]
-pub(crate) struct HashInfo {
-    pub(crate) short_checksum: String,
-    pub(crate) long_checksum: String,
 }
 
 async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
@@ -558,7 +550,10 @@ async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result<()> {
     // All create statements are `IF NOT EXISTS`: a no-op when the schema already
     // matches, and a full build on a fresh or just-dropped database. Tables first,
     // then indexes.
-    for stmt in SCHEMA_TABLE_STATEMENTS.iter().chain(&SCHEMA_INDEX_STATEMENTS) {
+    for stmt in SCHEMA_TABLE_STATEMENTS
+        .iter()
+        .chain(&SCHEMA_INDEX_STATEMENTS)
+    {
         conn.execute(*stmt, ()).await?;
     }
 
@@ -602,8 +597,8 @@ async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::db_utils::test_support::{create_zip_of_test_dir, one_row};
+    use super::*;
 
     /// Canonical text of the whole schema: line comments dropped and whitespace
     /// collapsed, so only a meaningful SQL change moves the hash — reindenting a
@@ -1089,10 +1084,13 @@ mod tests {
             .await?
             .get(0)?;
         assert_eq!(run_count, 2, "one run row per invocation");
-        let classified_runs: i64 =
-            one_row(&conn, "SELECT COUNT(DISTINCT run_id) FROM classified_file", ())
-                .await?
-                .get(0)?;
+        let classified_runs: i64 = one_row(
+            &conn,
+            "SELECT COUNT(DISTINCT run_id) FROM classified_file",
+            (),
+        )
+        .await?
+        .get(0)?;
         assert_eq!(classified_runs, 2, "classified_file rows are run-scoped");
 
         // --clear wipes everything, including the run-scoped tables, and rebuilds
@@ -1103,11 +1101,17 @@ mod tests {
             .await?
             .get(0)?;
         assert_eq!(run_count, 1, "clear resets the run log to just this run");
-        let classified_runs: i64 =
-            one_row(&conn, "SELECT COUNT(DISTINCT run_id) FROM classified_file", ())
-                .await?
-                .get(0)?;
-        assert_eq!(classified_runs, 1, "clear leaves only the current run's rows");
+        let classified_runs: i64 = one_row(
+            &conn,
+            "SELECT COUNT(DISTINCT run_id) FROM classified_file",
+            (),
+        )
+        .await?
+        .get(0)?;
+        assert_eq!(
+            classified_runs, 1,
+            "clear leaves only the current run's rows"
+        );
 
         fs::remove_dir_all(test_dir)?;
         Ok(())
