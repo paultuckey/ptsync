@@ -29,7 +29,8 @@ erDiagram
         INTEGER height
         INTEGER duration_ms
         TEXT orientation
-        TEXT rotation
+        INTEGER display_mirrored
+        INTEGER display_rotate
         TEXT geohash
         TEXT kind
     }

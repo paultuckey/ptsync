@@ -128,11 +128,31 @@ pub(crate) fn image_height(exif: &PsExifInfo) -> Option<i64> {
         .and_then(|s| s.trim().parse::<i64>().ok())
 }
 
-/// Raw EXIF `Orientation` tag as a string (`"1"`–`"8"`): the rotation/mirror
-/// flag for display. Distinct from the derived aspect orientation, and absent
-/// for media without EXIF (e.g. videos).
-pub(crate) fn exif_orientation(exif: &PsExifInfo) -> Option<String> {
-    field_value(exif, ExifTag::Orientation)
+/// The display transform implied by the EXIF `Orientation` tag, decomposed into
+/// `(mirrored, rotate)`: a horizontal flip applied *before* a clockwise rotation
+/// of `rotate` degrees (one of `-90`, `0`, `90`, `180`). `None` when the tag is
+/// absent (e.g. videos) — nothing to apply. Orientation `1` yields
+/// `(false, 0)`. Distinct from the derived aspect orientation. The raw numeric
+/// tag is still available in `media_info`.
+pub(crate) fn exif_display_transform(exif: &PsExifInfo) -> Option<(bool, i32)> {
+    let raw = field_value(exif, ExifTag::Orientation)?;
+    Some(orientation_transform(raw.trim()))
+}
+
+/// Decompose the raw EXIF `Orientation` value (`1`–`8`) into `(mirrored, rotate)`,
+/// where a horizontal mirror is applied before a clockwise `rotate` (degrees).
+/// `1` and any unrecognised value mean "no transform".
+fn orientation_transform(raw: &str) -> (bool, i32) {
+    match raw {
+        "2" => (true, 0),
+        "3" => (false, 180),
+        "4" => (true, 180),
+        "5" => (true, -90), // mirror horizontal + rotate 270 CW
+        "6" => (false, 90),
+        "7" => (true, 90), // mirror horizontal + rotate 90 CW
+        "8" => (false, -90), // rotate 270 CW
+        _ => (false, 0),
+    }
 }
 
 pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>) -> Option<String> {
@@ -254,9 +274,23 @@ mod tests {
         assert_eq!(camera_model(&info).as_deref(), Some("Canon EOS 40D"));
         assert!(image_width(&info).is_some_and(|w| w > 0), "width parsed");
         assert!(image_height(&info).is_some_and(|h| h > 0), "height parsed");
-        // Raw EXIF Orientation tag: "1" = normal for this sample.
-        assert_eq!(exif_orientation(&info).as_deref(), Some("1"));
+        // EXIF Orientation "1" decodes to the no-op transform.
+        assert_eq!(exif_display_transform(&info), Some((false, 0)));
         Ok(())
+    }
+
+    #[test]
+    fn test_orientation_transform() {
+        assert_eq!(orientation_transform("1"), (false, 0));
+        assert_eq!(orientation_transform("2"), (true, 0));
+        assert_eq!(orientation_transform("3"), (false, 180));
+        assert_eq!(orientation_transform("4"), (true, 180));
+        assert_eq!(orientation_transform("5"), (true, -90));
+        assert_eq!(orientation_transform("6"), (false, 90));
+        assert_eq!(orientation_transform("7"), (true, 90));
+        assert_eq!(orientation_transform("8"), (false, -90));
+        // Unknown/out-of-range values are treated as no transform.
+        assert_eq!(orientation_transform("9"), (false, 0));
     }
 
     #[test]

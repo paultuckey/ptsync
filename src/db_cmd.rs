@@ -193,6 +193,7 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
     // the track metadata, so fall back to that when EXIF has nothing.
     let exif = info.exif_info.as_ref();
     let track = info.track_info.as_ref();
+
     let camera_make = exif
         .and_then(crate::exif_util::camera_make)
         .or_else(|| track.and_then(|t| t.make.clone()));
@@ -205,13 +206,15 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
     let height = exif
         .and_then(crate::exif_util::image_height)
         .or_else(|| track.and_then(|t| t.height).map(|h| h as i64));
+
     let duration_ms = track.and_then(|t| t.duration_ms).map(|d| d as i64);
-    // Videos carry a track duration; photos do not. Store the resolved kind so
-    // queries can filter on 'p'/'v' instead of inspecting duration_ms.
-    let kind = if duration_ms.is_some() { "v" } else { "p" };
+    let kind = crate::file_type::media_kind(&info.accurate_file_type);
     let orientation = orientation(width, height).map(str::to_string);
-    // Raw EXIF rotation/mirror flag; distinct from the derived aspect orientation.
-    let rotation = exif.and_then(crate::exif_util::exif_orientation);
+    let (display_mirrored, display_rotate) = exif
+        .and_then(crate::exif_util::exif_display_transform)
+        .unwrap_or((false, 0));
+    let display_rotate = display_rotate as i64;
+
     let long_hash = &info.hash_info.long_checksum;
     let short_hash = &info.hash_info.short_checksum;
     let item = DbMediaItem {
@@ -233,11 +236,12 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         height,
         duration_ms,
         orientation,
-        rotation,
+        display_mirrored,
+        display_rotate,
         geohash,
         kind,
     };
-    // 21 columns exceeds rusqlite's tuple Params impl (max 16), so use params!.
+    // 22 columns exceeds rusqlite's tuple Params impl (max 16), so use params!.
     let mut stmt = conn.prepare_cached(DB_MEDIA_ITEM_INSERT)?;
     stmt.execute(rusqlite::params![
         &item.media_path,
@@ -258,7 +262,8 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         &item.height,
         &item.duration_ms,
         &item.orientation,
-        &item.rotation,
+        &item.display_mirrored,
+        &item.display_rotate,
         &item.geohash,
         &item.kind,
     ])?;
@@ -309,12 +314,14 @@ struct DbMediaItem {
     duration_ms: Option<i64>,
     // portrait/landscape/square, None if dimensions unknown
     orientation: Option<String>,
-    // raw EXIF Orientation value ("1"-"8"), None if no EXIF
-    rotation: Option<String>,
+    // whether the image must be flipped horizontally for display; false if no EXIF
+    display_mirrored: bool,
+    // clockwise degrees to rotate for display (-90/0/90/180); 0 if no EXIF
+    display_rotate: i64,
     // geohash of the coordinates, None if no location
     geohash: Option<String>,
-    // 'p' for photo, 'v' for video
-    kind: &'static str,
+    // 'p' for photo, 'v' for video, None if neither
+    kind: Option<&'static str>,
 }
 const DB_MEDIA_ITEM_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS media_item  (
@@ -337,17 +344,18 @@ const DB_MEDIA_ITEM_CREATE: &str = "
         height INTEGER, -- image/video height in pixels, NULL if unknown
         duration_ms INTEGER, -- video duration in ms, NULL for photos
         orientation TEXT, -- portrait/landscape/square, NULL if dimensions unknown
-        rotation TEXT, -- raw EXIF Orientation value 1-8, NULL if no EXIF
+        display_mirrored INTEGER NOT NULL DEFAULT 0, -- 1 if the image must be flipped horizontally for display
+        display_rotate INTEGER NOT NULL DEFAULT 0, -- clockwise degrees to rotate for display (-90/0/90/180)
         geohash TEXT, -- geohash of the coordinates, NULL if no location
-        kind TEXT -- 'p' for photo, 'v' for video
+        kind TEXT -- 'p' for photo, 'v' for video, NULL if neither
     )
 ";
 const DB_MEDIA_ITEM_INSERT: &str = "
     INSERT INTO media_item (media_path, long_hash, short_hash, quick_file_type,
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
         latitude, longitude, camera_make, camera_model, width, height,
-        duration_ms, orientation, rotation, geohash, kind)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+        duration_ms, orientation, display_mirrored, display_rotate, geohash, kind)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
 ";
 const DB_MEDIA_ITEM_ID_BY_PATH: &str = "SELECT media_item_id FROM media_item WHERE media_path = ?1";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
@@ -548,19 +556,21 @@ mod tests {
         )?;
         assert_eq!(photo_kind, "p");
 
-        // Raw EXIF Orientation lands in `rotation` for photos; videos have none.
-        let photo_rot: Option<String> = conn.query_row(
-            "SELECT rotation FROM media_item WHERE media_path = ?1",
+        // EXIF Orientation is split into display_mirrored/display_rotate, which
+        // are never NULL. Canon_40D.jpg is orientation 1, the no-op transform.
+        let photo_display: (bool, i64) = conn.query_row(
+            "SELECT display_mirrored, display_rotate FROM media_item WHERE media_path = ?1",
             ["Canon_40D.jpg"],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        assert_eq!(photo_rot.as_deref(), Some("1"));
-        let video_rot: Option<String> = conn.query_row(
-            "SELECT rotation FROM media_item WHERE media_path = ?1",
+        assert_eq!(photo_display, (false, 0));
+        // Videos have no EXIF orientation, so they default to no transform.
+        let video_display: (bool, i64) = conn.query_row(
+            "SELECT display_mirrored, display_rotate FROM media_item WHERE media_path = ?1",
             ["Hello.mp4"],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        assert_eq!(video_rot, None, "videos have no EXIF orientation");
+        assert_eq!(video_display, (false, 0), "no EXIF defaults to no transform");
 
         // With no supplemental or EXIF date, the video's guessed date comes from
         // its embedded track creation time rather than the file timestamps.
