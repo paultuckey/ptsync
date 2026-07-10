@@ -1,0 +1,5 @@
+# `unwrap_used` / `expect_used` are denied in Cargo.toml `[lints.clippy]`.
+# These settings make the deny apply to test code too (they default to
+# `false`, but we set them explicitly so the policy can't silently regress).
+allow-unwrap-in-tests = false
+allow-expect-in-tests = false
