@@ -8,14 +8,14 @@ use std::sync::Arc;
 
 const DOC_PATH: &str = "docs/db-example-queries.md";
 
-/// Pull out the contents of every fenced ` ```sql ` block in the markdown.
+/// Pull out the contents of every fenced ` ```sqlite ` block in the markdown.
 fn extract_sql_blocks(markdown: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut current: Option<String> = None;
     for line in markdown.lines() {
         match &mut current {
             None => {
-                if line.trim() == "```sql" {
+                if line.trim() == "```sqlite" {
                     current = Some(String::new());
                 }
             }

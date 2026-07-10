@@ -19,7 +19,7 @@ sqlite3 db.sqlite
 
 Total number of items and how much disk space they use.
 
-```sql
+```sqlite
 SELECT COUNT(*)                             AS items,
        SUM(file_size)                       AS total_bytes,
        ROUND(SUM(file_size) / 1073741824.0, 2) AS total_gb
@@ -30,7 +30,7 @@ FROM media_item;
 
 Each item is tagged with its `kind`: `p` for photo, `v` for video.
 
-```sql
+```sqlite
 SELECT kind,
        COUNT(*) AS items
 FROM media_item
@@ -41,7 +41,7 @@ GROUP BY kind;
 
 Counts and total size for each detected file type, largest first.
 
-```sql
+```sqlite
 SELECT accurate_file_type                    AS file_type,
        COUNT(*)                              AS items,
        ROUND(SUM(file_size) / 1048576.0, 1)  AS total_mb
@@ -54,7 +54,7 @@ ORDER BY items DESC;
 
 Uses the best-guess date derived from metadata.
 
-```sql
+```sqlite
 SELECT strftime('%Y', guessed_datetime) AS year,
        COUNT(*)                         AS items
 FROM media_item
@@ -67,7 +67,7 @@ ORDER BY year;
 
 The ten biggest items — handy for finding space hogs.
 
-```sql
+```sqlite
 SELECT media_path,
        ROUND(file_size / 1048576.0, 1) AS size_mb
 FROM media_item
@@ -79,7 +79,7 @@ LIMIT 10;
 
 Groups items by the camera make and model recorded in the metadata.
 
-```sql
+```sqlite
 SELECT camera_make,
        camera_model,
        COUNT(*) AS items
@@ -94,7 +94,7 @@ LIMIT 10;
 
 Counts items that carry GPS coordinates versus those that do not.
 
-```sql
+```sqlite
 SELECT COUNT(*) FILTER (WHERE latitude IS NOT NULL) AS with_location,
        COUNT(*) FILTER (WHERE latitude IS NULL)     AS without_location
 FROM media_item;
@@ -104,7 +104,7 @@ FROM media_item;
 
 Portrait, landscape or square, based on the recorded dimensions.
 
-```sql
+```sqlite
 SELECT COALESCE(orientation, 'unknown') AS orientation,
        COUNT(*)                         AS items
 FROM media_item
@@ -116,7 +116,7 @@ ORDER BY items DESC;
 
 People come from Google supplemental metadata, linked via `media_person`.
 
-```sql
+```sqlite
 SELECT p.name,
        COUNT(*) AS appears_in
 FROM person p
@@ -130,7 +130,7 @@ LIMIT 10;
 
 Every album and how many items belong to it (including empty albums).
 
-```sql
+```sqlite
 SELECT a.title,
        COUNT(af.media_item_id) AS items
 FROM album a
@@ -144,7 +144,7 @@ ORDER BY items DESC;
 Items that share the same content hash are exact duplicates. `wasted_bytes`
 is the space used by every copy of each duplicated file.
 
-```sql
+```sqlite
 SELECT long_hash,
        COUNT(*)       AS copies,
        SUM(file_size) AS wasted_bytes

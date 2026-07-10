@@ -118,11 +118,11 @@ Add `--debug` to any command for verbose logging.
 
 ## Commands
 
-| Command | What it does                                                                                           |
-| --- |--------------------------------------------------------------------------------------------------------|
-| `ptsync sync` | The main command - syncs photos, videos and albums into a standardized directory.                      |
-| `ptsync info` | Inspect the metadata ptsync would extract from a single photo, video or album.                         |
-| `ptsync db`   | Scan an archive into a SQLite [database](docs/db-schema.md) of file metadata (helpful for inspection). |
+| Command | What it does                                                                                                                                          |
+| --- |-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ptsync sync` | The main command - syncs photos, videos and albums into a standardized directory.                                                                     |
+| `ptsync info` | Inspect the metadata ptsync would extract from a single photo, video or album.                                                                        |
+| `ptsync db`   | Scan an archive into a SQLite [database](docs/db-schema.md) of file metadata (helpful for inspection). [Example queries](docs/db-example-queries.md). |
 
 `sync` also accepts `--skip-markdown`, `--skip-media` and `--skip-albums` to process only
 part of an archive. See the full [CLI reference](docs/cli.md) for every option, or run
