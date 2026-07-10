@@ -1,11 +1,11 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use strum_macros::Display;
 use tracing::{debug, warn};
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Display)]
-#[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
+#[derive(Serialize, Debug, Clone, PartialEq, Display)]
+#[serde(rename_all(serialize = "camelCase"))]
 pub(crate) enum QuickFileType {
     Media,
     AlbumCsv,
@@ -35,8 +35,8 @@ pub(crate) fn find_quick_file_type(file_path: &str) -> QuickFileType {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Display)]
-#[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
+#[derive(Serialize, Clone, Debug, PartialEq, Display)]
+#[serde(rename_all(serialize = "camelCase"))]
 pub(crate) enum AccurateFileType {
     Jpg,
     Png,

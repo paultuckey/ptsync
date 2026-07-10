@@ -6,7 +6,7 @@ use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
 use crate::progress::Progress;
 use crate::util::{GEOHASH_PRECISION, ScanInfo, geohash_encode, orientation, scan_fs};
 use anyhow::anyhow;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -202,8 +202,8 @@ async fn db_classify_paths(conn: &Connection, files: &[ScanInfo]) -> anyhow::Res
     Ok(())
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all(serialize = "camelCase"))]
 pub(crate) struct HashInfo {
     pub(crate) short_checksum: String,
     pub(crate) long_checksum: String,

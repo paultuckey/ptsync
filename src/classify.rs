@@ -32,7 +32,7 @@ pub(crate) fn classify_dir(dir_path: &str) -> Option<KnownDir> {
     find_known_dirs(dir_path).into_iter().next()
 }
 
-#[derive(Debug, Clone, Display, PartialEq)]
+#[derive(Debug, Display)]
 pub(crate) enum KnownDir {
     GpPhotosFromYear(String),
     GpArchive,
@@ -55,7 +55,7 @@ impl KnownDir {
     }
 }
 
-#[derive(Debug, Clone, Display, PartialEq)]
+#[derive(Debug, Display, PartialEq)]
 pub(crate) enum KnownFileType {
     // can be in either provider
     Photo(String),

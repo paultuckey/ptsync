@@ -34,7 +34,7 @@ pub trait FileSystem: Send + Sync {
     fn metadata(&self, path: &str) -> Result<FileMetadata>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OsFileSystem {
     root: PathBuf,
 }
