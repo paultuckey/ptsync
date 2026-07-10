@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::runtime;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use turso::{Builder, Connection, Database, IntoParams, Row, params};
 
 const DB_BATCH_SIZE: usize = 100;
@@ -396,6 +396,9 @@ const DB_MEDIA_ITEM_INSERT: &str = "
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
 ";
 const DB_MEDIA_ITEM_ID_BY_PATH: &str = "SELECT media_item_id FROM media_item WHERE media_path = ?1";
+// Album building and many info queries look media rows up by `media_path`
+const DB_MEDIA_ITEM_PATH_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_media_item_media_path ON media_item (media_path)";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
     DELETE FROM media_item
 ";
@@ -490,7 +493,30 @@ async fn open_conn(path: &str) -> anyhow::Result<(Database, Connection)> {
     Ok((db, conn))
 }
 
+// Bump whenever a CREATE TABLE statement changes. `user_version` defaults to 0.
+// Consider migrating users existing DBs on incrementing.
+const DB_SCHEMA_VERSION: i64 = 1;
+
 async fn db_prepare(conn: &Connection) -> anyhow::Result<()> {
+    let version = query_one(conn, "PRAGMA user_version", ())
+        .await?
+        .map(|row| row.get::<i64>(0))
+        .transpose()?
+        .unwrap_or(0);
+    if version > DB_SCHEMA_VERSION {
+        error!(
+            "DB schema version {version} newer than {DB_SCHEMA_VERSION}, this is untested. Please upgrade."
+        );
+        return Err(anyhow!("DB schema version mismatch"));
+    } else if version < DB_SCHEMA_VERSION {
+        if version != 0 {
+            // A non-zero version means it's an older schema we might fail to insert against
+            info!("DB schema version {version} != {DB_SCHEMA_VERSION}, rebuilding from scratch");
+        }
+        db_drop_all(conn).await?;
+        // all create statements below are 'if not exists'
+    }
+
     conn.execute(DB_MEDIA_ITEM_CREATE, ()).await?;
     conn.execute(DB_PERSON_CREATE, ()).await?;
     conn.execute(DB_MEDIA_PERSON_CREATE, ()).await?;
@@ -499,8 +525,12 @@ async fn db_prepare(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(DB_CLASSIFIED_FILE_CREATE, ()).await?;
     conn.execute(DB_CLASSIFIED_DIR_CREATE, ()).await?;
 
+    // indexes
+    conn.execute(DB_MEDIA_ITEM_PATH_INDEX, ()).await?;
+
     // Clear existing rows before re-scanning. Delete children before parents so
     // foreign keys hold (media_person and album_file both reference media_item).
+    // Redundant right after a rebuild, but cheap and keeps re-scans idempotent.
     conn.execute(DB_MEDIA_PERSON_DELETE_ALL, ()).await?;
     conn.execute(DB_ALBUM_FILE_DELETE_ALL, ()).await?;
     conn.execute(DB_MEDIA_ITEM_DELETE_ALL, ()).await?;
@@ -508,6 +538,27 @@ async fn db_prepare(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(DB_ALBUM_DELETE_ALL, ()).await?;
     conn.execute(DB_CLASSIFIED_FILE_DELETE_ALL, ()).await?;
     conn.execute(DB_CLASSIFIED_DIR_DELETE_ALL, ()).await?;
+
+    conn.execute(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"), ())
+        .await?;
+    Ok(())
+}
+
+// Drop every table so the following CREATE statements rebuild them at the current
+// schema. Children before parents to satisfy foreign keys.
+async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
+    for table in [
+        "media_person",
+        "album_file",
+        "media_item",
+        "person",
+        "album",
+        "classified_file",
+        "classified_dir",
+    ] {
+        conn.execute(&format!("DROP TABLE IF EXISTS {table}"), ())
+            .await?;
+    }
     Ok(())
 }
 
