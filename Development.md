@@ -16,6 +16,8 @@ Let's use the most basic rust we can to make the code as approachable as possibl
 - User should never lose a media file, an album or a metadata file during processing
 - Processing the same source zip or directory multiple times should result in no changes
 - It should run as quickly as possible
+- It should work and be documented clearly for the languages of at least half to world population: 
+  - English (primary language, source code comments), Mandarin, Hindi, Spanish
 
 ## Commands
 

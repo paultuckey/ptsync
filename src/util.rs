@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use tracing::{debug, warn};
+use unicode_normalization::UnicodeNormalization;
 
 /// Similar to github generate a short and long hash from the bytes
 pub(crate) fn checksum_bytes<R: Read + Seek>(reader: &mut R) -> Result<HashInfo> {
@@ -122,6 +123,90 @@ pub(crate) fn non_zero_coords(lat: Option<f64>, long: Option<f64>) -> Option<(f6
     }
 }
 
+/// Standard geohash base-32 alphabet (omits a, i, l, o).
+const GEOHASH_BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+
+/// Geohash length stored per item; 12 chars preserves full source precision
+/// while still allowing coarser clustering via prefix matching.
+pub(crate) const GEOHASH_PRECISION: usize = 12;
+
+/// Encode a latitude/longitude as a geohash of `precision` base-32 characters.
+/// Nearby points share a common prefix, so a `geohash LIKE 'gcpv%'` query
+/// clusters photos by location without needing any geocoding.
+pub(crate) fn geohash_encode(lat: f64, lon: f64, precision: usize) -> String {
+    let mut lat_range = (-90.0f64, 90.0f64);
+    let mut lon_range = (-180.0f64, 180.0f64);
+    let mut hash = String::with_capacity(precision);
+    let mut even = true; // longitude is encoded first
+    let mut bit = 0u8;
+    let mut idx = 0usize;
+    while hash.len() < precision {
+        let (range, value) = if even {
+            (&mut lon_range, lon)
+        } else {
+            (&mut lat_range, lat)
+        };
+        let mid = (range.0 + range.1) / 2.0;
+        if value >= mid {
+            idx |= 1 << (4 - bit);
+            range.0 = mid;
+        } else {
+            range.1 = mid;
+        }
+        even = !even;
+        if bit < 4 {
+            bit += 1;
+        } else {
+            hash.push(GEOHASH_BASE32[idx] as char);
+            bit = 0;
+            idx = 0;
+        }
+    }
+    hash
+}
+
+/// `portrait` / `landscape` / `square` from pixel dimensions, when both known.
+pub(crate) fn orientation(width: Option<i64>, height: Option<i64>) -> Option<&'static str> {
+    match (width, height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some(if w > h {
+            "landscape"
+        } else if h > w {
+            "portrait"
+        } else {
+            "square"
+        }),
+        _ => None,
+    }
+}
+
+/// SHA-256 (first 16 hex chars) of a string — a short, stable, content-derived
+/// id that is the same on any machine or run.
+fn stable_hash16(s: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    hex::encode(hasher.finalize()).chars().take(16).collect()
+}
+
+/// Stable identifier for a person from their name. The name is trimmed,
+/// lowercased, and Unicode-normalized (NFC) before hashing, so the same person
+/// resolves to the same id regardless of case or whether the source encoded
+/// accents/scripts as precomposed or combining characters (e.g. macOS NFD vs
+/// NFC). Works for any alphabet since `to_lowercase` is Unicode-aware and the
+/// hash is over UTF-8 bytes.
+pub(crate) fn person_id_for(name: &str) -> String {
+    let lowered = name.trim().to_lowercase();
+    let normalized: String = lowered.nfc().collect();
+    stable_hash16(&normalized)
+}
+
+/// Stable identifier for an album from its path. Paths are case-sensitive, so
+/// only surrounding whitespace and Unicode form (NFC) are normalized before
+/// hashing.
+pub(crate) fn album_id_for(album_path: &str) -> String {
+    let normalized: String = album_path.trim().nfc().collect();
+    stable_hash16(&normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +230,62 @@ mod tests {
         assert_eq!(si.modified_datetime, Some(1749874162000));
         assert_eq!(si.created_datetime, None);
         Ok(())
+    }
+
+    #[test]
+    fn test_geohash_encode() {
+        // Canonical reference value from the geohash spec.
+        assert_eq!(geohash_encode(42.6, -5.6, 5), "ezs42");
+        // Nearby points share a prefix; far-apart points do not.
+        let sydney = geohash_encode(-33.8688, 151.2093, 9);
+        let sydney_near = geohash_encode(-33.8689, 151.2094, 9);
+        let london = geohash_encode(51.5074, -0.1278, 9);
+        assert_eq!(&sydney[..5], &sydney_near[..5]);
+        assert_ne!(&sydney[..1], &london[..1]);
+    }
+
+    #[test]
+    fn test_orientation() {
+        assert_eq!(orientation(Some(854), Some(480)), Some("landscape"));
+        assert_eq!(orientation(Some(480), Some(854)), Some("portrait"));
+        assert_eq!(orientation(Some(500), Some(500)), Some("square"));
+        assert_eq!(orientation(None, Some(480)), None);
+        assert_eq!(orientation(Some(0), Some(480)), None);
+    }
+
+    #[test]
+    fn test_person_id_stable_and_case_insensitive() {
+        let a = person_id_for("Tim Tam");
+        assert_eq!(a.len(), 16);
+        // Case and surrounding whitespace do not change the id.
+        assert_eq!(a, person_id_for("tim tam"));
+        assert_eq!(a, person_id_for("  TIM TAM  "));
+        // Different names differ.
+        assert_ne!(a, person_id_for("Ada Lovelace"));
+    }
+
+    #[test]
+    fn test_person_id_non_ascii_and_normalization() {
+        // Non-Latin scripts hash fine and fold case (Cyrillic, Greek).
+        assert_eq!(person_id_for("Привет"), person_id_for("привет"));
+        assert_eq!(person_id_for("ΑΘΗΝΑ"), person_id_for("αθηνα"));
+        // Same name, different Unicode forms: precomposed "é" (U+00E9) vs
+        // decomposed "e"+combining acute (U+0301) — must yield the same id.
+        let precomposed = "Jos\u{00e9}";
+        let decomposed = "Jose\u{0301}";
+        assert_ne!(precomposed.as_bytes(), decomposed.as_bytes());
+        assert_eq!(person_id_for(precomposed), person_id_for(decomposed));
+    }
+
+    #[test]
+    fn test_album_id_stable() {
+        let a = album_id_for("Google Photos/Holiday/metadata.json");
+        assert_eq!(a.len(), 16);
+        // Whitespace-insensitive and deterministic; different paths differ.
+        assert_eq!(a, album_id_for("  Google Photos/Holiday/metadata.json  "));
+        assert_ne!(a, album_id_for("Google Photos/Trip/metadata.json"));
+        // Paths are case-sensitive (unlike people).
+        assert_ne!(a, album_id_for("google photos/holiday/metadata.json"));
     }
 
     #[test]

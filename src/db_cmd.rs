@@ -4,9 +4,9 @@ use crate::fs::{FileSystem, OsFileSystem, ZipFileSystem};
 use crate::inspect::inspect_media_files;
 use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
 use crate::progress::Progress;
-use crate::util::{ScanInfo, scan_fs};
+use crate::util::{ScanInfo, scan_fs, geohash_encode, orientation, GEOHASH_PRECISION};
 use anyhow::anyhow;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -91,10 +91,24 @@ fn run_db_scan(container: Arc<dyn FileSystem>, conn: &Connection) -> anyhow::Res
     let album_tx = conn.unchecked_transaction()?;
     for album_si in album_si_files {
         if let Some(album) = crate::album::parse_album(container.as_ref(), album_si, &files) {
-            album_tx.execute(DB_ALBUM_INSERT, (&album.title, &album_si.file_path))?;
-            let album_id = album_tx.last_insert_rowid();
-            for file in album.files {
-                album_tx.execute(DB_ALBUM_FILE_INSERT, (album_id, &file))?;
+            let album_id = crate::util::album_id_for(&album_si.file_path);
+            album_tx.execute(
+                DB_ALBUM_INSERT,
+                (&album_id, &album.title, &album_si.file_path),
+            )?;
+            for file in &album.files {
+                // Album members reference scanned file paths; link them to the
+                // media_item row for that path. Skip any that weren't indexed as
+                // media (e.g. an unsupported type).
+                let media_item_id: Option<i64> = album_tx
+                    .query_row(DB_MEDIA_ITEM_ID_BY_PATH, [file.as_str()], |r| r.get(0))
+                    .optional()?;
+                match media_item_id {
+                    Some(id) => {
+                        album_tx.execute(DB_ALBUM_FILE_INSERT, (&album_id, id))?;
+                    }
+                    None => debug!("Album {:?} references unindexed file {file:?}", album.title),
+                }
             }
         }
         prog_albums.inc();
@@ -169,10 +183,13 @@ pub(crate) struct HashInfo {
 fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
     let media_info_json = serde_json::to_string(&info)?;
     let guessed_datetime = best_guess_taken_dt(info);
-    let (latitude, longitude) = match best_guess_lat_long(info) {
+    let lat_long = best_guess_lat_long(info);
+    let (latitude, longitude) = match lat_long {
         Some((lat, long)) => (Some(lat), Some(long)),
         None => (None, None),
     };
+    let geohash =
+        lat_long.map(|(lat, long)| geohash_encode(lat, long, GEOHASH_PRECISION));
     // Camera and dimensions come from EXIF for images; for videos they live in
     // the track metadata, so fall back to that when EXIF has nothing.
     let exif = info.exif_info.as_ref();
@@ -189,6 +206,8 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
     let height = exif
         .and_then(crate::exif_util::image_height)
         .or_else(|| track.and_then(|t| t.height).map(|h| h as i64));
+    let duration_ms = track.and_then(|t| t.duration_ms).map(|d| d as i64);
+    let orientation = orientation(width, height).map(str::to_string);
     let long_hash = &info.hash_info.long_checksum;
     let short_hash = &info.hash_info.short_checksum;
     let item = DbMediaItem {
@@ -208,9 +227,13 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         camera_model,
         width,
         height,
+        duration_ms,
+        orientation,
+        geohash,
     };
+    // 19 columns exceeds rusqlite's tuple Params impl (max 16), so use params!.
     let mut stmt = conn.prepare_cached(DB_MEDIA_ITEM_INSERT)?;
-    stmt.execute((
+    stmt.execute(rusqlite::params![
         &item.media_path,
         &item.long_hash,
         &item.short_hash,
@@ -227,16 +250,23 @@ fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
         &item.camera_model,
         &item.width,
         &item.height,
-    ))?;
+        &item.duration_ms,
+        &item.orientation,
+        &item.geohash,
+    ])?;
 
-    // Named people come from Google supplemental metadata; store each as its own
-    // row against the media item just inserted so they can be queried and joined.
+    // Named people come from Google supplemental metadata. Each name resolves to
+    // a stable, content-derived person id (shared across items and rebuilds), so
+    // we upsert the person then link it to this media item.
     let media_item_id = conn.last_insert_rowid();
     if let Some(supp) = &info.supp_info {
-        let mut stmt_person = conn.prepare_cached(DB_MEDIA_PERSON_INSERT)?;
+        let mut stmt_person = conn.prepare_cached(DB_PERSON_INSERT)?;
+        let mut stmt_media_person = conn.prepare_cached(DB_MEDIA_PERSON_INSERT)?;
         for person in &supp.people {
             if let Some(name) = &person.name {
-                stmt_person.execute((media_item_id, name))?;
+                let person_id = crate::util::person_id_for(name);
+                stmt_person.execute((&person_id, name))?;
+                stmt_media_person.execute((media_item_id, &person_id))?;
             }
         }
     }
@@ -264,9 +294,15 @@ struct DbMediaItem {
     // EXIF camera details, None if unknown
     camera_make: Option<String>,
     camera_model: Option<String>,
-    // image dimensions in pixels, None if unknown
+    // image/video dimensions in pixels, None if unknown
     width: Option<i64>,
     height: Option<i64>,
+    // video duration in ms, None for photos
+    duration_ms: Option<i64>,
+    // portrait/landscape/square, None if dimensions unknown
+    orientation: Option<String>,
+    // geohash of the coordinates, None if no location
+    geohash: Option<String>,
 }
 const DB_MEDIA_ITEM_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS media_item  (
@@ -285,35 +321,52 @@ const DB_MEDIA_ITEM_CREATE: &str = "
         longitude REAL, -- best-guess GPS longitude, NULL if unknown
         camera_make TEXT, -- EXIF camera manufacturer, NULL if unknown
         camera_model TEXT, -- EXIF camera model, NULL if unknown
-        width INTEGER, -- image width in pixels, NULL if unknown
-        height INTEGER -- image height in pixels, NULL if unknown
+        width INTEGER, -- image/video width in pixels, NULL if unknown
+        height INTEGER, -- image/video height in pixels, NULL if unknown
+        duration_ms INTEGER, -- video duration in ms, NULL for photos
+        orientation TEXT, -- portrait/landscape/square, NULL if dimensions unknown
+        geohash TEXT -- geohash of the coordinates, NULL if no location
     )
 ";
 const DB_MEDIA_ITEM_INSERT: &str = "
     INSERT INTO media_item (media_path, long_hash, short_hash, quick_file_type,
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
-        latitude, longitude, camera_make, camera_model, width, height)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        latitude, longitude, camera_make, camera_model, width, height,
+        duration_ms, orientation, geohash)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
 ";
+const DB_MEDIA_ITEM_ID_BY_PATH: &str = "SELECT media_item_id FROM media_item WHERE media_path = ?1";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
     DELETE FROM media_item
 ";
 
+const DB_PERSON_CREATE: &str = "
+    CREATE TABLE IF NOT EXISTS person (
+        person_id TEXT PRIMARY KEY, -- stable hash of the lowercased name
+        name TEXT NOT NULL
+    )
+";
+const DB_PERSON_INSERT: &str = "
+    INSERT OR IGNORE INTO person (person_id, name) VALUES (?1, ?2)
+";
+const DB_PERSON_DELETE_ALL: &str = "DELETE FROM person";
+
 const DB_MEDIA_PERSON_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS media_person (
         media_item_id INTEGER,
-        name TEXT NOT NULL,
-        FOREIGN KEY(media_item_id) REFERENCES media_item(media_item_id)
+        person_id TEXT,
+        FOREIGN KEY(media_item_id) REFERENCES media_item(media_item_id),
+        FOREIGN KEY(person_id) REFERENCES person(person_id)
     )
 ";
 const DB_MEDIA_PERSON_INSERT: &str = "
-    INSERT INTO media_person (media_item_id, name) VALUES (?1, ?2)
+    INSERT INTO media_person (media_item_id, person_id) VALUES (?1, ?2)
 ";
 const DB_MEDIA_PERSON_DELETE_ALL: &str = "DELETE FROM media_person";
 
 const DB_ALBUM_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS album (
-        album_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        album_id TEXT PRIMARY KEY, -- stable hash of the album path
         title TEXT,
         album_path TEXT NOT NULL
     )
@@ -321,18 +374,19 @@ const DB_ALBUM_CREATE: &str = "
 
 const DB_ALBUM_FILE_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS album_file (
-        album_id INTEGER,
-        file_path TEXT NOT NULL,
-        FOREIGN KEY(album_id) REFERENCES album(album_id)
+        album_id TEXT,
+        media_item_id INTEGER,
+        FOREIGN KEY(album_id) REFERENCES album(album_id),
+        FOREIGN KEY(media_item_id) REFERENCES media_item(media_item_id)
     )
 ";
 
 const DB_ALBUM_INSERT: &str = "
-    INSERT INTO album (title, album_path) VALUES (?1, ?2)
+    INSERT OR IGNORE INTO album (album_id, title, album_path) VALUES (?1, ?2, ?3)
 ";
 
 const DB_ALBUM_FILE_INSERT: &str = "
-    INSERT INTO album_file (album_id, file_path) VALUES (?1, ?2)
+    INSERT INTO album_file (album_id, media_item_id) VALUES (?1, ?2)
 ";
 
 const DB_ALBUM_DELETE_ALL: &str = "DELETE FROM album";
@@ -374,6 +428,7 @@ fn db_conn(path: &str) -> anyhow::Result<Connection> {
 
 fn db_prepare(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(DB_MEDIA_ITEM_CREATE, ())?;
+    conn.execute(DB_PERSON_CREATE, ())?;
     conn.execute(DB_MEDIA_PERSON_CREATE, ())?;
     conn.execute(DB_ALBUM_CREATE, ())?;
     conn.execute(DB_ALBUM_FILE_CREATE, ())?;
@@ -381,10 +436,11 @@ fn db_prepare(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(DB_CLASSIFIED_DIR_CREATE, ())?;
 
     // Clear existing rows before re-scanning. Delete children before parents so
-    // foreign keys hold.
+    // foreign keys hold (media_person and album_file both reference media_item).
     conn.execute(DB_MEDIA_PERSON_DELETE_ALL, ())?;
-    conn.execute(DB_MEDIA_ITEM_DELETE_ALL, ())?;
     conn.execute(DB_ALBUM_FILE_DELETE_ALL, ())?;
+    conn.execute(DB_MEDIA_ITEM_DELETE_ALL, ())?;
+    conn.execute(DB_PERSON_DELETE_ALL, ())?;
     conn.execute(DB_ALBUM_DELETE_ALL, ())?;
     conn.execute(DB_CLASSIFIED_FILE_DELETE_ALL, ())?;
     conn.execute(DB_CLASSIFIED_DIR_DELETE_ALL, ())?;
@@ -444,14 +500,25 @@ mod tests {
                 .any(|(path, ftype)| path == "Hello.mp4" && ftype == "Media")
         );
 
-        // Video dimensions are pulled from track metadata into the columns.
-        let (w, h): (Option<i64>, Option<i64>) = conn.query_row(
-            "SELECT width, height FROM media_item WHERE media_path = ?1",
-            ["Hello.mp4"],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        // Video dimensions, duration and orientation are derived from track
+        // metadata; duration is null for photos.
+        let (w, h, dur, orient): (Option<i64>, Option<i64>, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT width, height, duration_ms, orientation FROM media_item WHERE media_path = ?1",
+                ["Hello.mp4"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
         assert_eq!(w, Some(854));
         assert_eq!(h, Some(480));
+        assert_eq!(dur, Some(5000));
+        assert_eq!(orient.as_deref(), Some("landscape"));
+
+        let photo_dur: Option<i64> = conn.query_row(
+            "SELECT duration_ms FROM media_item WHERE media_path = ?1",
+            ["Canon_40D.jpg"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(photo_dur, None, "photos have no duration");
 
         // With no supplemental or EXIF date, the video's guessed date comes from
         // its embedded track creation time rather than the file timestamps.
@@ -590,20 +657,26 @@ mod tests {
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
         run_db_scan(container, &conn)?;
 
-        // Verify Album
-        let mut stmt = conn.prepare("SELECT title, album_path FROM album")?;
+        // Verify Album: the id is the stable hash of the album path.
+        let mut stmt = conn.prepare("SELECT album_id, title, album_path FROM album")?;
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
-            let title: String = row.get(0)?;
-            let path: String = row.get(1)?;
+            let album_id: String = row.get(0)?;
+            let title: String = row.get(1)?;
+            let path: String = row.get(2)?;
             assert_eq!(title, "album");
             assert_eq!(path, "album.csv");
+            assert_eq!(album_id, crate::util::album_id_for("album.csv"));
         } else {
             panic!("No album found");
         }
 
-        // Verify Album Files
-        let mut stmt = conn.prepare("SELECT file_path FROM album_file")?;
+        // Verify Album Files: membership is stored by media_item_id and joins
+        // back to the media item's path.
+        let mut stmt = conn.prepare(
+            "SELECT m.media_path FROM album_file af
+             JOIN media_item m ON m.media_item_id = af.media_item_id",
+        )?;
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
             let path: String = row.get(0)?;
@@ -654,6 +727,17 @@ mod tests {
         assert_eq!(lat.map(|v| format!("{v:.4}")).as_deref(), Some("-21.6303"));
         assert_eq!(long.map(|v| format!("{v:.4}")).as_deref(), Some("152.2605"));
 
+        // Location also stored as a geohash for prefix-based clustering.
+        let geohash: Option<String> = conn.query_row(
+            "SELECT geohash FROM media_item WHERE media_path = ?1",
+            ["Canon_40D.jpg"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            geohash.as_deref(),
+            Some(crate::util::geohash_encode(-21.6303194, 152.2605444, GEOHASH_PRECISION).as_str())
+        );
+
         // EXIF camera and dimension details promoted into columns.
         let (make, model, width, height): (
             Option<String>,
@@ -671,16 +755,26 @@ mod tests {
         assert!(width.is_some_and(|w| w > 0), "width recorded");
         assert!(height.is_some_and(|h| h > 0), "height recorded");
 
-        // People promoted into their own queryable table, joined by media_item_id.
+        // People normalized into a `person` table (stable ids) linked via
+        // media_person; joinable back to the media item.
         let mut stmt = conn.prepare(
-            "SELECT p.name FROM media_person p
-             JOIN media_item m ON m.media_item_id = p.media_item_id
+            "SELECT p.name FROM person p
+             JOIN media_person mp ON mp.person_id = p.person_id
+             JOIN media_item m ON m.media_item_id = mp.media_item_id
              WHERE m.media_path = ?1 ORDER BY p.name",
         )?;
         let names: Vec<String> = stmt
             .query_map(["Canon_40D.jpg"], |r| r.get::<_, String>(0))?
             .collect::<Result<_, _>>()?;
         assert_eq!(names, vec!["Ada Lovelace", "Tim Tam"]);
+
+        // The person id is the stable content hash of the lowercased name.
+        let tim_id: String = conn.query_row(
+            "SELECT person_id FROM person WHERE name = ?1",
+            ["Tim Tam"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(tim_id, crate::util::person_id_for("TIM TAM"));
 
         fs::remove_dir_all(test_dir)?;
         Ok(())

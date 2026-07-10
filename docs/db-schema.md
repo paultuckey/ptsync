@@ -6,7 +6,9 @@
 ```mermaid
 erDiagram
     media_item ||--o{ media_person : "media_item_id"
+    person ||--o{ media_person : "person_id"
     album ||--o{ album_file : "album_id"
+    media_item ||--o{ album_file : "media_item_id"
     media_item {
         INTEGER media_item_id PK
         TEXT media_path
@@ -25,19 +27,26 @@ erDiagram
         TEXT camera_model
         INTEGER width
         INTEGER height
+        INTEGER duration_ms
+        TEXT orientation
+        TEXT geohash
+    }
+    person {
+        TEXT person_id PK
+        TEXT name
     }
     media_person {
         INTEGER media_item_id FK
-        TEXT name
+        TEXT person_id FK
     }
     album {
-        INTEGER album_id PK
+        TEXT album_id PK
         TEXT title
         TEXT album_path
     }
     album_file {
-        INTEGER album_id FK
-        TEXT file_path
+        TEXT album_id FK
+        INTEGER media_item_id FK
     }
     classified_file {
         INTEGER classified_file_id PK
