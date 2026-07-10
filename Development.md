@@ -6,9 +6,9 @@
 Let's use the most basic rust we can to make the code as approachable as possible.
 
 - Don't use lifetimes
-- Don't use `unsafe` or `expect()`
-- Only use `unwrap()` in tests
-- Use `.clone()` to avoid hard things
+- Don't use `unsafe`, `expect()` or `unwrap()` — not even in tests. 
+- In tests, return `anyhow::Result` and use `?`, or use `assert!`/`ok_or_else`.
+- Use `.clone()` to avoid hard things.
 - Don't use `async`/`await` (this type of I/O heavy work may not benefit that much)
 - Use `anyhow::Result` for fallible functions and propagate errors with `?`.
 - Write unit tests within the module (typically a `tests` module at the bottom of the file), and call `crate::test_util::setup_log()` at the start of tests to enable logging output.
