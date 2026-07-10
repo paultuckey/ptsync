@@ -12,7 +12,10 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::runtime;
 use tracing::{debug, error, info, warn};
-use turso::{Builder, Connection, Database, IntoParams, Row, params};
+use turso::{Connection, params};
+
+mod db_utils;
+use db_utils::{open_conn, query_one};
 
 const DB_BATCH_SIZE: usize = 100;
 
@@ -142,17 +145,6 @@ async fn run_db_scan(
 
     info!("Done {} files", files.len());
     Ok(())
-}
-
-async fn query_one(
-    conn: &Connection,
-    sql: &str,
-    params: impl IntoParams,
-) -> anyhow::Result<Option<Row>> {
-    let mut rows = conn.query(sql, params).await?;
-    let first = rows.next().await?;
-    while rows.next().await?.is_some() {}
-    Ok(first)
 }
 
 async fn db_classify_paths(
@@ -518,14 +510,6 @@ const DB_CLASSIFIED_DIR_INSERT: &str = "
 ";
 const DB_CLASSIFIED_DIR_DELETE_ALL: &str = "DELETE FROM classified_dir";
 
-async fn open_conn(path: &str) -> anyhow::Result<(Database, Connection)> {
-    // No encryption: the on-disk file stays a standard SQLite file that users can
-    // open directly with sqlite3
-    let db = Builder::new_local(path).build().await?;
-    let conn = db.connect()?;
-    Ok((db, conn))
-}
-
 // Bump whenever a CREATE TABLE statement changes. `user_version` defaults to 0.
 // Consider migrating users existing DBs on incrementing. The `schema_hash_is_current`
 // test fails on any schema change to force this bump; see it before editing.
@@ -619,6 +603,7 @@ async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::db_utils::test_support::{create_zip_of_test_dir, one_row};
 
     /// Canonical text of the whole schema: line comments dropped and whitespace
     /// collapsed, so only a meaningful SQL change moves the hash — reindenting a
@@ -678,13 +663,6 @@ mod tests {
             accurate_file_type, media_info, guessed_datetime, modified_at, created_at
         FROM media_item
     ";
-
-    /// Fetch the single row a query is expected to return, erroring if there is none.
-    async fn one_row(conn: &Connection, sql: &str, params: impl IntoParams) -> anyhow::Result<Row> {
-        query_one(conn, sql, params)
-            .await?
-            .ok_or_else(|| anyhow!("query returned no rows: {sql}"))
-    }
 
     async fn media_item_id_of(conn: &Connection, media_path: &str) -> anyhow::Result<String> {
         let row = one_row(
@@ -857,33 +835,6 @@ mod tests {
     }
 
     use std::fs;
-    use zip::ZipWriter;
-    use zip::write::FileOptions;
-
-    fn create_zip_of_test_dir(output_path: &Path) -> anyhow::Result<()> {
-        let file = fs::File::create(output_path)?;
-        let mut zip = ZipWriter::new(file);
-        let options = FileOptions::<()>::default();
-
-        let root = Path::new("test");
-        let walker = fs::read_dir(root)?;
-        for entry in walker {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
-                let name = path
-                    .file_name()
-                    .ok_or_else(|| anyhow!("No file name"))?
-                    .to_str()
-                    .ok_or_else(|| anyhow!("Invalid UTF-8"))?;
-                zip.start_file(name, options)?;
-                let mut f = fs::File::open(&path)?;
-                std::io::copy(&mut f, &mut zip)?;
-            }
-        }
-        zip.finish()?;
-        Ok(())
-    }
 
     #[tokio::test]
     async fn test_db_scan_zip() -> anyhow::Result<()> {
