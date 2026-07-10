@@ -18,3 +18,4 @@ output/
 input/
 db.sqlite
 db.sqlite-journal
+db.sqlite-wal
