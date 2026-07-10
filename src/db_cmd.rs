@@ -16,7 +16,7 @@ use turso::{Builder, Connection, Database, IntoParams, Row, params};
 
 const DB_BATCH_SIZE: usize = 100;
 
-pub(crate) fn main(input: &String, output: &str) -> anyhow::Result<()> {
+pub(crate) fn main(input: &String, output: &str, clear: bool) -> anyhow::Result<()> {
     debug!("Inspecting: {input}");
     let path = Path::new(input);
     if !path.exists() {
@@ -34,17 +34,27 @@ pub(crate) fn main(input: &String, output: &str) -> anyhow::Result<()> {
     let rt = runtime::Builder::new_current_thread().build()?;
     rt.block_on(async {
         let (_db, conn) = open_conn(output).await?;
-        run_db_scan(container, &conn).await
+        run_db_scan(container, &conn, clear, input).await
     })
 }
 
-async fn run_db_scan(container: Arc<dyn FileSystem>, conn: &Connection) -> anyhow::Result<()> {
-    db_prepare(conn).await?;
+async fn run_db_scan(
+    container: Arc<dyn FileSystem>,
+    conn: &Connection,
+    clear: bool,
+    run_input: &str,
+) -> anyhow::Result<()> {
+    db_prepare(conn, clear).await?;
+
+    // Record this invocation. Its run_id tags the classified rows below so
+    // successive (non-clearing) runs can be told apart.
+    conn.execute(DB_RUN_INSERT, [run_input]).await?;
+    let run_id = conn.last_insert_rowid();
 
     let files = scan_fs(container.as_ref());
     info!("Found {} files in input", files.len());
 
-    db_classify_paths(conn, &files).await?;
+    db_classify_paths(conn, &files, run_id).await?;
 
     let media_si_files: Vec<ScanInfo> = files
         .iter()
@@ -145,7 +155,11 @@ async fn query_one(
     Ok(first)
 }
 
-async fn db_classify_paths(conn: &Connection, files: &[ScanInfo]) -> anyhow::Result<()> {
+async fn db_classify_paths(
+    conn: &Connection,
+    files: &[ScanInfo],
+    run_id: i64,
+) -> anyhow::Result<()> {
     info!("Classifying {} files against known patterns", files.len());
 
     conn.execute("BEGIN", ()).await?;
@@ -159,6 +173,7 @@ async fn db_classify_paths(conn: &Connection, files: &[ScanInfo]) -> anyhow::Res
         }
         stmt_file
             .execute((
+                run_id,
                 si.file_path.as_str(),
                 si.quick_file_type.to_string(),
                 known.as_ref().map(|k| k.to_string()),
@@ -184,6 +199,7 @@ async fn db_classify_paths(conn: &Connection, files: &[ScanInfo]) -> anyhow::Res
         }
         stmt_dir
             .execute((
+                run_id,
                 parent,
                 known.as_ref().map(|k| k.to_string()),
                 known.as_ref().and_then(|k| k.value()),
@@ -388,8 +404,9 @@ const DB_MEDIA_ITEM_CREATE: &str = "
         kind TEXT -- 'p' for photo, 'v' for video, NULL if neither
     )
 ";
+
 const DB_MEDIA_ITEM_INSERT: &str = "
-    INSERT INTO media_item (media_path, long_hash, short_hash, quick_file_type,
+    INSERT OR IGNORE INTO media_item (media_path, long_hash, short_hash, quick_file_type,
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
         latitude, longitude, camera_make, camera_model, width, height,
         duration_ms, orientation, display_mirrored, display_rotate, geohash, kind, media_item_id)
@@ -418,12 +435,13 @@ const DB_MEDIA_PERSON_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS media_person (
         media_item_id TEXT,
         person_id TEXT,
+        UNIQUE(media_item_id, person_id), -- one link per item/person, so re-scans stay additive
         FOREIGN KEY(media_item_id) REFERENCES media_item(media_item_id),
         FOREIGN KEY(person_id) REFERENCES person(person_id)
     )
 ";
 const DB_MEDIA_PERSON_INSERT: &str = "
-    INSERT INTO media_person (media_item_id, person_id) VALUES (?1, ?2)
+    INSERT OR IGNORE INTO media_person (media_item_id, person_id) VALUES (?1, ?2)
 ";
 const DB_MEDIA_PERSON_DELETE_ALL: &str = "DELETE FROM media_person";
 
@@ -439,6 +457,7 @@ const DB_ALBUM_FILE_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS album_file (
         album_id TEXT,
         media_item_id TEXT,
+        UNIQUE(album_id, media_item_id), -- one link per album/item, so re-scans stay additive
         FOREIGN KEY(album_id) REFERENCES album(album_id),
         FOREIGN KEY(media_item_id) REFERENCES media_item(media_item_id)
     )
@@ -449,39 +468,53 @@ const DB_ALBUM_INSERT: &str = "
 ";
 
 const DB_ALBUM_FILE_INSERT: &str = "
-    INSERT INTO album_file (album_id, media_item_id) VALUES (?1, ?2)
+    INSERT OR IGNORE INTO album_file (album_id, media_item_id) VALUES (?1, ?2)
 ";
 
 const DB_ALBUM_DELETE_ALL: &str = "DELETE FROM album";
 const DB_ALBUM_FILE_DELETE_ALL: &str = "DELETE FROM album_file";
 
+const DB_RUN_CREATE: &str = "
+    CREATE TABLE IF NOT EXISTS run (
+        run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_input TEXT NOT NULL, -- the --input value passed on the CLI
+        run_date DATETIME DEFAULT CURRENT_TIMESTAMP -- when the db command was invoked
+    )
+";
+const DB_RUN_INSERT: &str = "INSERT INTO run (run_input) VALUES (?1)";
+const DB_RUN_DELETE_ALL: &str = "DELETE FROM run";
+
 const DB_CLASSIFIED_FILE_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS classified_file (
         classified_file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER, -- the run that produced this row
         file_path TEXT NOT NULL,
         quick_file_type TEXT,
         known_file_type TEXT, -- matched pattern variant, NULL if unmatched
         known_file_type_value TEXT, -- captured value (e.g. photo id), if any
-        file_size INTEGER -- size of the file in bytes
+        file_size INTEGER, -- size of the file in bytes
+        FOREIGN KEY(run_id) REFERENCES run(run_id)
     )
 ";
 const DB_CLASSIFIED_FILE_INSERT: &str = "
-    INSERT INTO classified_file (file_path, quick_file_type, known_file_type, known_file_type_value, file_size)
-    VALUES (?1, ?2, ?3, ?4, ?5)
+    INSERT INTO classified_file (run_id, file_path, quick_file_type, known_file_type, known_file_type_value, file_size)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
 ";
 const DB_CLASSIFIED_FILE_DELETE_ALL: &str = "DELETE FROM classified_file";
 
 const DB_CLASSIFIED_DIR_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS classified_dir (
         classified_dir_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER, -- the run that produced this row
         dir_path TEXT NOT NULL,
         known_dir_type TEXT, -- matched pattern variant, NULL if unmatched
-        known_dir_value TEXT -- captured value (e.g. year), if any
+        known_dir_value TEXT, -- captured value (e.g. year), if any
+        FOREIGN KEY(run_id) REFERENCES run(run_id)
     )
 ";
 const DB_CLASSIFIED_DIR_INSERT: &str = "
-    INSERT INTO classified_dir (dir_path, known_dir_type, known_dir_value)
-    VALUES (?1, ?2, ?3)
+    INSERT INTO classified_dir (run_id, dir_path, known_dir_type, known_dir_value)
+    VALUES (?1, ?2, ?3, ?4)
 ";
 const DB_CLASSIFIED_DIR_DELETE_ALL: &str = "DELETE FROM classified_dir";
 
@@ -495,49 +528,59 @@ async fn open_conn(path: &str) -> anyhow::Result<(Database, Connection)> {
 
 // Bump whenever a CREATE TABLE statement changes. `user_version` defaults to 0.
 // Consider migrating users existing DBs on incrementing.
-const DB_SCHEMA_VERSION: i64 = 1;
+const DB_SCHEMA_VERSION: i64 = 3;
 
-async fn db_prepare(conn: &Connection) -> anyhow::Result<()> {
+async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result<()> {
     let version = query_one(conn, "PRAGMA user_version", ())
         .await?
         .map(|row| row.get::<i64>(0))
         .transpose()?
         .unwrap_or(0);
-    if version > DB_SCHEMA_VERSION {
-        error!(
-            "DB schema version {version} newer than {DB_SCHEMA_VERSION}, this is untested. Please upgrade."
-        );
-        return Err(anyhow!("DB schema version mismatch"));
-    } else if version < DB_SCHEMA_VERSION {
-        if version != 0 {
-            // A non-zero version means it's an older schema we might fail to insert against
+
+    // Version 0 is a brand-new database with no schema yet, so there is nothing
+    // to reconcile. Any other version that doesn't match is a schema mismatch we
+    // can only resolve by rebuilding, which throws away data — so we only do it
+    // when the user opted into --clear, and otherwise refuse.
+    if version != 0 && version != DB_SCHEMA_VERSION {
+        if clear {
             info!("DB schema version {version} != {DB_SCHEMA_VERSION}, rebuilding from scratch");
+            db_drop_all(conn).await?;
+        } else {
+            error!(
+                "DB schema version {version} does not match expected {DB_SCHEMA_VERSION}. \
+                 Re-run with --clear=true to rebuild the database from scratch."
+            );
+            return Err(anyhow!("DB schema version mismatch"));
         }
-        db_drop_all(conn).await?;
-        // all create statements below are 'if not exists'
     }
 
+    // All create statements are `IF NOT EXISTS`: a no-op when the schema already
+    // matches, and a full build on a fresh or just-dropped database.
     conn.execute(DB_MEDIA_ITEM_CREATE, ()).await?;
     conn.execute(DB_PERSON_CREATE, ()).await?;
     conn.execute(DB_MEDIA_PERSON_CREATE, ()).await?;
     conn.execute(DB_ALBUM_CREATE, ()).await?;
     conn.execute(DB_ALBUM_FILE_CREATE, ()).await?;
+    conn.execute(DB_RUN_CREATE, ()).await?;
     conn.execute(DB_CLASSIFIED_FILE_CREATE, ()).await?;
     conn.execute(DB_CLASSIFIED_DIR_CREATE, ()).await?;
 
     // indexes
     conn.execute(DB_MEDIA_ITEM_PATH_INDEX, ()).await?;
 
-    // Clear existing rows before re-scanning. Delete children before parents so
-    // foreign keys hold (media_person and album_file both reference media_item).
-    // Redundant right after a rebuild, but cheap and keeps re-scans idempotent.
-    conn.execute(DB_MEDIA_PERSON_DELETE_ALL, ()).await?;
-    conn.execute(DB_ALBUM_FILE_DELETE_ALL, ()).await?;
-    conn.execute(DB_MEDIA_ITEM_DELETE_ALL, ()).await?;
-    conn.execute(DB_PERSON_DELETE_ALL, ()).await?;
-    conn.execute(DB_ALBUM_DELETE_ALL, ()).await?;
-    conn.execute(DB_CLASSIFIED_FILE_DELETE_ALL, ()).await?;
-    conn.execute(DB_CLASSIFIED_DIR_DELETE_ALL, ()).await?;
+    // Clear existing rows only when asked. Delete children before parents so
+    // foreign keys hold (media_person and album_file reference media_item;
+    // classified_file and classified_dir reference run).
+    if clear {
+        conn.execute(DB_MEDIA_PERSON_DELETE_ALL, ()).await?;
+        conn.execute(DB_ALBUM_FILE_DELETE_ALL, ()).await?;
+        conn.execute(DB_MEDIA_ITEM_DELETE_ALL, ()).await?;
+        conn.execute(DB_PERSON_DELETE_ALL, ()).await?;
+        conn.execute(DB_ALBUM_DELETE_ALL, ()).await?;
+        conn.execute(DB_CLASSIFIED_FILE_DELETE_ALL, ()).await?;
+        conn.execute(DB_CLASSIFIED_DIR_DELETE_ALL, ()).await?;
+        conn.execute(DB_RUN_DELETE_ALL, ()).await?;
+    }
 
     conn.execute(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"), ())
         .await?;
@@ -555,6 +598,7 @@ async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
         "album",
         "classified_file",
         "classified_dir",
+        "run",
     ] {
         conn.execute(&format!("DROP TABLE IF EXISTS {table}"), ())
             .await?;
@@ -607,7 +651,7 @@ mod tests {
         crate::test_util::setup_log();
         let (_db, conn) = open_conn(":memory:").await?;
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-        run_db_scan(container, &conn).await?;
+        run_db_scan(container, &conn, false, "test").await?;
 
         let mut rows = conn
             .query(
@@ -718,7 +762,7 @@ mod tests {
         crate::test_util::setup_log();
         let (_db, conn) = open_conn(":memory:").await?;
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-        run_db_scan(container, &conn).await?;
+        run_db_scan(container, &conn, false, "test").await?;
 
         // Every scanned file is recorded, matched or not.
         let file_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM classified_file", ())
@@ -788,7 +832,7 @@ mod tests {
         let container: Arc<dyn FileSystem> =
             Arc::new(ZipFileSystem::new(zip_path.to_string_lossy().as_ref())?);
 
-        run_db_scan(container, &conn).await?;
+        run_db_scan(container, &conn, false, "test").await?;
 
         let mut rows = conn
             .query(
@@ -841,7 +885,7 @@ mod tests {
         let (_db, conn) = open_conn(":memory:").await?;
         let test_dir_str = test_dir.to_string_lossy();
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-        run_db_scan(container, &conn).await?;
+        run_db_scan(container, &conn, false, &test_dir_str).await?;
 
         // Verify Album: the id is the stable hash of the album path.
         let row = one_row(&conn, "SELECT album_id, title, album_path FROM album", ()).await?;
@@ -895,7 +939,7 @@ mod tests {
         let (_db, conn) = open_conn(":memory:").await?;
         let test_dir_str = test_dir.to_string_lossy();
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-        run_db_scan(container, &conn).await?;
+        run_db_scan(container, &conn, false, &test_dir_str).await?;
 
         // Location promoted into columns.
         let row = one_row(
@@ -997,30 +1041,59 @@ mod tests {
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
 
         // First run populates album (1 row) and album_file (1 row).
-        run_db_scan(container.clone(), &conn).await?;
+        run_db_scan(container.clone(), &conn, false, &test_dir_str).await?;
         let id_first = media_item_id_of(&conn, "Canon_40D.jpg").await?;
 
-        // Second run must not hit "FOREIGN KEY constraint failed" while clearing
-        // the previous run's rows.
-        run_db_scan(container, &conn).await?;
+        // Second run without --clear must not crash: the additive tables dedup on
+        // re-insert (INSERT OR IGNORE) rather than hitting a UNIQUE/PK conflict.
+        run_db_scan(container, &conn, false, &test_dir_str).await?;
 
-        // And the rebuild leaves exactly one of each, not duplicates.
+        // Additive tables hold exactly one of each despite the re-scan.
         let album_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM album", ())
             .await?
             .get(0)?;
-        assert_eq!(album_count, 1, "album rows after re-run");
+        assert_eq!(album_count, 1, "album deduped across runs");
         let album_file_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM album_file", ())
             .await?
             .get(0)?;
-        assert_eq!(album_file_count, 1, "album_file rows after re-run");
+        assert_eq!(album_file_count, 1, "album_file deduped across runs");
+        let media_item_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
+            .await?
+            .get(0)?;
+        assert_eq!(media_item_count, 1, "media_item deduped across runs");
 
-        // The media_item id is reproducible: a clear + rescan yields the same id,
-        // unlike the previous autoincrement rowid.
+        // The media_item id is reproducible: a rescan yields the same stable id.
         assert_eq!(
             id_first,
             media_item_id_of(&conn, "Canon_40D.jpg").await?,
             "media_item_id stable across runs"
         );
+
+        // Run-scoped tables instead accumulate: one run row per invocation, and
+        // classified rows carry each run's id.
+        let run_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM run", ())
+            .await?
+            .get(0)?;
+        assert_eq!(run_count, 2, "one run row per invocation");
+        let classified_runs: i64 =
+            one_row(&conn, "SELECT COUNT(DISTINCT run_id) FROM classified_file", ())
+                .await?
+                .get(0)?;
+        assert_eq!(classified_runs, 2, "classified_file rows are run-scoped");
+
+        // --clear wipes everything, including the run-scoped tables, and rebuilds
+        // from scratch without a "FOREIGN KEY constraint failed" on the deletes.
+        let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
+        run_db_scan(container, &conn, true, &test_dir_str).await?;
+        let run_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM run", ())
+            .await?
+            .get(0)?;
+        assert_eq!(run_count, 1, "clear resets the run log to just this run");
+        let classified_runs: i64 =
+            one_row(&conn, "SELECT COUNT(DISTINCT run_id) FROM classified_file", ())
+                .await?
+                .get(0)?;
+        assert_eq!(classified_runs, 1, "clear leaves only the current run's rows");
 
         fs::remove_dir_all(test_dir)?;
         Ok(())

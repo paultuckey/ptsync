@@ -63,6 +63,11 @@ enum Commands {
         /// Path to the sqlite database file to write
         #[arg(short, long, default_value = "db.sqlite")]
         output: String,
+
+        /// Clear existing rows before scanning; also rebuilds the database if
+        /// its schema is out of date
+        #[arg(long, action = clap::ArgAction::Set, default_value_t = false)]
+        clear: bool,
     },
     /// Sync files in an archive or directory into a standardised directory structure
     Sync {
@@ -117,9 +122,10 @@ fn go() -> anyhow::Result<()> {
             debug,
             input,
             output,
+            clear,
         } => {
             enable_debug(debug);
-            db_cmd::main(&input, &output)?
+            db_cmd::main(&input, &output, clear)?
         }
         Commands::Sync {
             debug,

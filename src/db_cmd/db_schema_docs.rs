@@ -14,6 +14,7 @@ fn create_statements() -> Vec<&'static str> {
         super::DB_MEDIA_PERSON_CREATE,
         super::DB_ALBUM_CREATE,
         super::DB_ALBUM_FILE_CREATE,
+        super::DB_RUN_CREATE,
         super::DB_CLASSIFIED_FILE_CREATE,
         super::DB_CLASSIFIED_DIR_CREATE,
     ]

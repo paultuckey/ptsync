@@ -44,6 +44,8 @@ Options:
   -d, --debug            Turn debugging information on
   -i, --input <INPUT>    The takeout or iCloud zip/directory
   -o, --output <OUTPUT>  Path to the sqlite database file to write [default: db.sqlite]
+      --clear <CLEAR>    Clear existing rows before scanning; also rebuilds the database if its
+                         schema is out of date [default: false] [possible values: true, false]
   -h, --help             Print help
 ```
 

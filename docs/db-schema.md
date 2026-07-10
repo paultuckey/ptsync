@@ -9,6 +9,8 @@ erDiagram
     person ||--o{ media_person : "person_id"
     album ||--o{ album_file : "album_id"
     media_item ||--o{ album_file : "media_item_id"
+    run ||--o{ classified_file : "run_id"
+    run ||--o{ classified_dir : "run_id"
     media_item {
         TEXT media_item_id PK
         TEXT media_path
@@ -51,8 +53,14 @@ erDiagram
         TEXT album_id FK
         TEXT media_item_id FK
     }
+    run {
+        INTEGER run_id PK
+        TEXT run_input
+        DATETIME run_date
+    }
     classified_file {
         INTEGER classified_file_id PK
+        INTEGER run_id FK
         TEXT file_path
         TEXT quick_file_type
         TEXT known_file_type
@@ -61,6 +69,7 @@ erDiagram
     }
     classified_dir {
         INTEGER classified_dir_id PK
+        INTEGER run_id FK
         TEXT dir_path
         TEXT known_dir_type
         TEXT known_dir_value
