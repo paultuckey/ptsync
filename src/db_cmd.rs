@@ -527,8 +527,25 @@ async fn open_conn(path: &str) -> anyhow::Result<(Database, Connection)> {
 }
 
 // Bump whenever a CREATE TABLE statement changes. `user_version` defaults to 0.
-// Consider migrating users existing DBs on incrementing.
+// Consider migrating users existing DBs on incrementing. The `schema_hash_is_current`
+// test fails on any schema change to force this bump; see it before editing.
 const DB_SCHEMA_VERSION: i64 = 3;
+
+// The whole schema, as the ordered statements `db_prepare` runs to build it:
+// tables first (parents before children so foreign keys resolve), then indexes.
+// Single source of truth — `db_prepare` builds from these, the docs generator
+// reads them, and `schema_hash_is_current` hashes them.
+const SCHEMA_TABLE_STATEMENTS: [&str; 8] = [
+    DB_MEDIA_ITEM_CREATE,
+    DB_PERSON_CREATE,
+    DB_MEDIA_PERSON_CREATE,
+    DB_ALBUM_CREATE,
+    DB_ALBUM_FILE_CREATE,
+    DB_RUN_CREATE,
+    DB_CLASSIFIED_FILE_CREATE,
+    DB_CLASSIFIED_DIR_CREATE,
+];
+const SCHEMA_INDEX_STATEMENTS: [&str; 1] = [DB_MEDIA_ITEM_PATH_INDEX];
 
 async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result<()> {
     let version = query_one(conn, "PRAGMA user_version", ())
@@ -555,18 +572,11 @@ async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result<()> {
     }
 
     // All create statements are `IF NOT EXISTS`: a no-op when the schema already
-    // matches, and a full build on a fresh or just-dropped database.
-    conn.execute(DB_MEDIA_ITEM_CREATE, ()).await?;
-    conn.execute(DB_PERSON_CREATE, ()).await?;
-    conn.execute(DB_MEDIA_PERSON_CREATE, ()).await?;
-    conn.execute(DB_ALBUM_CREATE, ()).await?;
-    conn.execute(DB_ALBUM_FILE_CREATE, ()).await?;
-    conn.execute(DB_RUN_CREATE, ()).await?;
-    conn.execute(DB_CLASSIFIED_FILE_CREATE, ()).await?;
-    conn.execute(DB_CLASSIFIED_DIR_CREATE, ()).await?;
-
-    // indexes
-    conn.execute(DB_MEDIA_ITEM_PATH_INDEX, ()).await?;
+    // matches, and a full build on a fresh or just-dropped database. Tables first,
+    // then indexes.
+    for stmt in SCHEMA_TABLE_STATEMENTS.iter().chain(&SCHEMA_INDEX_STATEMENTS) {
+        conn.execute(*stmt, ()).await?;
+    }
 
     // Clear existing rows only when asked. Delete children before parents so
     // foreign keys hold (media_person and album_file reference media_item;
@@ -609,6 +619,59 @@ async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Canonical text of the whole schema: line comments dropped and whitespace
+    /// collapsed, so only a meaningful SQL change moves the hash — reindenting a
+    /// statement or rewording a `-- comment` does not.
+    fn canonical_schema() -> String {
+        SCHEMA_TABLE_STATEMENTS
+            .iter()
+            .chain(&SCHEMA_INDEX_STATEMENTS)
+            .map(|stmt| {
+                stmt.lines()
+                    .map(|line| line.split("--").next().unwrap_or(line))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn schema_hash() -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(canonical_schema().as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Tripwire so a schema change can't ship without a deliberate version bump.
+    /// Any edit to a `CREATE TABLE`/`INDEX` statement moves `schema_hash()`, which
+    /// makes existing databases on the old `DB_SCHEMA_VERSION` incompatible. When
+    /// this fails and the change was intended:
+    ///   1. Bump `DB_SCHEMA_VERSION`.
+    ///   2. Decide how existing databases move from the previous version to the new
+    ///      one. Today `db_prepare` only offers a `--clear` rebuild (which discards
+    ///      data); add a real migration there if the data is worth keeping.
+    ///   3. Update `EXPECTED_SCHEMA_HASH` below to the value the failure prints.
+    #[test]
+    fn schema_hash_is_current() {
+        const EXPECTED_SCHEMA_HASH: &str =
+            "9fd9349c863b762b7926e2f205c1f47b7686f9f674c369b1e0726b416299f030";
+        let actual = schema_hash();
+        assert_eq!(DB_SCHEMA_VERSION, 3);
+        assert_eq!(
+            actual, EXPECTED_SCHEMA_HASH,
+            "\n\nDatabase schema changed (hash is now {actual}).\n\
+             If intentional:\n  \
+             1. Bump DB_SCHEMA_VERSION (currently {DB_SCHEMA_VERSION}).\n  \
+             2. Consider migrating existing databases from version {DB_SCHEMA_VERSION} to the new \
+             version (db_prepare currently only rebuilds on --clear).\n  \
+             3. Set EXPECTED_SCHEMA_HASH in this test to {actual}.\n"
+        );
+    }
 
     const DB_MEDIA_ITEM_SELECT_ALL: &str = "
         SELECT media_path, long_hash, short_hash, quick_file_type,
