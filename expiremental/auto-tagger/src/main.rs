@@ -83,8 +83,8 @@ struct Cli {
     base_url: String,
 
     /// Vision model name (must be available on the chosen server, e.g.
-    /// `ollama pull qwen2.5vl`)
-    #[arg(long, default_value = "qwen2.5vl")]
+    /// `ollama pull gemma4`)
+    #[arg(long, default_value = "gemma4")]
     model: String,
 
     /// Name of the environment variable holding the API key, for cloud providers

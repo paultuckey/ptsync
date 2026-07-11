@@ -19,6 +19,62 @@ shape that fits the existing architecture.
 
 ---
 
+## Quick start (local, with Ollama + Gemma 4)
+
+The default setup runs entirely on your machine — no cloud, nothing leaves it.
+
+1. **Install [Ollama](https://ollama.com)** and make sure it's running. It serves
+   an OpenAI-compatible API at `http://localhost:11434/v1`.
+
+    ```shell
+    ollama serve
+    ```
+
+2. **Pull the vision model** — Gemma 4:
+
+    ```shell
+    ollama pull gemma4
+    ```
+
+3. **Preview** what would be tagged (no model calls, writes nothing):
+
+   ```shell
+   cargo run -- --output ../../output/archive-small --dry-run
+   ```
+
+4. **Tag** the archive:
+
+   ```shell
+   cargo run -- --output ../../output/archive-small
+   ```
+
+   `gemma4` and `http://localhost:11434/v1` are the defaults, so no model flags
+   are needed. Quit any time (`Ctrl-C`) and re-run the same command to resume
+   where you left off. Add `--retry-errors` to re-attempt failures, or `--retag`
+   to redo everything (e.g. after switching to a better model).
+
+### A different model or a cloud provider
+
+Any OpenAI-compatible endpoint works. Point `--base-url`/`--model` at it, and for
+cloud providers name the environment variable holding the API key with
+`--api-key-env` — the key is read from the environment, never passed on the
+command line:
+
+```shell
+# a smaller/faster local model
+ollama pull moondream
+cargo run -- --output /path/to/archive --model moondream
+
+# a cloud provider (example — use any vision model the provider offers)
+export OPENROUTER_API_KEY=sk-...
+cargo run -- --output /path/to/archive \
+  --base-url https://openrouter.ai/api/v1 \
+  --model <provider/model> \
+  --api-key-env OPENROUTER_API_KEY
+```
+
+---
+
 ## 1. Goals & non-goals
 
 **Goals**
@@ -209,7 +265,7 @@ auto-tagger --output <DIR> [OPTIONS]
   -o, --output <DIR>       Archive directory to tag (has the .md siblings)
       --db <FILE>          Queue/cache db [default: <output>/.ptsync/auto-tags.db]
       --base-url <URL>     OpenAI-compatible base URL [default: http://localhost:11434/v1]
-      --model <NAME>       Vision model name [default: qwen2.5vl]
+      --model <NAME>       Vision model name [default: gemma4]
       --api-key-env <VAR>  Env var holding the API key (cloud only; local ignores it)
       --limit <N>          Tag at most N items this run (cost/time guardrail)
       --retry-errors       Re-attempt items currently in 'error'
