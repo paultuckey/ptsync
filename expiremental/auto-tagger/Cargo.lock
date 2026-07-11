@@ -187,23 +187,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfdc70193dadb9d7287fa4b633f15f90c876915b31f6af17da307fc59c9859a8"
 
 [[package]]
-name = "auto-tagger"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "heic",
- "image",
- "indicatif",
- "serde_json",
- "tokio",
- "turso",
- "ureq",
- "yaml-rust2",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1566,6 +1549,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "ptsync-auto-tagger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "heic",
+ "image",
+ "indicatif",
+ "serde_json",
+ "tokio",
+ "turso",
+ "ureq",
+ "yaml-rust2",
 ]
 
 [[package]]

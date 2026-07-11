@@ -1,5 +1,5 @@
 [package]
-name = "photos-ui3"
+name = "ptsync-ui"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -16,6 +16,7 @@ publish = false
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v0.224.10" }
 # Matches the version the parent ptsync crate uses; `bundled` compiles SQLite
 # from source so there's no system dependency.
+# TODO: use turso
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Decodes the actual photo bytes for the in-app preview. The `0.25` requirement
 # unifies with the exact `image` version gpui depends on, so `image::Frame` is

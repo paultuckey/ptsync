@@ -23,6 +23,7 @@ Features:
 ## Run
 
 ```sh
+PTSYNC_MEDIA_ROOT=~/os/ptsync/
 cargo run
 ```
 

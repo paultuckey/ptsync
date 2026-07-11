@@ -3659,16 +3659,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "photos-ui3"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "heic",
- "image",
- "rusqlite",
-]
-
-[[package]]
 name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3881,6 +3871,16 @@ checksum = "645dbe486e346d9b5de3ef16ede18c26e6c70ad97418f4874b8b1889d6e761ea"
 dependencies = [
  "ar_archive_writer",
  "cc",
+]
+
+[[package]]
+name = "ptsync-ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "heic",
+ "image",
+ "rusqlite",
 ]
 
 [[package]]
