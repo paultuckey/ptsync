@@ -6,6 +6,9 @@
 ## ptsync
 
 ```
+Merge Google Takeout and iCloud photo exports into one deduplicated, date-organized archive of
+ordinary files and Markdown notes
+
 Usage: ptsync <COMMAND>
 
 Commands:

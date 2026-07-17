@@ -43,10 +43,6 @@ impl OsFileSystem {
         }
     }
 
-    pub fn root_exists(&self) -> bool {
-        self.root.exists()
-    }
-
     pub fn write<R: Read>(&self, dry_run: bool, path: &str, mut reader: R) {
         let p = self.root.join(path);
         if dry_run {

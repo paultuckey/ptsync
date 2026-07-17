@@ -40,11 +40,7 @@ pub(crate) fn main(
     let mut output_container_o: Option<OsFileSystem> = None;
     if let Some(output) = output_directory {
         info!("Output directory: {output}");
-        let output_container = OsFileSystem::new(output);
-        if !output_container.root_exists() {
-            warn!("Output directory does not exist {output}");
-        }
-        output_container_o = Some(output_container);
+        output_container_o = Some(OsFileSystem::new(output));
     }
     let mut deduper = Deduplicator::new();
     let mut final_path_by_checksum = HashMap::<String, String>::new();
