@@ -5,7 +5,7 @@ date-organized archive - stored as ordinary files plus Markdown notes that you f
 own, with no database or proprietary app needed to read it later.
 
 ![A Google Takeout zip going in; a date-sorted archive of ordinary files and Markdown
-notes coming out, with a photo that arrived twice stored once](tools/demo-generator/generated/demo.gif)
+notes coming out, with a photo that arrived twice stored once](docs/demo.gif)
 
 ## The problem
 
