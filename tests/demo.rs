@@ -1,44 +1,30 @@
-//! Generates the demo GIF shown at the top of the README, and verifies (or,
-//! under `UPDATE_DOCS`, rewrites) the committed `docs/demo.cast` / `docs/demo.gif`.
-//!
-//! Regenerate after changing anything the demo shows:
+//! Integration test that regenerates and verifies the README demo: the committed
+//! `docs/demo.cast` (an [asciicast v2] recording) and the `docs/demo.gif` rendered
+//! from it. Its in-process siblings — the `cli` and `db_schema` doc generators —
+//! live in `src/docs_generator/`.
 //!
 //! ```shell
-//! UPDATE_DOCS=1 cargo test demo
+//! UPDATE_DOCS=1 cargo test --test demo   # after changing anything the demo shows
 //! ```
 //!
-//! The pipeline is: build the real `ptsync` binary, run a short script of real
-//! commands against a fixture Google Takeout zip built from `test/takeout_basic`,
-//! capture what they actually print, and assemble an [asciicast v2] recording.
-//! Under `UPDATE_DOCS` that recording is written to `docs/demo.cast` and rendered
-//! to `docs/demo.gif` with [agg].
+//! It runs a short script of real `ptsync` commands against a fixture Google
+//! Takeout zip — built from the committed `test/takeout_basic` tree, never a real
+//! library — and captures what they print. `UPDATE_DOCS` writes the cast and
+//! renders the GIF with [agg]; a plain `cargo test` instead asserts the freshly
+//! captured cast matches the committed one, so the demo can't drift.
 //!
-//! **What a plain `cargo test` checks.** The cast is deterministic text captured
-//! from the binary, so — like the `cli` and `db_schema` generators — this test
-//! rebuilds the cast and asserts it matches the committed `docs/demo.cast`
-//! byte-for-byte, failing if the demo has drifted. It does *not* re-verify the
-//! GIF: rendering shells out to the external `agg` renderer (installed on first
-//! run), which is too heavy for every test run and needs network access CI can't
-//! assume. The GIF is a faithful render of the cast, so a matching cast is a good
-//! proxy — only `UPDATE_DOCS` actually re-renders it.
+//! Two things to know:
 //!
-//! The binary is built in the same `debug` profile `cargo test` already uses, so
-//! verifying the cast costs a near-instant freshness check rather than a fresh
-//! release build. The captured output is identical either way — it's log lines
-//! and file contents, which optimization doesn't change.
+//! - **It's an integration test** so it can capture output a library call
+//!   couldn't: the real binary's output is shaped by `main.rs`'s clap and
+//!   `tracing` setup and emitted from `rayon` threads. Cargo builds the binary and
+//!   passes its path in `CARGO_BIN_EXE_ptsync`.
+//! - **A plain `cargo test` skips the GIF.** Rendering needs the external `agg`
+//!   (installed on first run) — too heavy and network-bound for every run — and
+//!   the GIF only renders the cast, so a matching cast is enough.
 //!
-//! Two properties are worth knowing when editing this:
-//!
-//! - **The content is real.** Every line in the GIF is captured from the binary
-//!   built from the current working tree, so the demo cannot drift away from what
-//!   ptsync actually prints. Change the output, re-run this, and the GIF follows.
-//! - **The timing is authored.** A real sync of the fixture finishes in about
-//!   15ms, which would render as one unreadable frame, so this file paces the
-//!   output out line by line. The `*_SECS` constants below are the only made-up
-//!   numbers here.
-//!
-//! The fixture is the committed `test/takeout_basic` tree, never a real photo
-//! library, so regenerating the GIF can't leak private photos into the README.
+//! A real sync of the fixture takes ~15ms, one unreadable frame, so the `*_SECS`
+//! constants below pace the playback; they're the demo's only invented numbers.
 //!
 //! [asciicast v2]: https://docs.asciinema.org/manual/asciicast/v2/
 //! [agg]: https://github.com/asciinema/agg
@@ -48,16 +34,15 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Terminal width. Wide enough that the longest line the demo prints — a photo
-/// note's 64-character checksum — doesn't wrap.
+/// Terminal width, wide enough that the demo's longest line — a note's 64-char
+/// checksum — doesn't wrap.
 const COLS: usize = 100;
-/// Row bounds. The real height is the script's line count (so nothing scrolls
-/// out of frame), clamped into this range so an unexpectedly chatty run can't
-/// produce an absurdly tall GIF.
+/// Row bounds. Height tracks the script's line count so nothing scrolls off,
+/// clamped here so an unexpectedly chatty run can't produce a giant GIF.
 const MIN_ROWS: usize = 24;
 const MAX_ROWS: usize = 46;
 
-/// Pacing. These are the only invented numbers in the demo — see the module docs.
+/// Pacing, in seconds.
 const TYPE_CHAR_SECS: f64 = 0.035;
 const AFTER_ENTER_SECS: f64 = 0.45;
 const PER_LINE_SECS: f64 = 0.13;
@@ -70,22 +55,18 @@ const HOLD_END_SECS: f64 = 3.0;
 const TAKEOUT_ZIP: &str = "takeout-20240715.zip";
 const ARCHIVE_DIR: &str = "photo-archive";
 
-/// The binary / displayed command name.
-const BIN: &str = crate::COMMAND_NAME;
+/// The command name shown in the demo — the package name, which is also the
+/// binary name a user types.
+const BIN: &str = env!("CARGO_PKG_NAME");
 
 /// Where the committed artifacts live, alongside the other generated docs.
 const CAST_PATH: &str = "docs/demo.cast";
 const GIF_PATH: &str = "docs/demo.gif";
 
-/// The agg release to render with, pinned so the GIF doesn't change out from
-/// under us when agg does.
+/// The agg release to render with, pinned so the GIF doesn't shift when agg does.
 const AGG_TAG: &str = "v1.9.0";
 
 /// Verify the committed demo is current — and, under `UPDATE_DOCS`, rewrite it.
-///
-/// A plain `cargo test` rebuilds the cast from the real binary and asserts it
-/// matches `docs/demo.cast`; `UPDATE_DOCS=1` writes the cast and re-renders the
-/// GIF instead. See the module docs for why only the GIF render is gated.
 #[test]
 fn demo_up_to_date() -> Result<()> {
     let root = repo_root()?;
@@ -111,12 +92,11 @@ fn demo_up_to_date() -> Result<()> {
     Ok(())
 }
 
-/// Build the asciicast by running the real binary against the fixture.
-///
-/// This is the whole demo minus writing/rendering, so both the verify and the
-/// `UPDATE_DOCS` paths assemble the cast the exact same way.
+/// Assemble the cast by running the real binary against the fixture — the whole
+/// demo bar writing and rendering, so the verify and `UPDATE_DOCS` paths build it
+/// identically.
 fn build_cast(root: &Path) -> Result<Cast> {
-    let ptsync = build_ptsync(root)?;
+    let ptsync = ptsync_bin();
     let demo_dir = prepare_demo_dir(root)?;
 
     let mut cast = Cast::new();
@@ -223,11 +203,10 @@ impl Cast {
         Ok(output)
     }
 
-    /// Show a dimmed `#` comment followed by generated text.
+    /// Show a dimmed `#` comment, then generated text.
     ///
-    /// Used for the directory tree, which is derived from the real archive but
-    /// isn't the output of a command — the comment marks it as narration rather
-    /// than something the viewer should try to type.
+    /// Used for the directory tree: it's derived from the real archive, not a
+    /// command's output, so the `#` marks it as narration rather than input.
     fn note(&mut self, comment: &str, body: &str) {
         self.out(&format!("\u{1b}[2m{comment}\u{1b}[0m\n"));
         self.wait(0.4);
@@ -249,9 +228,8 @@ impl Cast {
         (self.lines + 2).clamp(MIN_ROWS, MAX_ROWS)
     }
 
-    /// Serialize to the asciicast v2 file format: a JSON header line followed by
-    /// one JSON event line each. Kept separate from [`write`](Self::write) so a
-    /// plain `cargo test` can compare this against the committed file without
+    /// Serialize to asciicast v2 text. Separate from [`write`](Self::write) so a
+    /// plain `cargo test` can compare it against the committed file without
     /// touching disk.
     fn render(&self) -> String {
         // `timestamp` is deliberately omitted: it would change on every run and
@@ -311,40 +289,22 @@ fn capture(cwd: &Path, argv: &[String]) -> Result<String> {
 // fixture setup
 // ---------------------------------------------------------------------------
 
-/// The demo module lives in the main crate, so `CARGO_MANIFEST_DIR` is the repo
-/// root — the same directory the other doc tests write into.
+/// Cargo runs integration tests with `CARGO_MANIFEST_DIR` set to the package
+/// root, the same directory the committed docs live under.
 fn repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
-/// Build the real binary, so the demo always shows the current working tree.
-///
-/// Built in the `debug` profile — the one `cargo test` is already using — so a
-/// verifying run reuses those artifacts (a near-instant freshness check) instead
-/// of paying for a separate release build. The captured output is log lines and
-/// file contents, which is identical under either profile.
-fn build_ptsync(root: &Path) -> Result<PathBuf> {
-    println!("building ptsync (debug)...");
-    let status = Command::new("cargo")
-        .args(["build", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .status()
-        .context("running cargo build")?;
-    if !status.success() {
-        bail!("cargo build failed");
-    }
-    let bin = root.join(format!("target/debug/{BIN}"));
-    if !bin.is_file() {
-        bail!("expected a ptsync binary at {}", bin.display());
-    }
-    Ok(bin)
+/// The `ptsync` binary under test — built by Cargo and handed to us via
+/// `CARGO_BIN_EXE_ptsync`, so it always matches the current tree.
+fn ptsync_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_ptsync"))
 }
 
-/// Create a clean scratch directory holding just the fixture takeout zip.
+/// Create a clean scratch dir holding just the fixture takeout zip.
 ///
-/// It lives under `target/` so it's already gitignored, and the commands run
-/// with this as their working directory so the paths in the GIF stay short and
-/// relative rather than exposing an absolute path from the machine that built it.
+/// Under `target/` so it's already gitignored; the demo commands run here so the
+/// paths shown stay short and relative, not absolute paths from the build machine.
 fn prepare_demo_dir(root: &Path) -> Result<PathBuf> {
     let demo_dir = root.join("target/demo");
     if demo_dir.exists() {
@@ -447,12 +407,10 @@ fn push_tree(dir: &Path, prefix: &mut String, out: &mut String) -> Result<()> {
 
 /// Pick the per-photo note that best shows what ptsync does.
 ///
-/// Album notes under `albums/` are skipped — the per-photo note is the one
-/// carrying the metadata frontmatter that makes the point. Among the rest we
-/// take the one with the most frontmatter, which is the one that demonstrates
-/// the most: a photo that arrived twice has two `original-paths` and an album
-/// wikilink, where a plain one-off has neither. Chosen by inspection rather
-/// than hard-coded so it still picks well if the fixture changes.
+/// Skip album notes under `albums/`; among the per-photo notes, take the one with
+/// the most frontmatter — a photo that arrived twice carries two `original-paths`
+/// and an album wikilink where a one-off carries neither. Discovered rather than
+/// hard-coded, so it survives fixture changes.
 fn richest_photo_note(archive: &Path) -> Result<PathBuf> {
     let mut found = Vec::new();
     collect_files(archive, &mut found)?;
