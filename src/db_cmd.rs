@@ -511,7 +511,7 @@ const DB_SCHEMA_VERSION: i64 = 3;
 // tables first (parents before children so foreign keys resolve), then indexes.
 // Single source of truth — `db_prepare` builds from these, the docs generator
 // reads them, and `schema_hash_is_current` hashes them.
-const SCHEMA_TABLE_STATEMENTS: [&str; 8] = [
+pub(crate) const SCHEMA_TABLE_STATEMENTS: [&str; 8] = [
     DB_MEDIA_ITEM_CREATE,
     DB_PERSON_CREATE,
     DB_MEDIA_PERSON_CREATE,
@@ -1118,12 +1118,8 @@ mod tests {
     }
 }
 
-/// Test-only: generates `docs/db-schema.md` from the `CREATE TABLE` statements
-/// above and verifies the committed copy is current.
-#[cfg(test)]
-mod db_schema_docs;
-
 /// Test-only: checks every SQL snippet in `docs/db-example-queries.md` runs
-/// against a scanned database.
+/// against a scanned database. (The `docs/db-schema.md` generator that reads
+/// `SCHEMA_TABLE_STATEMENTS` lives in the crate's `docs_generator` module.)
 #[cfg(test)]
 mod db_example_queries;

@@ -1,15 +1,31 @@
-//! Generates the demo GIF shown at the top of the README.
+//! Generates the demo GIF shown at the top of the README, and verifies (or,
+//! under `UPDATE_DOCS`, rewrites) the committed `docs/demo.cast` / `docs/demo.gif`.
 //!
-//! Run it with:
+//! Regenerate after changing anything the demo shows:
 //!
 //! ```shell
-//! cargo run --manifest-path demo/Cargo.toml
+//! UPDATE_DOCS=1 cargo test demo
 //! ```
 //!
 //! The pipeline is: build the real `ptsync` binary, run a short script of real
 //! commands against a fixture Google Takeout zip built from `test/takeout_basic`,
-//! capture what they actually print, write an [asciicast v2] file, then render it
-//! to `tools/demo-generator/generated/demo.gif` with [agg].
+//! capture what they actually print, and assemble an [asciicast v2] recording.
+//! Under `UPDATE_DOCS` that recording is written to `docs/demo.cast` and rendered
+//! to `docs/demo.gif` with [agg].
+//!
+//! **What a plain `cargo test` checks.** The cast is deterministic text captured
+//! from the binary, so — like the `cli` and `db_schema` generators — this test
+//! rebuilds the cast and asserts it matches the committed `docs/demo.cast`
+//! byte-for-byte, failing if the demo has drifted. It does *not* re-verify the
+//! GIF: rendering shells out to the external `agg` renderer (installed on first
+//! run), which is too heavy for every test run and needs network access CI can't
+//! assume. The GIF is a faithful render of the cast, so a matching cast is a good
+//! proxy — only `UPDATE_DOCS` actually re-renders it.
+//!
+//! The binary is built in the same `debug` profile `cargo test` already uses, so
+//! verifying the cast costs a near-instant freshness check rather than a fresh
+//! release build. The captured output is identical either way — it's log lines
+//! and file contents, which optimization doesn't change.
 //!
 //! Two properties are worth knowing when editing this:
 //!
@@ -29,7 +45,6 @@
 
 use anyhow::{Context, Result, bail};
 use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -55,14 +70,54 @@ const HOLD_END_SECS: f64 = 3.0;
 const TAKEOUT_ZIP: &str = "takeout-20240715.zip";
 const ARCHIVE_DIR: &str = "photo-archive";
 
+/// The binary / displayed command name.
+const BIN: &str = crate::COMMAND_NAME;
+
+/// Where the committed artifacts live, alongside the other generated docs.
+const CAST_PATH: &str = "docs/demo.cast";
+const GIF_PATH: &str = "docs/demo.gif";
+
 /// The agg release to render with, pinned so the GIF doesn't change out from
 /// under us when agg does.
 const AGG_TAG: &str = "v1.9.0";
 
-fn main() -> Result<()> {
+/// Verify the committed demo is current — and, under `UPDATE_DOCS`, rewrite it.
+///
+/// A plain `cargo test` rebuilds the cast from the real binary and asserts it
+/// matches `docs/demo.cast`; `UPDATE_DOCS=1` writes the cast and re-renders the
+/// GIF instead. See the module docs for why only the GIF render is gated.
+#[test]
+fn demo_up_to_date() -> Result<()> {
     let root = repo_root()?;
-    let ptsync = build_ptsync(&root)?;
-    let demo_dir = prepare_demo_dir(&root)?;
+    let cast = build_cast(&root)?;
+    let generated = cast.render();
+    let cast_path = root.join(CAST_PATH);
+
+    if std::env::var_os("UPDATE_DOCS").is_some() {
+        cast.write(&cast_path)?;
+        println!("wrote {}", cast_path.display());
+
+        let gif_path = root.join(GIF_PATH);
+        render_gif(&cast_path, &gif_path, cast.rows())?;
+        println!("wrote {}", gif_path.display());
+        return Ok(());
+    }
+
+    let existing = std::fs::read_to_string(&cast_path).unwrap_or_default();
+    assert_eq!(
+        generated, existing,
+        "{CAST_PATH} is out of date. Regenerate with:\n\n    UPDATE_DOCS=1 cargo test\n"
+    );
+    Ok(())
+}
+
+/// Build the asciicast by running the real binary against the fixture.
+///
+/// This is the whole demo minus writing/rendering, so both the verify and the
+/// `UPDATE_DOCS` paths assemble the cast the exact same way.
+fn build_cast(root: &Path) -> Result<Cast> {
+    let ptsync = build_ptsync(root)?;
+    let demo_dir = prepare_demo_dir(root)?;
 
     let mut cast = Cast::new();
     cast.wait(0.6);
@@ -70,7 +125,7 @@ fn main() -> Result<()> {
     // 1. The headline: a takeout zip goes in, a tidy archive comes out.
     cast.run(
         &demo_dir,
-        &format!("ptsync sync --input {TAKEOUT_ZIP} --output {ARCHIVE_DIR}"),
+        &format!("{BIN} sync --input {TAKEOUT_ZIP} --output {ARCHIVE_DIR}"),
         &[
             path_arg(&ptsync)?,
             "sync".to_string(),
@@ -100,14 +155,7 @@ fn main() -> Result<()> {
         &["cat".to_string(), path_arg(&note)?],
     )?;
 
-    let cast_path = root.join("tools/demo-generator/generated/demo.cast");
-    cast.write(&cast_path)?;
-    println!("wrote {}", cast_path.display());
-
-    let gif_path = root.join("tools/demo-generator/generated/demo.gif");
-    render_gif(&cast_path, &gif_path, cast.rows())?;
-    println!("wrote {}", gif_path.display());
-    Ok(())
+    Ok(cast)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,10 +249,11 @@ impl Cast {
         (self.lines + 2).clamp(MIN_ROWS, MAX_ROWS)
     }
 
-    fn write(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+    /// Serialize to the asciicast v2 file format: a JSON header line followed by
+    /// one JSON event line each. Kept separate from [`write`](Self::write) so a
+    /// plain `cargo test` can compare this against the committed file without
+    /// touching disk.
+    fn render(&self) -> String {
         // `timestamp` is deliberately omitted: it would change on every run and
         // make the committed cast file churn for no reason.
         let header = serde_json::json!({
@@ -213,12 +262,20 @@ impl Cast {
             "height": self.rows(),
             "env": { "TERM": "xterm-256color" },
         });
-        let mut file =
-            File::create(path).with_context(|| format!("creating {}", path.display()))?;
-        writeln!(file, "{header}")?;
+        let mut out = format!("{header}\n");
         for event in &self.events {
-            writeln!(file, "{event}")?;
+            out.push_str(event);
+            out.push('\n');
         }
+        out
+    }
+
+    fn write(&self, path: &Path) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, self.render())
+            .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 }
@@ -254,28 +311,29 @@ fn capture(cwd: &Path, argv: &[String]) -> Result<String> {
 // fixture setup
 // ---------------------------------------------------------------------------
 
-/// The demo crate lives at `<root>/demo`, so the repo root is its parent.
+/// The demo module lives in the main crate, so `CARGO_MANIFEST_DIR` is the repo
+/// root — the same directory the other doc tests write into.
 fn repo_root() -> Result<PathBuf> {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest
-        .parent()
-        .context("demo crate should have a parent directory")?
-        .to_path_buf();
-    Ok(root)
+    Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
-/// Build the real binary, so the GIF always shows the current working tree.
+/// Build the real binary, so the demo always shows the current working tree.
+///
+/// Built in the `debug` profile — the one `cargo test` is already using — so a
+/// verifying run reuses those artifacts (a near-instant freshness check) instead
+/// of paying for a separate release build. The captured output is log lines and
+/// file contents, which is identical under either profile.
 fn build_ptsync(root: &Path) -> Result<PathBuf> {
-    println!("building ptsync (release)...");
+    println!("building ptsync (debug)...");
     let status = Command::new("cargo")
-        .args(["build", "--release", "--manifest-path"])
+        .args(["build", "--manifest-path"])
         .arg(root.join("Cargo.toml"))
         .status()
         .context("running cargo build")?;
     if !status.success() {
         bail!("cargo build failed");
     }
-    let bin = root.join("target/release/ptsync");
+    let bin = root.join(format!("target/debug/{BIN}"));
     if !bin.is_file() {
         bail!("expected a ptsync binary at {}", bin.display());
     }
