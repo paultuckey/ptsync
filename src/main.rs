@@ -20,6 +20,7 @@ mod util;
 
 use clap::{Parser, Subcommand};
 use tracing::{Level, debug, error, info};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -161,6 +162,16 @@ fn enable_debug(debug: bool) {
     let registry_layer = tracing_subscriber::fmt::layer()
         .with_writer(progress::IndicatifWriter)
         .with_target(false);
+
+    // A normal run should read like rsync's output: just the message. A
+    // timestamp on every line is noise when the whole sync takes a second, but
+    // it earns its place when reading back a --debug trace.
+    let registry_layer = if debug {
+        registry_layer.boxed()
+    } else {
+        registry_layer.without_time().boxed()
+    };
+
     tracing_subscriber::registry()
         .with(registry_layer)
         .with(filter)
