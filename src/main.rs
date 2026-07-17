@@ -261,7 +261,7 @@ mod cli_docs {
 
         let existing = std::fs::read_to_string(DOC_PATH).unwrap_or_default();
         assert_eq!(
-            existing, generated,
+            generated, existing,
             "{DOC_PATH} is out of date. Regenerate with:\n\n    UPDATE_DOCS=1 cargo test\n"
         );
         Ok(())
