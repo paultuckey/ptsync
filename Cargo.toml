@@ -3,7 +3,7 @@ name = "ptsync"
 version = "0.1.0"
 
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.90"
 
 description = "Merge Google Takeout and iCloud photo exports into one deduplicated, date-organized archive of ordinary files and Markdown notes"
 license = "MIT"
@@ -12,28 +12,28 @@ keywords = ["photos", "google-takeout", "icloud", "deduplication", "backup"]
 categories = ["command-line-utilities", "multimedia::images", "filesystem"]
 
 [dependencies]
-clap = { version = "4.6", features = ["derive", "wrap_help"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-anyhow = { version = "1.0" }
-csv = { version = "1.4" }
-tracing = { version = "0.1", features = ["log"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
-sha2 = "0.11"
-zip = "8.6"
-chrono = "0.4"
-file-format = "0.29"
-yaml-rust2 = "0.11"
-regex = "1.13"
-strum_macros = "0.28"
-turso = { version = "0.7", default-features = false }
-tokio = { version = "1.53", features = ["rt", "macros"] }
-nom-exif = "3.6"
-hex = "0.4"
-unicode-normalization = "0.1"
-rayon = "1.12"
-indicatif = "0.18"
-tempfile = "3.27"
+clap = { version = "4.6.2", features = ["derive", "wrap_help"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+anyhow = { version = "1.0.104" }
+csv = { version = "1.4.0" }
+tracing = { version = "0.1.44", features = ["log"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
+sha2 = "0.11.0"
+zip = "8.6.0"
+chrono = "0.4.45"
+file-format = "0.29.0"
+yaml-rust2 = "0.11.0"
+regex = "1.13.1"
+strum_macros = "0.28.0"
+turso = { version = "0.7.0", default-features = false }
+tokio = { version = "1.53.0", features = ["rt", "macros"] }
+nom-exif = "3.6.1"
+hex = "0.4.3"
+unicode-normalization = "0.1.25"
+rayon = "1.12.0"
+indicatif = "0.18.6"
+tempfile = "3.27.0"
 
 [lints.rust]
 unsafe_code = "forbid"
