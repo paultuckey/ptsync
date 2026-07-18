@@ -9,6 +9,7 @@ mod docs_generator;
 mod exif_util;
 mod file_type;
 mod fs;
+mod fs_s3;
 mod info_cmd;
 mod inspect;
 mod markdown;

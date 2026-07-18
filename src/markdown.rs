@@ -1,4 +1,4 @@
-use crate::fs::{FileSystem, OsFileSystem};
+use crate::fs::WritableFileSystem;
 use crate::media::{MediaFileInfo, best_guess_taken_dt};
 use crate::util::name_part;
 use anyhow::anyhow;
@@ -88,7 +88,7 @@ pub(crate) fn sync_markdown(
     media_file: &MediaFileInfo,
     resolved_media_path: &str,
     album_names: &[String],
-    output_c: &mut OsFileSystem,
+    output_c: &dyn WritableFileSystem,
 ) -> anyhow::Result<()> {
     // The sidecar is placed beside the *resolved* media file (the path
     // `write_media` actually wrote to), not the bare date path. Same-instant
@@ -125,7 +125,7 @@ pub(crate) fn sync_markdown(
     let md_res = assemble_markdown(&mfm, &e_yaml, &e_md)?;
     if let AssembledMarkdown::Modified(md_str) = md_res {
         let md_bytes = md_str.as_bytes().to_vec();
-        output_c.write(dry_run, &output_path, Cursor::new(&md_bytes));
+        output_c.write(dry_run, &output_path, &mut Cursor::new(&md_bytes))?;
     }
     Ok(())
 }

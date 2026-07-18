@@ -258,7 +258,7 @@ pub(crate) fn build_album_md(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::OsFileSystem;
+    use crate::fs::{OsFileSystem, WritableFileSystem};
 
     #[test]
     fn test_ic_sample() -> anyhow::Result<()> {
@@ -508,12 +508,12 @@ mod tests {
             files: vec!["file1.jpg".to_string()],
         };
         let (md, _) = build_album_md(&album, None, "../", None, "");
-        assert!(out.write_if_changed(false, &album.desired_album_md_path, md.as_bytes()));
+        assert!(out.write_if_changed(false, &album.desired_album_md_path, md.as_bytes())?);
 
         // Re-run: identical content regenerated from the same inputs.
         let (md2, _) = build_album_md(&album, None, "../", None, "");
         assert_eq!(md, md2);
-        assert!(!out.write_if_changed(false, &album.desired_album_md_path, md2.as_bytes()));
+        assert!(!out.write_if_changed(false, &album.desired_album_md_path, md2.as_bytes())?);
         Ok(())
     }
 }
