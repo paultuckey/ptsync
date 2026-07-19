@@ -64,6 +64,34 @@ async fn build_client(config: &S3Config) -> Client {
     }
 }
 
+/// The region a bucket actually lives in, when it differs from the one the
+/// client is pointed at - else `None`.
+///
+/// S3 signs per-region and a region-specific endpoint won't redirect: asking
+/// `ap-southeast-2` about a bucket in `ap-southeast-6` fails with
+/// `IllegalLocationConstraintException` rather than being routed. AWS does put
+/// the bucket's real region in `x-amz-bucket-region` on those failures, so a
+/// cheap `HeadBucket` probe is enough to learn it and rebuild the client - no
+/// need for the caller to know each bucket's region up front.
+async fn bucket_region_override(
+    client: &Client,
+    bucket: &str,
+    config: &S3Config,
+) -> Option<String> {
+    // S3-compatible stores (MinIO, localstack) serve every bucket from the one
+    // endpoint and don't set the header; skip the probe entirely.
+    if config.endpoint_url.is_some() {
+        return None;
+    }
+    // Success means the region is already right. A failure for any *other*
+    // reason (missing bucket, no credentials) carries no region header, so this
+    // falls through to `None` and the real error surfaces from the listing.
+    let err = client.head_bucket().bucket(bucket).send().await.err()?;
+    let actual = err.raw_response()?.headers().get("x-amz-bucket-region")?;
+    let current = client.config().region().map(|r| r.as_ref());
+    (current != Some(actual)).then(|| actual.to_string())
+}
+
 /// An S3 bucket/prefix as a [`FileSystem`] + [`WritableFileSystem`]. Object keys
 /// map to `/`-separated paths relative to the prefix, matching the zip and
 /// directory scanners.
@@ -87,7 +115,21 @@ impl S3FileSystem {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        let client = rt.block_on(build_client(&s3_config()));
+        let config = s3_config();
+        let client = rt.block_on(async {
+            let client = build_client(&config).await;
+            match bucket_region_override(&client, &uri.bucket, &config).await {
+                Some(region) => {
+                    debug!("Bucket {} is in {region}; rebuilding client", uri.bucket);
+                    build_client(&S3Config {
+                        region: Some(region),
+                        ..config.clone()
+                    })
+                    .await
+                }
+                None => client,
+            }
+        });
         Self::from_client(client, uri, rt)
     }
 

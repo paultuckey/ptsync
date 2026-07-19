@@ -24,10 +24,16 @@ pub(crate) fn main(input: &String, output: &str, clear: bool) -> anyhow::Result<
 
     info!("Writing database: {output}");
     let rt = runtime::Builder::new_current_thread().build()?;
-    rt.block_on(async {
+    // `container` keeps its own handle so the one moved into the async block is
+    // never the last: `S3FileSystem` owns a tokio runtime, and dropping a runtime
+    // from inside another runtime's context panics. This way the S3 runtime is
+    // released here, on a plain blocking thread, after `block_on` returns.
+    let result = rt.block_on(async {
         let (_db, conn) = open_conn(output).await?;
-        run_db_scan(container, &conn, clear, input).await
-    })
+        run_db_scan(container.clone(), &conn, clear, input).await
+    });
+    drop(container);
+    result
 }
 
 async fn run_db_scan(
