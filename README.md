@@ -119,6 +119,38 @@ Add your own notes here - they survive every later run.
 
 Add `--debug` to any command for verbose logging.
 
+## Syncing with S3
+
+Anywhere ptsync takes a path you can use an `s3://bucket/prefix` URL instead — so you can
+sync a local export or zip **into** a bucket, pull a bucket back **down** to local, or go
+**bucket → bucket**:
+
+```shell
+# Local export or zip → bucket
+ptsync sync --input "takeout-20250614.zip" --output "s3://my-archive/photos"
+
+# Bucket → bucket
+ptsync sync --input "s3://takeout-dump/2025" --output "s3://my-archive/photos"
+
+# Bucket → local
+ptsync sync --input "s3://my-archive/photos" --output ~/photo-archive
+```
+
+**Credentials** come from the standard AWS chain — environment variables
+(`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`), `~/.aws/`, SSO, or an
+instance role — and are never passed as flags. For non-default setups, three optional flags
+apply to any `s3://` path:
+
+| Flag | Purpose                                                                              |
+| --- |--------------------------------------------------------------------------------------|
+| `--s3-region <region>` | Region for the bucket (else `AWS_REGION` / your profile)                             |
+| `--s3-profile <name>` | A named profile from `~/.aws/` (else `AWS_PROFILE` / `default`)                      |
+| `--s3-endpoint-url <url>` | An S3-compatible endpoint such as MinIO; also switches on path-style addressing      |
+
+Re-runs stay idempotent: ptsync records each object's SHA-256 as S3's native checksum, so a
+later sync skips anything already uploaded without re-downloading it. As with local runs,
+ptsync only ever **adds** objects — it never deletes.
+
 ## Commands
 
 | Command | What it does                                                                                                                                          |

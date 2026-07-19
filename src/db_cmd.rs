@@ -1,6 +1,6 @@
 use crate::classify::{classify_dir, classify_file};
 use crate::file_type::QuickFileType;
-use crate::fs::{FileSystem, OsFileSystem, ZipFileSystem};
+use crate::fs::{FileSystem, open_input};
 use crate::inspect::inspect_media_files;
 use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
 use crate::progress::Progress;
@@ -20,17 +20,7 @@ const DB_BATCH_SIZE: usize = 100;
 
 pub(crate) fn main(input: &String, output: &str, clear: bool) -> anyhow::Result<()> {
     debug!("Inspecting: {input}");
-    let path = Path::new(input);
-    if !path.exists() {
-        return Err(anyhow!("Input path does not exist: {}", input));
-    }
-    let container: Arc<dyn FileSystem> = if path.is_dir() {
-        info!("Input directory: {input}");
-        Arc::new(OsFileSystem::new(input))
-    } else {
-        info!("Input zip: {input}");
-        Arc::new(ZipFileSystem::new(input)?)
-    };
+    let container = open_input(input)?;
 
     info!("Writing database: {output}");
     let rt = runtime::Builder::new_current_thread().build()?;
@@ -599,6 +589,7 @@ async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
 mod tests {
     use super::db_utils::test_support::{create_zip_of_test_dir, one_row};
     use super::*;
+    use crate::fs::{OsFileSystem, ZipFileSystem};
 
     /// Canonical text of the whole schema: line comments dropped and whitespace
     /// collapsed, so only a meaningful SQL change moves the hash — reindenting a

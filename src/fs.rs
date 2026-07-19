@@ -1,11 +1,12 @@
+use crate::s3_uri::{S3Uri, is_s3_uri};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use zip::{ExtraField, ZipArchive};
 
 #[cfg(not(test))]
@@ -41,9 +42,8 @@ pub trait FileSystem: Send + Sync {
     }
 }
 
-/// A [`FileSystem`] that can also be written to. Reading and writing are kept as
-/// separate traits because some backends are legitimately read-only - a zip
-/// source, or (later) an S3 bucket opened as an input.
+/// A [`FileSystem`] that can also be written to - kept separate because some
+/// backends are read-only (a zip source implements only `FileSystem`).
 pub trait WritableFileSystem: FileSystem {
     /// Write everything from `reader` to `path`, creating any parent directories.
     /// Under `dry_run`, logs what it would do and writes nothing.
@@ -328,6 +328,41 @@ impl FileSystem for ZipFileSystem {
     }
 }
 
+/// Build a read-only input container from a path or an `s3://` URI: a local
+/// directory (`OsFileSystem`), a local zip (`ZipFileSystem`), or an S3 location.
+pub fn open_input(input: &str) -> Result<Arc<dyn FileSystem>> {
+    if is_s3_uri(input) {
+        let uri = S3Uri::parse(input)
+            .ok_or_else(|| anyhow!("Malformed S3 URI: {input} (expected s3://bucket/prefix)"))?;
+        info!("Input S3: s3://{}/{}", uri.bucket, uri.prefix);
+        return Ok(Arc::new(crate::s3_fs::S3FileSystem::new(uri)?));
+    }
+    let path = Path::new(input);
+    if !path.exists() {
+        return Err(anyhow!("Input path does not exist: {input}"));
+    }
+    if path.is_dir() {
+        info!("Input directory: {input}");
+        Ok(Arc::new(OsFileSystem::new(input)))
+    } else {
+        info!("Input zip: {input}");
+        Ok(Arc::new(ZipFileSystem::new(input)?))
+    }
+}
+
+/// Build a writable output container from a path or an `s3://` URI: a local
+/// directory (`OsFileSystem`) or an S3 location.
+pub fn open_output(output: &str) -> Result<Arc<dyn WritableFileSystem>> {
+    if is_s3_uri(output) {
+        let uri = S3Uri::parse(output)
+            .ok_or_else(|| anyhow!("Malformed S3 URI: {output} (expected s3://bucket/prefix)"))?;
+        info!("Output S3: s3://{}/{}", uri.bucket, uri.prefix);
+        return Ok(Arc::new(crate::s3_fs::S3FileSystem::new(uri)?));
+    }
+    info!("Output directory: {output}");
+    Ok(Arc::new(OsFileSystem::new(output)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +466,15 @@ mod tests {
         assert!(fs.write_if_changed(true, "albums/trip.md", b"hello")?);
         assert!(!dir.path().join("albums/trip.md").exists());
         Ok(())
+    }
+
+    #[test]
+    fn open_factories_route_scheme_and_reject_malformed_s3() {
+        // A malformed `s3://` URI is a hard error, never silently treated as a
+        // local path/zip.
+        assert!(open_input("s3://").is_err());
+        assert!(open_output("s3://").is_err());
+        assert!(open_input("test").is_ok());
+        assert!(open_input("does-not-exist-xyz").is_err());
     }
 }

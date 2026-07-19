@@ -11,6 +11,10 @@ Let's use the most basic rust we can to make the code as approachable as possibl
 - Use `.clone()` to avoid hard things.
 - Use `anyhow::Result` for fallible functions and propagate errors with `?`.
 - Write unit tests within the module (typically a `tests` module at the bottom of the file), and call `crate::test_util::setup_log()` at the start of tests to enable logging output.
+- Avoid low value tests for trivial logic.
+- Prefer high value black box tests were possible.
+- Prefer fakes over mocks, mocks over spys.
+- Avoid low value source comments, only add comments where the actual variable or method behavior is not implied by its name.
 
 ## Technical goals
 

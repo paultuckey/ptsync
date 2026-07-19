@@ -1,47 +1,34 @@
 use crate::album::{Album, build_album_md, parse_album, split_album_notes};
 use crate::dedup::{DeDuplicationResult, Deduplicator};
 use crate::file_type::QuickFileType;
-use crate::fs::{FileSystem, OsFileSystem, WritableFileSystem, ZipFileSystem};
+use crate::fs::{FileSystem, WritableFileSystem, open_input, open_output};
 use crate::inspect::inspect_media_files;
 use crate::markdown::sync_markdown;
 use crate::media::{MediaFileDerivedInfo, MediaFileInfo, media_file_derived_from_media_info};
 use crate::progress::Progress;
 use crate::util::{ScanInfo, scan_fs};
-use anyhow::anyhow;
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 pub(crate) fn main(
     dry_run: bool,
-    input: &String,
+    input: &str,
     output_directory: &Option<String>,
     skip_markdown: bool,
     skip_media: bool,
     skip_albums: bool,
 ) -> anyhow::Result<()> {
-    let path = Path::new(input);
-    if !path.exists() {
-        return Err(anyhow!("Input path does not exist: {}", input));
-    }
-    let container: Arc<dyn FileSystem> = if path.is_dir() {
-        info!("Input directory: {input}");
-        Arc::new(OsFileSystem::new(input))
-    } else {
-        info!("Input zip: {input}");
-        Arc::new(ZipFileSystem::new(input)?)
-    };
+    let container = open_input(input)?;
 
     let files = scan_fs(container.as_ref());
     info!("Found {} files in input", files.len());
 
-    let mut output_container_o: Option<OsFileSystem> = None;
-    if let Some(output) = output_directory {
-        info!("Output directory: {output}");
-        output_container_o = Some(OsFileSystem::new(output));
-    }
+    let output_container_o: Option<Arc<dyn WritableFileSystem>> = match output_directory {
+        Some(output) => Some(open_output(output)?),
+        None => None,
+    };
     let mut deduper = Deduplicator::new();
     let mut final_path_by_checksum = HashMap::<String, String>::new();
 
@@ -77,7 +64,8 @@ pub(crate) fn main(
         }
         drop(prog);
 
-        if let Some(ref output_container) = output_container_o {
+        if let Some(output_container) = &output_container_o {
+            let output_container: &dyn WritableFileSystem = output_container.as_ref();
             let media_to_write = deduper.sorted_media();
             info!("Outputting {} photo and video files", media_to_write.len());
             let prog = Progress::new(media_to_write.len() as u64);
@@ -122,7 +110,8 @@ pub(crate) fn main(
         }
     }
 
-    if !skip_albums && let Some(ref output_container) = output_container_o {
+    if !skip_albums && let Some(output_container) = &output_container_o {
+        let output_container: &dyn WritableFileSystem = output_container.as_ref();
         info!("Outputting {} albums", albums.len());
         for album in &albums {
             let output_path = &album.desired_album_md_path;
@@ -251,7 +240,9 @@ pub(crate) fn write_media(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::OsFileSystem;
     use crate::test_util::build_zip;
+    use anyhow::anyhow;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::fs::read_to_string;
@@ -266,7 +257,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let archive = temp.path().join("archive");
         let output = Some(archive.to_string_lossy().to_string());
-        main(false, &input.to_string(), &output, false, false, false)?;
+        main(false, input, &output, false, false, false)?;
         Ok((temp, archive))
     }
 
@@ -410,7 +401,7 @@ mod tests {
         let output_s = Some(output.to_string_lossy().to_string());
         main(
             false,
-            &input.to_string_lossy().to_string(),
+            &input.to_string_lossy(),
             &output_s,
             false,
             false,
@@ -536,8 +527,8 @@ mod tests {
     /// `recorded_checksum`, no re-read). This is the seam real S3 output reuses.
     #[test]
     fn sync_writes_through_writable_trait_to_fake_s3() -> anyhow::Result<()> {
-        use crate::fs_s3::FakeS3FileSystem;
         use crate::media::media_file_derived_from_media_info;
+        use crate::s3_fs::FakeS3FileSystem;
         crate::test_util::setup_log();
 
         let input: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(TAKEOUT_BASIC));
