@@ -133,86 +133,69 @@ pub(crate) fn sync_markdown(
 /// Grab anything between "---[\r]\n" and "---[\r]\n" and put into .0. Put everything else into .1.
 /// If any sort of invalid case is encountered, return empty frontmatter and original content.
 pub(crate) fn split_frontmatter(file_contents: &str) -> (String, String) {
-    // Handle leading whitespace - trim leading newlines and carriage returns
     let trimmed = file_contents.trim_start_matches(['\n', '\r']);
 
-    // Check if the file starts with "---"
     if !trimmed.starts_with("---") {
         return ("".to_string(), file_contents.to_string());
     }
 
-    // Find the first newline after the opening "---"
     let (line_ending, after_first_delim) = if let Some(stripped) = trimmed.strip_prefix("---\r\n") {
-        ("\r\n", stripped) // Skip "---\r\n"
+        ("\r\n", stripped)
     } else if let Some(stripped) = trimmed.strip_prefix("---\n") {
-        ("\n", stripped) // Skip "---\n"
+        ("\n", stripped)
     } else {
-        // No newline after opening "---", treat as invalid
+        // An opening "---" with no newline after it is not a delimiter.
         return ("".to_string(), file_contents.to_string());
     };
 
-    // Find the closing "---" delimiter
     if let Some(end_pos) = after_first_delim.find("---") {
         let potential_frontmatter = &after_first_delim[..end_pos];
         let after_end_delim = &after_first_delim[end_pos..];
 
-        // Check if the closing "---" is followed by a newline or is at the end
         if let Some(remaining_content) = after_end_delim.strip_prefix("---\r\n") {
-            // Special case: if frontmatter is empty, return original content
             if potential_frontmatter.trim().is_empty() {
                 return ("".to_string(), file_contents.to_string());
             }
-
-            // Remove trailing newline from frontmatter if present
             let fm = potential_frontmatter
                 .trim_end_matches(['\n', '\r'])
                 .to_string();
-            // If remaining content is empty, but we had a newline after ---, include it
+            // The newline that followed the closing "---" belongs to the body.
             if remaining_content.is_empty() {
                 return (fm, "\r\n".to_string());
             } else {
                 return (fm, remaining_content.to_string());
             }
         } else if let Some(remaining_content) = after_end_delim.strip_prefix("---\n") {
-            // Special case: if frontmatter is empty, return original content
             if potential_frontmatter.trim().is_empty() {
                 return ("".to_string(), file_contents.to_string());
             }
-
-            // Remove trailing newline from frontmatter if present
             let fm = potential_frontmatter
                 .trim_end_matches(['\n', '\r'])
                 .to_string();
-            // If remaining content is empty, but we had a newline after ---, include it
             if remaining_content.is_empty() {
                 return (fm, "\n".to_string());
             } else {
                 return (fm, remaining_content.to_string());
             }
         } else if let Some(after_closing) = after_end_delim.strip_prefix("---") {
-            // Special case: if frontmatter is empty, return original content
             if potential_frontmatter.trim().is_empty() {
                 return ("".to_string(), file_contents.to_string());
             }
-
-            // Remove trailing newline from frontmatter if present
             let fm = potential_frontmatter
                 .trim_end_matches(['\n', '\r'])
                 .to_string();
-
-            // If there's content after the closing ---, it should be the remaining content
-            // If the original had CRLF line endings, preserve that in the remaining content
+            // Body content ran straight into the closing "---" with no newline
+            // between them; re-insert the file's own line ending.
             if !after_closing.is_empty() {
                 let remaining_with_newline = format!("{line_ending}{after_closing}");
                 return (fm, remaining_with_newline);
             } else {
-                // File ends with "---"
                 return (fm, "".to_string());
             }
         }
     }
 
-    // No valid closing delimiter found, treat as invalid
+    // No closing delimiter: the whole file is body.
     ("".to_string(), file_contents.to_string())
 }
 

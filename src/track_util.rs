@@ -130,8 +130,6 @@ fn parse_to_o_s(opt: &Option<&nom_exif::EntryValue>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::fs::{FileSystem, OsFileSystem};
-    use crate::util::scan_fs;
-    use std::path::Path;
 
     #[test]
     fn test_parse_track() -> anyhow::Result<()> {
@@ -187,24 +185,5 @@ mod tests {
         );
         assert_eq!(track_with_gps(Some("+0.0+0.0/")).lat_long(), None);
         assert_eq!(track_with_gps(None).lat_long(), None);
-    }
-
-    /// For research scal all MP4 files in input/ directory and look for unknown tags
-    #[test]
-    #[ignore]
-    fn test_all_mp4s() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let c = OsFileSystem::new("input");
-        for si in scan_fs(&c) {
-            let path = Path::new(&si.file_path);
-            if path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
-            {
-                let reader = c.open(path.to_string_lossy().as_ref())?;
-                let _ = parse_track_info(reader);
-            }
-        }
-        Ok(())
     }
 }

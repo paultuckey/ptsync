@@ -391,14 +391,14 @@ mod tests {
 
         let fs = ZipFileSystem::new(&temp_file.path().to_string_lossy())?;
 
-        // Test large file (should stream)
+        // Over the streaming threshold, so the reader streams from the archive.
         let mut reader = fs.open("large.txt")?;
         let mut content = Vec::new();
         reader.read_to_end(&mut content)?;
         assert_eq!(content.len(), 200);
         assert_eq!(content, vec![b'a'; 200]);
 
-        // Test small file (should buffer)
+        // Under it, so the reader buffers the whole entry in memory.
         let mut reader = fs.open("small.txt")?;
         let mut content = Vec::new();
         reader.read_to_end(&mut content)?;

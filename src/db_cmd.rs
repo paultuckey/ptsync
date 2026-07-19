@@ -644,12 +644,6 @@ mod tests {
         );
     }
 
-    const DB_MEDIA_ITEM_SELECT_ALL: &str = "
-        SELECT media_path, long_hash, short_hash, quick_file_type,
-            accurate_file_type, media_info, guessed_datetime, modified_at, created_at
-        FROM media_item
-    ";
-
     async fn media_item_id_of(conn: &Connection, media_path: &str) -> anyhow::Result<String> {
         let row = one_row(
             conn,
@@ -658,19 +652,6 @@ mod tests {
         )
         .await?;
         Ok(row.get::<String>(0)?)
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_select_all() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let (_db, conn) = open_conn("db.sqlite").await?;
-        let mut rows = conn.query(DB_MEDIA_ITEM_SELECT_ALL, ()).await?;
-        while let Some(row) = rows.next().await? {
-            let media_path: String = row.get(0)?;
-            println!("media_path: {}", media_path);
-        }
-        Ok(())
     }
 
     #[tokio::test]
@@ -856,7 +837,6 @@ mod tests {
                 .any(|(path, ftype)| path == "Hello.mp4" && ftype == "Media")
         );
 
-        // Cleanup
         let _ = fs::remove_file(zip_path);
         Ok(())
     }
@@ -871,12 +851,10 @@ mod tests {
         }
         fs::create_dir_all(test_dir)?;
 
-        // Copy a file
         let src_file = Path::new("test/Canon_40D.jpg");
         let dest_file = test_dir.join("Canon_40D.jpg");
         fs::copy(src_file, &dest_file)?;
 
-        // Create album CSV
         let album_path = test_dir.join("album.csv");
         let mut file = fs::File::create(&album_path)?;
         writeln!(file, "Images")?;
@@ -887,7 +865,7 @@ mod tests {
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
         run_db_scan(container, &conn, false, &test_dir_str).await?;
 
-        // Verify Album: the id is the stable hash of the album path.
+        // The album id is the stable hash of the album path.
         let row = one_row(&conn, "SELECT album_id, title, album_path FROM album", ()).await?;
         let album_id: String = row.get(0)?;
         let title: String = row.get(1)?;
@@ -896,8 +874,8 @@ mod tests {
         assert_eq!(path, "album.csv");
         assert_eq!(album_id, crate::util::album_id_for("album.csv"));
 
-        // Verify Album Files: membership is stored by media_item_id and joins
-        // back to the media item's path.
+        // Membership is stored by media_item_id and joins back to the media
+        // item's path.
         let row = one_row(
             &conn,
             "SELECT m.media_path FROM album_file af
@@ -908,7 +886,6 @@ mod tests {
         let path: String = row.get(0)?;
         assert_eq!(path, "Canon_40D.jpg");
 
-        // Cleanup
         fs::remove_dir_all(test_dir)?;
         Ok(())
     }

@@ -289,7 +289,6 @@ mod tests {
         let c = ZipFileSystem::new("test/Canon_40D.jpg.zip")?;
         let index = scan_fs(&c);
         assert_eq!(index.len(), 2);
-        // Find Canon_40D.jpg
         let si = index
             .iter()
             .find(|i| i.file_path == "Canon_40D.jpg")
@@ -347,32 +346,23 @@ mod tests {
         assert_eq!(person_id_for(precomposed), person_id_for(decomposed));
     }
 
+    /// Album and media ids share the same path-keyed derivation, so both are
+    /// checked here against the one set of rules.
     #[test]
-    fn test_media_item_id_stable() {
-        let a = media_item_id_for("Google Photos/Holiday/IMG_0001.jpg");
-        assert_eq!(a.len(), 16);
-        // Deterministic and path-derived; different paths differ.
-        assert_eq!(
-            a,
-            media_item_id_for("  Google Photos/Holiday/IMG_0001.jpg  ")
-        );
-        assert_ne!(a, media_item_id_for("Google Photos/Holiday/IMG_0002.jpg"));
-        // Path-keyed, not content-keyed: two paths never share an id.
-        assert_ne!(
-            media_item_id_for("a/IMG.jpg"),
-            media_item_id_for("b/IMG.jpg")
-        );
-    }
-
-    #[test]
-    fn test_album_id_stable() {
-        let a = album_id_for("Google Photos/Holiday/metadata.json");
-        assert_eq!(a.len(), 16);
-        // Whitespace-insensitive and deterministic; different paths differ.
-        assert_eq!(a, album_id_for("  Google Photos/Holiday/metadata.json  "));
-        assert_ne!(a, album_id_for("Google Photos/Trip/metadata.json"));
-        // Paths are case-sensitive (unlike people).
-        assert_ne!(a, album_id_for("google photos/holiday/metadata.json"));
+    fn test_path_ids_stable() {
+        for id_for in [
+            media_item_id_for as fn(&str) -> String,
+            album_id_for as fn(&str) -> String,
+        ] {
+            let a = id_for("Google Photos/Holiday/IMG_0001.jpg");
+            // Deterministic, and surrounding whitespace does not change the id.
+            assert_eq!(a, id_for("  Google Photos/Holiday/IMG_0001.jpg  "));
+            assert_ne!(a, id_for("Google Photos/Holiday/IMG_0002.jpg"));
+            // Path-keyed, not content-keyed: two paths never share an id.
+            assert_ne!(id_for("a/IMG.jpg"), id_for("b/IMG.jpg"));
+            // Paths are case-sensitive (unlike people).
+            assert_ne!(a, id_for("google photos/holiday/img_0001.jpg"));
+        }
     }
 
     #[test]

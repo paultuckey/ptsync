@@ -81,7 +81,6 @@ fn parse_csv_album(
         debug!("Not an album: {name:?}");
         return None;
     }
-    // find index of last dot and get all chars before that
     let name_without_ext = Path::new(name)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -419,30 +418,12 @@ mod tests {
         assert!(md.contains("![Photo](../media/2023/01/file1.jpg)"));
     }
 
+    /// A member that cannot be traced all the way to a written file is left out
+    /// of the album rather than rendered as a broken link. That lookup can fail
+    /// at either hop: the media was never inspected, or it was inspected but
+    /// never written.
     #[test]
-    fn test_build_album_md_missing_mapping() {
-        let album = Album {
-            desired_album_md_path: "albums/test.md".to_string(),
-            title: "Test Album".to_string(),
-            files: vec!["file1.jpg".to_string()],
-        };
-        let all_media = HashMap::new(); // Empty
-        let final_path_by_checksum = HashMap::new();
-
-        let (md, rendered) = build_album_md(
-            &album,
-            Some(&all_media),
-            "../media/",
-            Some(&final_path_by_checksum),
-            "",
-        );
-        assert_eq!(rendered, 0);
-        assert!(md.contains("# Test Album"));
-        assert!(!md.contains("![Photo]")); // Should be skipped
-    }
-
-    #[test]
-    fn test_build_album_md_missing_final_path() {
+    fn test_build_album_md_unresolvable_member_is_skipped() {
         let album = Album {
             desired_album_md_path: "albums/test.md".to_string(),
             title: "Test Album".to_string(),
@@ -451,22 +432,21 @@ mod tests {
         let mut media_info = MediaFileInfo::new_for_test();
         media_info.original_path = vec!["file1.jpg".to_string()];
         media_info.hash_info.long_checksum = "longhash1".to_string();
+        let mut inspected = HashMap::new();
+        inspected.insert("key1".to_string(), media_info);
 
-        let mut all_media = HashMap::new();
-        all_media.insert("key1".to_string(), media_info);
-
-        let final_path_by_checksum = HashMap::new(); // Empty, so lookup fails
-
-        let (md, rendered) = build_album_md(
-            &album,
-            Some(&all_media),
-            "../media/",
-            Some(&final_path_by_checksum),
-            "",
-        );
-        assert_eq!(rendered, 0);
-        assert!(md.contains("# Test Album"));
-        assert!(!md.contains("![Photo]")); // Should be skipped
+        for all_media in [HashMap::new(), inspected] {
+            let (md, rendered) = build_album_md(
+                &album,
+                Some(&all_media),
+                "../media/",
+                Some(&HashMap::new()),
+                "",
+            );
+            assert_eq!(rendered, 0);
+            assert!(md.contains("# Test Album"));
+            assert!(!md.contains("![Photo]"));
+        }
     }
 
     #[test]
