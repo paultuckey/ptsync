@@ -1,47 +1,34 @@
 use crate::album::{Album, build_album_md, parse_album, split_album_notes};
 use crate::dedup::{DeDuplicationResult, Deduplicator};
 use crate::file_type::QuickFileType;
-use crate::fs::{FileSystem, OsFileSystem, ZipFileSystem};
+use crate::fs::{FileSystem, WritableFileSystem, open_input, open_output};
 use crate::inspect::inspect_media_files;
 use crate::markdown::sync_markdown;
 use crate::media::{MediaFileDerivedInfo, MediaFileInfo, media_file_derived_from_media_info};
 use crate::progress::Progress;
 use crate::util::{ScanInfo, scan_fs};
-use anyhow::anyhow;
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 pub(crate) fn main(
     dry_run: bool,
-    input: &String,
+    input: &str,
     output_directory: &Option<String>,
     skip_markdown: bool,
     skip_media: bool,
     skip_albums: bool,
 ) -> anyhow::Result<()> {
-    let path = Path::new(input);
-    if !path.exists() {
-        return Err(anyhow!("Input path does not exist: {}", input));
-    }
-    let container: Arc<dyn FileSystem> = if path.is_dir() {
-        info!("Input directory: {input}");
-        Arc::new(OsFileSystem::new(input))
-    } else {
-        info!("Input zip: {input}");
-        Arc::new(ZipFileSystem::new(input)?)
-    };
+    let container = open_input(input)?;
 
     let files = scan_fs(container.as_ref());
     info!("Found {} files in input", files.len());
 
-    let mut output_container_o: Option<OsFileSystem> = None;
-    if let Some(output) = output_directory {
-        info!("Output directory: {output}");
-        output_container_o = Some(OsFileSystem::new(output));
-    }
+    let output_container_o: Option<Arc<dyn WritableFileSystem>> = match output_directory {
+        Some(output) => Some(open_output(output)?),
+        None => None,
+    };
     let mut deduper = Deduplicator::new();
     let mut final_path_by_checksum = HashMap::<String, String>::new();
 
@@ -77,7 +64,8 @@ pub(crate) fn main(
         }
         drop(prog);
 
-        if let Some(ref mut output_container) = output_container_o {
+        if let Some(output_container) = &output_container_o {
+            let output_container: &dyn WritableFileSystem = output_container.as_ref();
             let media_to_write = deduper.sorted_media();
             info!("Outputting {} photo and video files", media_to_write.len());
             let prog = Progress::new(media_to_write.len() as u64);
@@ -122,7 +110,8 @@ pub(crate) fn main(
         }
     }
 
-    if !skip_albums && let Some(ref output_container) = output_container_o {
+    if !skip_albums && let Some(output_container) = &output_container_o {
+        let output_container: &dyn WritableFileSystem = output_container.as_ref();
         info!("Outputting {} albums", albums.len());
         for album in &albums {
             let output_path = &album.desired_album_md_path;
@@ -142,7 +131,9 @@ pub(crate) fn main(
             // The photo list is regenerated every run. An unchanged album
             // yields identical content; only write when it actually differs
             // so a re-run leaves the file (and its mtime) untouched.
-            output_container.write_if_changed(dry_run, output_path, md.as_bytes());
+            if let Err(e) = output_container.write_if_changed(dry_run, output_path, md.as_bytes()) {
+                warn!("Error writing album file {output_path:?}: {e}");
+            }
         }
     }
 
@@ -213,7 +204,7 @@ fn album_names_for(
 }
 
 /// Read the user-authored notes section from an existing album file, if any.
-fn read_album_notes(output_container: &OsFileSystem, path: &str) -> String {
+fn read_album_notes(output_container: &dyn FileSystem, path: &str) -> String {
     if !output_container.exists(path) {
         return String::new();
     }
@@ -232,7 +223,7 @@ pub(crate) fn write_media(
     derived: &MediaFileDerivedInfo,
     dry_run: bool,
     input_container: &dyn FileSystem,
-    output_container: &OsFileSystem,
+    output_container: &dyn WritableFileSystem,
 ) -> anyhow::Result<String> {
     let desired_output_path_with_ext =
         match Deduplicator::resolve_output_path(media_file, derived, output_container)? {
@@ -240,8 +231,8 @@ pub(crate) fn write_media(
             DeDuplicationResult::WritePath(path) => path,
         };
     info!("Output {:?}", desired_output_path_with_ext);
-    let reader = input_container.open(&media_file.original_file_this_run)?;
-    output_container.write(dry_run, &desired_output_path_with_ext, reader);
+    let mut reader = input_container.open(&media_file.original_file_this_run)?;
+    output_container.write(dry_run, &desired_output_path_with_ext, &mut reader)?;
     output_container.set_modified(dry_run, &desired_output_path_with_ext, &media_file.modified);
     Ok(desired_output_path_with_ext)
 }
@@ -249,7 +240,9 @@ pub(crate) fn write_media(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::OsFileSystem;
     use crate::test_util::build_zip;
+    use anyhow::anyhow;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::fs::read_to_string;
@@ -264,7 +257,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let archive = temp.path().join("archive");
         let output = Some(archive.to_string_lossy().to_string());
-        main(false, &input.to_string(), &output, false, false, false)?;
+        main(false, input, &output, false, false, false)?;
         Ok((temp, archive))
     }
 
@@ -408,7 +401,7 @@ mod tests {
         let output_s = Some(output.to_string_lossy().to_string());
         main(
             false,
-            &input.to_string_lossy().to_string(),
+            &input.to_string_lossy(),
             &output_s,
             false,
             false,
@@ -523,6 +516,64 @@ mod tests {
                 && dir_tree.contains_key("albums/Holiday.md")
         );
         assert_eq!(dir_tree, zip_tree);
+        Ok(())
+    }
+
+    /// The write path is generic over `WritableFileSystem`. Driving it against
+    /// the S3 fake (not `OsFileSystem`) must still produce each media file and
+    /// its sidecar, and a second pass must add nothing - proving the dedup checks
+    /// work against a non-OS backend. Because the fake reports a native checksum,
+    /// the second pass also exercises the Option A fast path (skip via
+    /// `recorded_checksum`, no re-read). This is the seam real S3 output reuses.
+    #[test]
+    fn sync_writes_through_writable_trait_to_fake_s3() -> anyhow::Result<()> {
+        use crate::media::media_file_derived_from_media_info;
+        use crate::s3_fs::FakeS3FileSystem;
+        crate::test_util::setup_log();
+
+        let input: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(TAKEOUT_BASIC));
+        let files = scan_fs(input.as_ref());
+        let media_si: Vec<ScanInfo> = files
+            .iter()
+            .filter(|m| m.quick_file_type == QuickFileType::Media)
+            .cloned()
+            .collect();
+
+        let mut deduper = Deduplicator::new();
+        let prog = Arc::new(Progress::new(media_si.len() as u64));
+        let mut inspected = inspect_media_files(input.clone(), media_si, prog.clone());
+        for media in inspected.by_ref() {
+            deduper.add(media);
+        }
+        drop(prog);
+
+        // First pass writes media + sidecars into the fake bucket.
+        let out = FakeS3FileSystem::new();
+        for media in deduper.sorted_media() {
+            let derived = media_file_derived_from_media_info(media)?;
+            let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
+            sync_markdown(false, media, &final_path, &[], &out)?;
+        }
+        assert!(out.exists("2024/05/22/0017-51000.jpg"));
+        assert!(out.exists("2024/05/22/0017-51000.md"));
+        // The fake surfaces the object's SHA-256 the way S3's native checksum
+        // does - this is the value the Option A fast path compares against, so a
+        // metadata-only HeadObject can answer "already here?" without a GET.
+        assert_eq!(
+            out.recorded_checksum("2024/05/22/0017-51000.jpg")
+                .as_deref(),
+            Some("6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f")
+        );
+
+        // Second pass over identical input must add nothing: the media dedups to
+        // SkipWrite (via the fake's recorded checksum) and the sidecar is unchanged.
+        let before = out.walk().len();
+        for media in deduper.sorted_media() {
+            let derived = media_file_derived_from_media_info(media)?;
+            let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
+            sync_markdown(false, media, &final_path, &[], &out)?;
+        }
+        assert_eq!(out.walk().len(), before, "re-run must not add new objects");
         Ok(())
     }
 }

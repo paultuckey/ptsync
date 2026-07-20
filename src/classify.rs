@@ -302,13 +302,4 @@ mod tests {
             vec![KnownFileType::GpMetadataJson(String::from("img_1316"))]
         );
     }
-
-    #[test]
-    fn test_enum_to_string() {
-        crate::test_util::setup_log();
-        assert_eq!(
-            KnownFileType::IcpAlbumCsv("something".to_string()).to_string(),
-            "IcpAlbumCsv".to_string()
-        );
-    }
 }

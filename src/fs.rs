@@ -1,11 +1,12 @@
+use crate::s3_uri::{S3Uri, is_s3_uri};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use zip::{ExtraField, ZipArchive};
 
 #[cfg(not(test))]
@@ -29,6 +30,34 @@ pub trait FileSystem: Send + Sync {
     // Walk returns all files recursively as relative paths
     fn walk(&self) -> Vec<String>;
     fn metadata(&self, path: &str) -> Result<FileMetadata>;
+
+    /// A hex SHA-256 (see [`crate::util::HashInfo::long_checksum`])
+    /// already known for `path`, obtainable *without* reading the object body -
+    /// e.g. S3's native `x-amz-checksum-sha256` fetched via HeadObject. Returns
+    /// `None` when the backend has no such side-channel (local files, zips,
+    /// in-memory), in which case callers fall back to reading the bytes and
+    /// hashing.
+    fn recorded_checksum(&self, _path: &str) -> Option<String> {
+        None
+    }
+}
+
+/// A [`FileSystem`] that can also be written to - kept separate because some
+/// backends are read-only (a zip source implements only `FileSystem`).
+pub trait WritableFileSystem: FileSystem {
+    /// Write everything from `reader` to `path`, creating any parent directories.
+    /// Under `dry_run`, logs what it would do and writes nothing.
+    fn write(&self, dry_run: bool, path: &str, reader: &mut dyn Read) -> Result<()>;
+
+    /// Write `bytes` to `path`, but only when they differ from what is already
+    /// stored there. Returns whether a write was performed - under `dry_run`,
+    /// whether one would have been.
+    fn write_if_changed(&self, dry_run: bool, path: &str, bytes: &[u8]) -> Result<bool>;
+
+    /// Set the modified time on an already-written file when the backend supports
+    /// it. Backends without settable timestamps (e.g. object stores) may treat
+    /// this as a no-op.
+    fn set_modified(&self, dry_run: bool, path: &str, modified_datetime: &Option<i64>);
 }
 
 #[derive(Debug)]
@@ -41,44 +70,6 @@ impl OsFileSystem {
         Self {
             root: PathBuf::from(root),
         }
-    }
-
-    pub fn write<R: Read>(&self, dry_run: bool, path: &str, mut reader: R) {
-        let p = self.root.join(path);
-        if dry_run {
-            debug!("Dry run: would write file {:?}", p);
-            return;
-        }
-        if let Some(parent) = p.parent()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            error!("Unable to create directory {:?}: {}", parent, e);
-            return;
-        }
-        let mut file = match File::create(&p) {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Unable to create file {p:?}: {e}");
-                return;
-            }
-        };
-        if let Err(e) = std::io::copy(&mut reader, &mut file) {
-            error!("Unable to write file {p:?}: {e}");
-            return;
-        }
-        debug!("Wrote file {p:?}");
-    }
-
-    /// Write `bytes` to `path`, but only when they differ from what is already on
-    /// disk. Returns whether write was performed - under `dry_run`, whether one would
-    /// have been.
-    pub fn write_if_changed(&self, dry_run: bool, path: &str, bytes: &[u8]) -> bool {
-        if self.file_has_contents(path, bytes) {
-            debug!("Unchanged, skipping write of {:?}", self.root.join(path));
-            return false;
-        }
-        self.write(dry_run, path, Cursor::new(bytes));
-        true
     }
 
     /// True when `path` exists and its contents are exactly `bytes`. The length
@@ -98,30 +89,6 @@ impl OsFileSystem {
             return false;
         }
         existing == bytes
-    }
-
-    pub fn set_modified(&self, dry_run: bool, path: &str, modified_datetime: &Option<i64>) {
-        let p = self.root.join(path);
-        let Some(dt) = modified_datetime else {
-            return;
-        };
-        let st = SystemTime::UNIX_EPOCH
-            .checked_add(Duration::from_millis(*dt as u64))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        if dry_run {
-            debug!("  Dry run: would set modified datetime for file {p:?} to {dt}");
-            return;
-        }
-        let f_r = File::open(&p);
-        let Ok(f) = f_r else {
-            error!("Unable to open file {p:?} for setting modified datetime ");
-            return;
-        };
-        if let Err(e) = f.set_modified(st) {
-            error!("Unable to set modified datetime for file {p:?}: {e}");
-        } else {
-            debug!("Set modified datetime for file {p:?} to {dt}");
-        }
     }
 }
 
@@ -161,6 +128,59 @@ impl FileSystem for OsFileSystem {
                 .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64),
         })
+    }
+}
+
+impl WritableFileSystem for OsFileSystem {
+    fn write(&self, dry_run: bool, path: &str, reader: &mut dyn Read) -> Result<()> {
+        let p = self.root.join(path);
+        if dry_run {
+            debug!("Dry run: would write file {:?}", p);
+            return Ok(());
+        }
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("Unable to create directory {:?}: {}", parent, e))?;
+        }
+        let mut file =
+            File::create(&p).map_err(|e| anyhow!("Unable to create file {:?}: {}", p, e))?;
+        std::io::copy(reader, &mut file)
+            .map_err(|e| anyhow!("Unable to write file {:?}: {}", p, e))?;
+        debug!("Wrote file {p:?}");
+        Ok(())
+    }
+
+    fn write_if_changed(&self, dry_run: bool, path: &str, bytes: &[u8]) -> Result<bool> {
+        if self.file_has_contents(path, bytes) {
+            debug!("Unchanged, skipping write of {:?}", self.root.join(path));
+            return Ok(false);
+        }
+        self.write(dry_run, path, &mut Cursor::new(bytes))?;
+        Ok(true)
+    }
+
+    fn set_modified(&self, dry_run: bool, path: &str, modified_datetime: &Option<i64>) {
+        let p = self.root.join(path);
+        let Some(dt) = modified_datetime else {
+            return;
+        };
+        let st = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_millis(*dt as u64))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if dry_run {
+            debug!("  Dry run: would set modified datetime for file {p:?} to {dt}");
+            return;
+        }
+        let f_r = File::open(&p);
+        let Ok(f) = f_r else {
+            error!("Unable to open file {p:?} for setting modified datetime ");
+            return;
+        };
+        if let Err(e) = f.set_modified(st) {
+            error!("Unable to set modified datetime for file {p:?}: {e}");
+        } else {
+            debug!("Set modified datetime for file {p:?} to {dt}");
+        }
     }
 }
 
@@ -308,6 +328,41 @@ impl FileSystem for ZipFileSystem {
     }
 }
 
+/// Build a read-only input container from a path or an `s3://` URI: a local
+/// directory (`OsFileSystem`), a local zip (`ZipFileSystem`), or an S3 location.
+pub fn open_input(input: &str) -> Result<Arc<dyn FileSystem>> {
+    if is_s3_uri(input) {
+        let uri = S3Uri::parse(input)
+            .ok_or_else(|| anyhow!("Malformed S3 URI: {input} (expected s3://bucket/prefix)"))?;
+        info!("Input S3: s3://{}/{}", uri.bucket, uri.prefix);
+        return Ok(Arc::new(crate::s3_fs::S3FileSystem::new(uri)?));
+    }
+    let path = Path::new(input);
+    if !path.exists() {
+        return Err(anyhow!("Input path does not exist: {input}"));
+    }
+    if path.is_dir() {
+        info!("Input directory: {input}");
+        Ok(Arc::new(OsFileSystem::new(input)))
+    } else {
+        info!("Input zip: {input}");
+        Ok(Arc::new(ZipFileSystem::new(input)?))
+    }
+}
+
+/// Build a writable output container from a path or an `s3://` URI: a local
+/// directory (`OsFileSystem`) or an S3 location.
+pub fn open_output(output: &str) -> Result<Arc<dyn WritableFileSystem>> {
+    if is_s3_uri(output) {
+        let uri = S3Uri::parse(output)
+            .ok_or_else(|| anyhow!("Malformed S3 URI: {output} (expected s3://bucket/prefix)"))?;
+        info!("Output S3: s3://{}/{}", uri.bucket, uri.prefix);
+        return Ok(Arc::new(crate::s3_fs::S3FileSystem::new(uri)?));
+    }
+    info!("Output directory: {output}");
+    Ok(Arc::new(OsFileSystem::new(output)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,14 +391,14 @@ mod tests {
 
         let fs = ZipFileSystem::new(&temp_file.path().to_string_lossy())?;
 
-        // Test large file (should stream)
+        // Over the streaming threshold, so the reader streams from the archive.
         let mut reader = fs.open("large.txt")?;
         let mut content = Vec::new();
         reader.read_to_end(&mut content)?;
         assert_eq!(content.len(), 200);
         assert_eq!(content, vec![b'a'; 200]);
 
-        // Test small file (should buffer)
+        // Under it, so the reader buffers the whole entry in memory.
         let mut reader = fs.open("small.txt")?;
         let mut content = Vec::new();
         reader.read_to_end(&mut content)?;
@@ -387,16 +442,16 @@ mod tests {
         let on_disk = dir.path().join(path);
 
         // First write creates the file and reports that it wrote.
-        assert!(fs.write_if_changed(false, path, b"hello"));
+        assert!(fs.write_if_changed(false, path, b"hello")?);
         let mtime_after_create = fs::metadata(&on_disk)?.modified()?;
 
         // Re-writing identical bytes is a no-op: nothing is written and the
         // file's modified time is untouched.
-        assert!(!fs.write_if_changed(false, path, b"hello"));
+        assert!(!fs.write_if_changed(false, path, b"hello")?);
         assert_eq!(mtime_after_create, fs::metadata(&on_disk)?.modified()?);
 
         // Changed content is written through.
-        assert!(fs.write_if_changed(false, path, b"hello world"));
+        assert!(fs.write_if_changed(false, path, b"hello world")?);
         assert_eq!(fs::read(&on_disk)?, b"hello world");
         Ok(())
     }
@@ -408,8 +463,18 @@ mod tests {
 
         // A dry run reports it would write (content differs from the absent file)
         // but must not actually create it.
-        assert!(fs.write_if_changed(true, "albums/trip.md", b"hello"));
+        assert!(fs.write_if_changed(true, "albums/trip.md", b"hello")?);
         assert!(!dir.path().join("albums/trip.md").exists());
         Ok(())
+    }
+
+    #[test]
+    fn open_factories_route_scheme_and_reject_malformed_s3() {
+        // A malformed `s3://` URI is a hard error, never silently treated as a
+        // local path/zip.
+        assert!(open_input("s3://").is_err());
+        assert!(open_output("s3://").is_err());
+        assert!(open_input("test").is_ok());
+        assert!(open_input("does-not-exist-xyz").is_err());
     }
 }

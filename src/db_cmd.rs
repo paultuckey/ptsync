@@ -1,6 +1,6 @@
 use crate::classify::{classify_dir, classify_file};
 use crate::file_type::QuickFileType;
-use crate::fs::{FileSystem, OsFileSystem, ZipFileSystem};
+use crate::fs::{FileSystem, open_input};
 use crate::inspect::inspect_media_files;
 use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
 use crate::progress::Progress;
@@ -20,24 +20,20 @@ const DB_BATCH_SIZE: usize = 100;
 
 pub(crate) fn main(input: &String, output: &str, clear: bool) -> anyhow::Result<()> {
     debug!("Inspecting: {input}");
-    let path = Path::new(input);
-    if !path.exists() {
-        return Err(anyhow!("Input path does not exist: {}", input));
-    }
-    let container: Arc<dyn FileSystem> = if path.is_dir() {
-        info!("Input directory: {input}");
-        Arc::new(OsFileSystem::new(input))
-    } else {
-        info!("Input zip: {input}");
-        Arc::new(ZipFileSystem::new(input)?)
-    };
+    let container = open_input(input)?;
 
     info!("Writing database: {output}");
     let rt = runtime::Builder::new_current_thread().build()?;
-    rt.block_on(async {
+    // `container` keeps its own handle so the one moved into the async block is
+    // never the last: `S3FileSystem` owns a tokio runtime, and dropping a runtime
+    // from inside another runtime's context panics. This way the S3 runtime is
+    // released here, on a plain blocking thread, after `block_on` returns.
+    let result = rt.block_on(async {
         let (_db, conn) = open_conn(output).await?;
-        run_db_scan(container, &conn, clear, input).await
-    })
+        run_db_scan(container.clone(), &conn, clear, input).await
+    });
+    drop(container);
+    result
 }
 
 async fn run_db_scan(
@@ -599,6 +595,7 @@ async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
 mod tests {
     use super::db_utils::test_support::{create_zip_of_test_dir, one_row};
     use super::*;
+    use crate::fs::{OsFileSystem, ZipFileSystem};
 
     /// Canonical text of the whole schema: line comments dropped and whitespace
     /// collapsed, so only a meaningful SQL change moves the hash — reindenting a
@@ -653,12 +650,6 @@ mod tests {
         );
     }
 
-    const DB_MEDIA_ITEM_SELECT_ALL: &str = "
-        SELECT media_path, long_hash, short_hash, quick_file_type,
-            accurate_file_type, media_info, guessed_datetime, modified_at, created_at
-        FROM media_item
-    ";
-
     async fn media_item_id_of(conn: &Connection, media_path: &str) -> anyhow::Result<String> {
         let row = one_row(
             conn,
@@ -667,19 +658,6 @@ mod tests {
         )
         .await?;
         Ok(row.get::<String>(0)?)
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_select_all() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let (_db, conn) = open_conn("db.sqlite").await?;
-        let mut rows = conn.query(DB_MEDIA_ITEM_SELECT_ALL, ()).await?;
-        while let Some(row) = rows.next().await? {
-            let media_path: String = row.get(0)?;
-            println!("media_path: {}", media_path);
-        }
-        Ok(())
     }
 
     #[tokio::test]
@@ -865,7 +843,6 @@ mod tests {
                 .any(|(path, ftype)| path == "Hello.mp4" && ftype == "Media")
         );
 
-        // Cleanup
         let _ = fs::remove_file(zip_path);
         Ok(())
     }
@@ -880,12 +857,10 @@ mod tests {
         }
         fs::create_dir_all(test_dir)?;
 
-        // Copy a file
         let src_file = Path::new("test/Canon_40D.jpg");
         let dest_file = test_dir.join("Canon_40D.jpg");
         fs::copy(src_file, &dest_file)?;
 
-        // Create album CSV
         let album_path = test_dir.join("album.csv");
         let mut file = fs::File::create(&album_path)?;
         writeln!(file, "Images")?;
@@ -896,7 +871,7 @@ mod tests {
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
         run_db_scan(container, &conn, false, &test_dir_str).await?;
 
-        // Verify Album: the id is the stable hash of the album path.
+        // The album id is the stable hash of the album path.
         let row = one_row(&conn, "SELECT album_id, title, album_path FROM album", ()).await?;
         let album_id: String = row.get(0)?;
         let title: String = row.get(1)?;
@@ -905,8 +880,8 @@ mod tests {
         assert_eq!(path, "album.csv");
         assert_eq!(album_id, crate::util::album_id_for("album.csv"));
 
-        // Verify Album Files: membership is stored by media_item_id and joins
-        // back to the media item's path.
+        // Membership is stored by media_item_id and joins back to the media
+        // item's path.
         let row = one_row(
             &conn,
             "SELECT m.media_path FROM album_file af
@@ -917,7 +892,6 @@ mod tests {
         let path: String = row.get(0)?;
         assert_eq!(path, "Canon_40D.jpg");
 
-        // Cleanup
         fs::remove_dir_all(test_dir)?;
         Ok(())
     }

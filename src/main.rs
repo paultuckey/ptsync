@@ -14,13 +14,16 @@ mod inspect;
 mod markdown;
 mod media;
 mod progress;
+mod s3_fs;
+mod s3_uri;
 mod supplemental_info;
 mod sync_cmd;
 mod test_util;
 mod track_util;
 mod util;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use std::io::IsTerminal;
 use tracing::{Level, debug, error, info};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -35,6 +38,35 @@ pub(crate) const COMMAND_NAME: &str = "ptsync";
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Overrides for `s3://` paths. Each is optional; when omitted, the standard AWS
+/// resolution applies (env vars, `~/.aws`, SSO, IMDS). Credentials are never
+/// passed as flags - they come from that chain.
+#[derive(Args, Clone)]
+struct S3Opts {
+    /// AWS region for `s3://` paths (else `AWS_REGION` / the profile's region)
+    #[arg(long)]
+    s3_region: Option<String>,
+
+    /// Custom S3 endpoint URL for S3-compatible stores like MinIO; enables
+    /// path-style addressing
+    #[arg(long)]
+    s3_endpoint_url: Option<String>,
+
+    /// AWS profile name for `s3://` paths (else `AWS_PROFILE` / `default`)
+    #[arg(long)]
+    s3_profile: Option<String>,
+}
+
+impl S3Opts {
+    fn to_config(&self) -> s3_fs::S3Config {
+        s3_fs::S3Config {
+            region: self.s3_region.clone(),
+            endpoint_url: self.s3_endpoint_url.clone(),
+            profile: self.s3_profile.clone(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -71,6 +103,9 @@ enum Commands {
         /// its schema is out of date
         #[arg(long, action = clap::ArgAction::Set, default_value_t = false)]
         clear: bool,
+
+        #[command(flatten)]
+        s3: S3Opts,
     },
     /// Sync files in an archive or directory into a standardised directory structure
     Sync {
@@ -101,6 +136,9 @@ enum Commands {
         /// Skip inspecting and copying albums
         #[arg(long)]
         skip_albums: bool,
+
+        #[command(flatten)]
+        s3: S3Opts,
     },
 }
 
@@ -126,8 +164,10 @@ fn go() -> anyhow::Result<()> {
             input,
             output,
             clear,
+            s3,
         } => {
             enable_debug(debug);
+            s3_fs::set_s3_config(s3.to_config());
             db_cmd::main(&input, &output, clear)?
         }
         Commands::Sync {
@@ -138,9 +178,11 @@ fn go() -> anyhow::Result<()> {
             output,
             skip_media,
             skip_albums,
+            s3,
         } => {
             enable_debug(debug);
             enable_dry_run(dry_run);
+            s3_fs::set_s3_config(s3.to_config());
             sync_cmd::main(
                 dry_run,
                 &input,
@@ -155,14 +197,19 @@ fn go() -> anyhow::Result<()> {
 }
 
 fn enable_debug(debug: bool) {
+    // --debug is for tracing ptsync's own logic. Raising the default level
     let filter = tracing_subscriber::filter::Targets::new()
-        .with_default(if debug { Level::DEBUG } else { Level::INFO })
+        .with_default(Level::INFO)
+        .with_target("ptsync", if debug { Level::DEBUG } else { Level::INFO })
         .with_target("nom_exif", Level::ERROR)
-        .with_target("turso_core", Level::WARN)
-        .with_target("turso_sdk_kit", Level::WARN)
-        .with_target("turso_sync_engine", Level::WARN);
+        .with_target("turso_core", Level::ERROR)
+        .with_target("turso_sdk_kit", Level::ERROR)
+        .with_target("turso_sync_engine", Level::ERROR)
+        .with_target("aws_config", Level::ERROR)
+        .with_target("aws_sdk_s3", Level::ERROR);
     let registry_layer = tracing_subscriber::fmt::layer()
         .with_writer(progress::IndicatifWriter)
+        .with_ansi(std::io::stderr().is_terminal())
         .with_target(false);
 
     // A normal run should read like rsync's output: just the message. A

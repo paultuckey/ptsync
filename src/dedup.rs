@@ -1,4 +1,4 @@
-use crate::fs::{FileSystem, OsFileSystem};
+use crate::fs::FileSystem;
 use crate::media::{MediaFileDerivedInfo, MediaFileInfo};
 use crate::util::is_existing_file_same;
 use anyhow::anyhow;
@@ -90,7 +90,7 @@ impl Deduplicator {
     pub(crate) fn resolve_output_path(
         media_file: &MediaFileInfo,
         derived: &MediaFileDerivedInfo,
-        output_container: &OsFileSystem,
+        output_container: &dyn FileSystem,
     ) -> anyhow::Result<DeDuplicationResult> {
         let Some(desired_output_path) = &derived.desired_media_path else {
             debug!("  No desired media path for file: {media_file:?}");

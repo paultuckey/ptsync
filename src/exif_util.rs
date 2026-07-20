@@ -254,7 +254,6 @@ mod tests {
             .ok_or_else(|| anyhow!("Make tag not found"))?;
         assert_eq!(make_tag_value, &"Canon".to_string());
 
-        // SubSecTimeOriginal
         let sub_sec_time_original = t
             .get(&ExifTag::SubSecTimeOriginal.to_string())
             .ok_or_else(|| anyhow!("SubSecTimeOriginal tag not found"))?;

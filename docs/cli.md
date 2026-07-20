@@ -44,12 +44,23 @@ Scan files in an archive or directory and collect meta info into a sqlite databa
 Usage: ptsync db [OPTIONS] --input <INPUT>
 
 Options:
-  -d, --debug            Turn debugging information on
-  -i, --input <INPUT>    The takeout or iCloud zip/directory
-  -o, --output <OUTPUT>  Path to the sqlite database file to write [default: db.sqlite]
-      --clear <CLEAR>    Clear existing rows before scanning; also rebuilds the database if its
-                         schema is out of date [default: false] [possible values: true, false]
-  -h, --help             Print help
+  -d, --debug
+          Turn debugging information on
+  -i, --input <INPUT>
+          The takeout or iCloud zip/directory
+  -o, --output <OUTPUT>
+          Path to the sqlite database file to write [default: db.sqlite]
+      --clear <CLEAR>
+          Clear existing rows before scanning; also rebuilds the database if its schema is out of
+          date [default: false] [possible values: true, false]
+      --s3-region <S3_REGION>
+          AWS region for `s3://` paths (else `AWS_REGION` / the profile's region)
+      --s3-endpoint-url <S3_ENDPOINT_URL>
+          Custom S3 endpoint URL for S3-compatible stores like MinIO; enables path-style addressing
+      --s3-profile <S3_PROFILE>
+          AWS profile name for `s3://` paths (else `AWS_PROFILE` / `default`)
+  -h, --help
+          Print help
 ```
 
 ## ptsync sync
@@ -60,12 +71,26 @@ Sync files in an archive or directory into a standardised directory structure
 Usage: ptsync sync [OPTIONS] --input <INPUT>
 
 Options:
-  -d, --debug            Turn debugging information on
-  -n, --dry-run          If set, don't do anything, just print what would be done
-      --input <INPUT>    Google Takeout or iCloud input directory or zip file
-  -o, --output <OUTPUT>  Directory to sync photos and videos into
-      --skip-markdown    Skip generating markdown files
-      --skip-media       Skip inspecting and copying photo and video files
-      --skip-albums      Skip inspecting and copying albums
-  -h, --help             Print help
+  -d, --debug
+          Turn debugging information on
+  -n, --dry-run
+          If set, don't do anything, just print what would be done
+      --input <INPUT>
+          Google Takeout or iCloud input directory or zip file
+  -o, --output <OUTPUT>
+          Directory to sync photos and videos into
+      --skip-markdown
+          Skip generating markdown files
+      --skip-media
+          Skip inspecting and copying photo and video files
+      --skip-albums
+          Skip inspecting and copying albums
+      --s3-region <S3_REGION>
+          AWS region for `s3://` paths (else `AWS_REGION` / the profile's region)
+      --s3-endpoint-url <S3_ENDPOINT_URL>
+          Custom S3 endpoint URL for S3-compatible stores like MinIO; enables path-style addressing
+      --s3-profile <S3_PROFILE>
+          AWS profile name for `s3://` paths (else `AWS_PROFILE` / `default`)
+  -h, --help
+          Print help
 ```

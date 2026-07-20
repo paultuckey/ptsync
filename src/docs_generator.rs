@@ -10,9 +10,9 @@
 //! plain `cargo test`. The whole tree is `#[cfg(test)]`, so none of it reaches
 //! the shipped binary.
 //!
-//! The third generator — the README demo GIF (`docs/demo.cast` / `docs/demo.gif`)
-//! — lives in `tests/demo.rs` instead: it needs the *built* binary to capture
-//! real output, which an integration test gets for free via `CARGO_BIN_EXE`.
+//! The README demo GIF (`docs/demo.gif`) is recorded by
+//! VHS from `docs/demo.tape`. `tests/sync_snapshot.rs` stands in — it snapshots the same sync's console
+//! output and fails when that drifts. See `Development.md`.
 
 mod cli;
 mod db_schema;

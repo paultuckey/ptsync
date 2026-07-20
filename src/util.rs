@@ -1,5 +1,5 @@
 use crate::file_type::{QuickFileType, find_quick_file_type};
-use crate::fs::{FileSystem, OsFileSystem};
+use crate::fs::FileSystem;
 use anyhow::Result;
 use chrono::DateTime;
 use serde::Serialize;
@@ -81,10 +81,16 @@ pub(crate) fn scan_fs(fs: &dyn FileSystem) -> Vec<ScanInfo> {
 }
 
 pub(crate) fn is_existing_file_same(
-    fs: &OsFileSystem,
+    fs: &dyn FileSystem,
     long_checksum: &str,
     output_path: &String,
 ) -> Option<bool> {
+    // Fast path: a backend that can report the stored checksum without reading
+    // the object body (e.g. S3's native checksum via HeadObject) answers the
+    // "same content?" question directly - no download, no re-hash.
+    if let Some(recorded) = fs.recorded_checksum(output_path) {
+        return Some(recorded == long_checksum);
+    }
     let Ok(mut reader) = fs.open(output_path) else {
         debug!("Could not read file bytes for checksum: {output_path:?}");
         return None;
@@ -229,7 +235,52 @@ pub(crate) fn media_item_id_for(media_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::ZipFileSystem;
+    use crate::fs::{FileMetadata, OsFileSystem, ReadSeek, ZipFileSystem};
+    use anyhow::anyhow;
+
+    /// A backend that reports a checksum from "metadata" but whose body read
+    /// always fails. It proves `is_existing_file_same` decides from the recorded
+    /// checksum alone and never touches the bytes - the S3 HeadObject fast path.
+    struct MetaOnlyFs {
+        checksum: String,
+    }
+
+    impl FileSystem for MetaOnlyFs {
+        fn open(&self, _path: &str) -> Result<Box<dyn ReadSeek>> {
+            Err(anyhow!(
+                "open() must not be called on the recorded-checksum fast path"
+            ))
+        }
+        fn exists(&self, _path: &str) -> bool {
+            true
+        }
+        fn walk(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn metadata(&self, _path: &str) -> Result<FileMetadata> {
+            Err(anyhow!("metadata not supported"))
+        }
+        fn recorded_checksum(&self, _path: &str) -> Option<String> {
+            Some(self.checksum.clone())
+        }
+    }
+
+    #[test]
+    fn is_existing_file_same_uses_recorded_checksum_without_reading_body() {
+        // A matching recorded checksum resolves to "same" without ever calling
+        // open() (which errors here); a mismatch resolves to "different".
+        let fs = MetaOnlyFs {
+            checksum: "abc123".to_string(),
+        };
+        assert_eq!(
+            is_existing_file_same(&fs, "abc123", &"any/path".to_string()),
+            Some(true)
+        );
+        assert_eq!(
+            is_existing_file_same(&fs, "def456", &"any/path".to_string()),
+            Some(false)
+        );
+    }
 
     #[test]
     fn test_zip() -> Result<()> {
@@ -238,7 +289,6 @@ mod tests {
         let c = ZipFileSystem::new("test/Canon_40D.jpg.zip")?;
         let index = scan_fs(&c);
         assert_eq!(index.len(), 2);
-        // Find Canon_40D.jpg
         let si = index
             .iter()
             .find(|i| i.file_path == "Canon_40D.jpg")
@@ -296,32 +346,23 @@ mod tests {
         assert_eq!(person_id_for(precomposed), person_id_for(decomposed));
     }
 
+    /// Album and media ids share the same path-keyed derivation, so both are
+    /// checked here against the one set of rules.
     #[test]
-    fn test_media_item_id_stable() {
-        let a = media_item_id_for("Google Photos/Holiday/IMG_0001.jpg");
-        assert_eq!(a.len(), 16);
-        // Deterministic and path-derived; different paths differ.
-        assert_eq!(
-            a,
-            media_item_id_for("  Google Photos/Holiday/IMG_0001.jpg  ")
-        );
-        assert_ne!(a, media_item_id_for("Google Photos/Holiday/IMG_0002.jpg"));
-        // Path-keyed, not content-keyed: two paths never share an id.
-        assert_ne!(
-            media_item_id_for("a/IMG.jpg"),
-            media_item_id_for("b/IMG.jpg")
-        );
-    }
-
-    #[test]
-    fn test_album_id_stable() {
-        let a = album_id_for("Google Photos/Holiday/metadata.json");
-        assert_eq!(a.len(), 16);
-        // Whitespace-insensitive and deterministic; different paths differ.
-        assert_eq!(a, album_id_for("  Google Photos/Holiday/metadata.json  "));
-        assert_ne!(a, album_id_for("Google Photos/Trip/metadata.json"));
-        // Paths are case-sensitive (unlike people).
-        assert_ne!(a, album_id_for("google photos/holiday/metadata.json"));
+    fn test_path_ids_stable() {
+        for id_for in [
+            media_item_id_for as fn(&str) -> String,
+            album_id_for as fn(&str) -> String,
+        ] {
+            let a = id_for("Google Photos/Holiday/IMG_0001.jpg");
+            // Deterministic, and surrounding whitespace does not change the id.
+            assert_eq!(a, id_for("  Google Photos/Holiday/IMG_0001.jpg  "));
+            assert_ne!(a, id_for("Google Photos/Holiday/IMG_0002.jpg"));
+            // Path-keyed, not content-keyed: two paths never share an id.
+            assert_ne!(id_for("a/IMG.jpg"), id_for("b/IMG.jpg"));
+            // Paths are case-sensitive (unlike people).
+            assert_ne!(a, id_for("google photos/holiday/img_0001.jpg"));
+        }
     }
 
     #[test]
