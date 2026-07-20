@@ -23,6 +23,7 @@ mod track_util;
 mod util;
 
 use clap::{Args, Parser, Subcommand};
+use std::io::IsTerminal;
 use tracing::{Level, debug, error, info};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -208,6 +209,7 @@ fn enable_debug(debug: bool) {
         .with_target("aws_sdk_s3", Level::ERROR);
     let registry_layer = tracing_subscriber::fmt::layer()
         .with_writer(progress::IndicatifWriter)
+        .with_ansi(std::io::stderr().is_terminal())
         .with_target(false);
 
     // A normal run should read like rsync's output: just the message. A
