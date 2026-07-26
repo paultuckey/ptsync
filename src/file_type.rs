@@ -30,7 +30,7 @@ pub(crate) fn find_quick_file_type(file_path: &str) -> QuickFileType {
         .unwrap_or_default();
     match lowercase_file_ext.as_str() {
         "jpg" | "jpeg" | "png" | "gif" | "heic" | "mp4" | "m4v" | "mov" | "avi" | "mpg"
-        | "mpeg" => QuickFileType::Media,
+        | "mpeg" | "wmv" | "asf" => QuickFileType::Media,
         "csv" => QuickFileType::AlbumCsv,
         _ => QuickFileType::Unknown,
     }
@@ -52,6 +52,9 @@ pub(crate) enum AccurateFileType {
     Avi,
     /// MPEG-1/2 elementary or program stream, as ripped from a DVD or camcorder.
     Mpg,
+    /// ASF container carrying a video stream, typically a Windows Media
+    /// transcode of camera footage. Audio-only ASF (WMA) is not media we keep.
+    Wmv,
     Json,
     Csv,
     Unsupported,
@@ -68,6 +71,7 @@ pub(crate) fn file_ext_from_file_type(ff: &AccurateFileType) -> String {
         AccurateFileType::M4v => "m4v".to_string(),
         AccurateFileType::Avi => "avi".to_string(),
         AccurateFileType::Mpg => "mpg".to_string(),
+        AccurateFileType::Wmv => "wmv".to_string(),
         AccurateFileType::Unsupported => "bin".to_string(),
         AccurateFileType::Json => "json".to_string(),
         AccurateFileType::Csv => "csv".to_string(),
@@ -87,7 +91,8 @@ pub(crate) fn media_kind(ff: &AccurateFileType) -> Option<&'static str> {
         | AccurateFileType::Mov
         | AccurateFileType::M4v
         | AccurateFileType::Avi
-        | AccurateFileType::Mpg => Some("v"),
+        | AccurateFileType::Mpg
+        | AccurateFileType::Wmv => Some("v"),
         AccurateFileType::Json | AccurateFileType::Csv | AccurateFileType::Unsupported => None,
     }
 }
@@ -107,11 +112,9 @@ pub(crate) fn metadata_type(ff: &AccurateFileType) -> MetadataType {
         AccurateFileType::Mp4 | AccurateFileType::Mov | AccurateFileType::M4v => {
             MetadataType::Track
         }
-        // AVI (RIFF) and MPEG-1/2 program streams are videos, but they are not
-        // ISO base media files, so the track parser cannot read them — asking it
-        // to try only produces a warning per file. Their capture time has to come
-        // from supplemental metadata or the filesystem instead.
-        AccurateFileType::Avi | AccurateFileType::Mpg => MetadataType::NoMetadata,
+        AccurateFileType::Avi | AccurateFileType::Mpg | AccurateFileType::Wmv => {
+            MetadataType::NoMetadata
+        }
         AccurateFileType::Json | AccurateFileType::Csv | AccurateFileType::Unsupported => {
             MetadataType::NoMetadata
         }
@@ -130,6 +133,7 @@ pub(crate) fn file_type_from_content_type(ct: &str) -> AccurateFileType {
         "video/x-m4v" => AccurateFileType::M4v,
         "video/x-msvideo" => AccurateFileType::Avi,
         "video/mpeg" => AccurateFileType::Mpg,
+        "video/x-ms-wmv" => AccurateFileType::Wmv,
         "application/octet-stream" => AccurateFileType::Unsupported,
         "application/json" => AccurateFileType::Unsupported,
         "text/csv" => AccurateFileType::Csv,
@@ -213,6 +217,13 @@ mod tests {
         assert_eq!(find_quick_file_type("test/Hello.MPG"), QuickFileType::Media);
         assert_eq!(
             find_quick_file_type("test/Hello.mpeg"),
+            QuickFileType::Media
+        );
+        assert_eq!(find_quick_file_type("test/Hello.wmv"), QuickFileType::Media);
+        assert_eq!(find_quick_file_type("test/Hello.WMV"), QuickFileType::Media);
+        assert_eq!(find_quick_file_type("test/Hello.asf"), QuickFileType::Media);
+        assert_eq!(
+            find_quick_file_type("test/MVI_1943.avi.wmv"),
             QuickFileType::Media
         );
     }
@@ -328,6 +339,26 @@ mod tests {
         Ok(())
     }
 
+    /// ASF is one container shared by Windows Media video and audio, so the bytes
+    /// alone do not settle the type — it takes the stream GUIDs in the header,
+    /// which is why the `reader-asf` feature has to be enabled. Without it every
+    /// `.wmv` reports the generic ASF media type and is skipped as unsupported.
+    /// Like AVI it carries no track metadata the parser can reach.
+    #[test]
+    fn test_wmv_is_a_supported_video() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        use crate::fs::OsFileSystem;
+        let name = "Hello.wmv".to_string();
+        let root = OsFileSystem::new("test");
+        let ft = determine_file_type(root.open(&name)?, &name)?;
+
+        assert_eq!(ft, AccurateFileType::Wmv);
+        assert_eq!(file_ext_from_file_type(&ft), "wmv");
+        assert_eq!(media_kind(&ft), Some("v"));
+        assert!(matches!(metadata_type(&ft), MetadataType::NoMetadata));
+        Ok(())
+    }
+
     #[test]
     fn test_video_content_types() {
         assert_eq!(
@@ -350,9 +381,23 @@ mod tests {
             file_type_from_content_type("video/mpeg"),
             AccurateFileType::Mpg
         );
+        assert_eq!(
+            file_type_from_content_type("video/x-ms-wmv"),
+            AccurateFileType::Wmv
+        );
         // Audio-only MPEG must not be mistaken for the video container.
         assert_eq!(
             file_type_from_content_type("audio/mpeg"),
+            AccurateFileType::Unsupported
+        );
+        // Likewise for the ASF family: audio-only WMA is not video, and a bare
+        // ASF media type means the reader could not find a video stream.
+        assert_eq!(
+            file_type_from_content_type("audio/x-ms-wma"),
+            AccurateFileType::Unsupported
+        );
+        assert_eq!(
+            file_type_from_content_type("application/vnd.ms-asf"),
             AccurateFileType::Unsupported
         );
     }
