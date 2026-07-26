@@ -119,11 +119,41 @@ fn split_counter(stem: &str) -> (&str, &str) {
 /// The json filename Takeout writes for a media file named `base`: the tag is
 /// appended and the result truncated to fit the cap, then `counter` is added.
 fn supp_json_name(base: &str, counter: &str) -> String {
+    supp_json_name_cut_at(base, counter, SUPP_STEM_MAX_CHARS)
+}
+
+/// As [`supp_json_name`], but cutting the stem at an arbitrary length. Used to
+/// sweep every truncation point when the measured cap turns out to be wrong.
+fn supp_json_name_cut_at(base: &str, counter: &str, stem_chars: usize) -> String {
     let stem: String = format!("{base}{SUPP_TAG}")
         .chars()
-        .take(SUPP_STEM_MAX_CHARS)
+        .take(stem_chars)
         .collect();
     format!("{stem}{counter}{JSON_EXT}")
+}
+
+/// Every filename the sidecar for `base` could have if Takeout's length cap is
+/// not the one we measured, longest (least truncated) first.
+///
+/// The stem is always some prefix of `{base}{SUPP_TAG}` that keeps the whole of
+/// `base` — Google only ever cuts into the tag, never into the filename it is
+/// describing. Enumerating those prefixes covers a cap that moved in either
+/// direction, and as a side effect covers Google shortening the tag itself to
+/// any prefix of its current spelling.
+fn supp_json_names_any_cap(base: &str, counter: &str) -> impl Iterator<Item = String> {
+    let shortest = base.chars().count();
+    let longest = shortest + SUPP_TAG.chars().count();
+    (shortest..=longest)
+        .rev()
+        .map(move |n| supp_json_name_cut_at(base, counter, n))
+}
+
+/// Whether the cap is even involved for this name. When `{base}{SUPP_TAG}` fits
+/// inside it, [`supp_json_name`] returns the untruncated name and its exact value
+/// is irrelevant — so the sweep has nothing to add and is skipped, which is what
+/// keeps the cost off the common case and off archives with no sidecars at all.
+fn cap_applies(base: &str) -> bool {
+    base.chars().count() + SUPP_TAG.chars().count() > SUPP_STEM_MAX_CHARS
 }
 
 /// Strip one derived-rendition suffix, case-insensitively.
@@ -137,28 +167,31 @@ fn strip_derived_suffix(stem: &str) -> Option<&str> {
     })
 }
 
-/// Every json filename that could describe `file_name`, most specific first.
-fn supplemental_candidates(file_name: &str) -> Vec<String> {
+/// The `(name, counter)` pairs a sidecar for `file_name` could be keyed on, most
+/// specific first. These encode *which file* the metadata belongs to; turning a
+/// pair into a filename is [`supp_json_name`]'s job.
+fn supplemental_keys(file_name: &str) -> Vec<(String, String)> {
     let (stem, ext) = split_ext(file_name);
     let (base, counter) = split_counter(stem);
 
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |name: String| {
-        if !out.contains(&name) {
-            out.push(name);
+    let mut keys: Vec<(String, String)> = Vec::new();
+    let mut push = |name: String, counter: &str| {
+        let key = (name, counter.to_string());
+        if !keys.contains(&key) {
+            keys.push(key);
         }
     };
 
-    // Rule 1: the sidecar named after this exact file (truncated if long).
-    push(supp_json_name(file_name, ""));
+    // Rule 1: the sidecar named after this exact file.
+    push(file_name.to_string(), "");
     // Rule 2: the duplicate counter relocated onto the json name.
     if !counter.is_empty() {
-        push(supp_json_name(&format!("{base}{ext}"), counter));
+        push(format!("{base}{ext}"), counter);
     }
     // Rule 3: keyed on an extension-less upload title, counter either way round.
-    push(supp_json_name(stem, ""));
+    push(stem.to_string(), "");
     if !counter.is_empty() {
-        push(supp_json_name(base, counter));
+        push(base.to_string(), counter);
     }
 
     // Rule 4a: a rendition Google derived from an original that kept the sidecar.
@@ -172,14 +205,14 @@ fn supplemental_candidates(file_name: &str) -> Vec<String> {
         for candidate_ext in std::iter::once(ext).chain(STILL_EXTS.iter().copied()) {
             let named = format!("{original}{candidate_ext}");
             if !counter.is_empty() {
-                push(supp_json_name(&named, counter));
+                push(named.clone(), counter);
             }
-            push(supp_json_name(&named, ""));
+            push(named, "");
         }
         if !counter.is_empty() {
-            push(supp_json_name(original, counter));
+            push(original.to_string(), counter);
         }
-        push(supp_json_name(original, ""));
+        push(original.to_string(), "");
     }
 
     // Rule 4b: a live-photo motion clip, whose metadata sits on the paired still.
@@ -187,12 +220,45 @@ fn supplemental_candidates(file_name: &str) -> Vec<String> {
         for still_ext in STILL_EXTS {
             let named = format!("{base}{still_ext}");
             if !counter.is_empty() {
-                push(supp_json_name(&named, counter));
+                push(named.clone(), counter);
             }
-            push(supp_json_name(&named, ""));
+            push(named, "");
         }
     }
 
+    keys
+}
+
+/// Every json filename that could describe `file_name`, most specific first.
+///
+/// Two passes. The first names each candidate at the length cap we have
+/// measured, which is what matches in practice — for the overwhelming majority
+/// of files the very first entry is the answer, one `exists` call and done.
+/// The second re-tries every candidate at every other truncation point, so an
+/// archive built with a different cap still resolves instead of silently
+/// falling back to EXIF. It costs nothing on the common path: it only produces
+/// entries for names long enough for the cap to bite, and it is only ever
+/// reached for a file whose sidecar was not found at all.
+fn supplemental_candidates(file_name: &str) -> Vec<String> {
+    let keys = supplemental_keys(file_name);
+    let mut out: Vec<String> = Vec::with_capacity(keys.len());
+    let push = |name: String, out: &mut Vec<String>| {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    };
+
+    for (base, counter) in &keys {
+        push(supp_json_name(base, counter), &mut out);
+    }
+    for (base, counter) in &keys {
+        if !cap_applies(base) {
+            continue;
+        }
+        for name in supp_json_names_any_cap(base, counter) {
+            push(name, &mut out);
+        }
+    }
     out
 }
 
@@ -436,6 +502,79 @@ mod tests {
             Some(own)
         );
         Ok(())
+    }
+
+    /// The measured cap is a fact about Google's exporter today, not a rule they
+    /// promised. If it moves, sidecars must still resolve — otherwise every
+    /// long-named photo quietly loses its date and falls back to EXIF.
+    #[test]
+    fn test_detect_survives_a_changed_length_cap() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let media = "9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG";
+        // The cap we measured cuts this one at `.suppl`.
+        assert_eq!(
+            supp_json_name(media, ""),
+            "9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG.suppl.json"
+        );
+
+        // A longer cap (less truncation), a shorter one (more), and no cap at all.
+        for json in [
+            "9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG.supplemental-me.json",
+            "9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG.sup.json",
+            "9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG.supplemental-metadata.json",
+            "9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG.json",
+        ] {
+            assert_eq!(
+                detect_in(&[json], media)?.as_deref(),
+                Some(json),
+                "sidecar at a different cap: {json}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The same sweep also absorbs Google shortening the tag itself, as long as
+    /// the new spelling is a prefix of the current one.
+    #[test]
+    fn test_detect_survives_a_shortened_tag() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let media = "IMG_20140913_100655_nopm_.jpg";
+        let json = "IMG_20140913_100655_nopm_.jpg.supplemental.json";
+        assert_eq!(detect_in(&[json], media)?.as_deref(), Some(json));
+        Ok(())
+    }
+
+    /// The sweep must stay off the common path. A name short enough that the cap
+    /// never bites gets exactly one candidate per key — no fallback probing — so
+    /// an archive of ordinary filenames, or one with no sidecars at all, does not
+    /// pay for this robustness.
+    #[test]
+    fn test_short_names_generate_no_fallback_candidates() {
+        let short = supplemental_candidates("IMG_0001.jpg");
+        assert_eq!(
+            short,
+            supplemental_keys("IMG_0001.jpg")
+                .iter()
+                .map(|(b, c)| supp_json_name(b, c))
+                .collect::<Vec<_>>(),
+            "a short name yields only the one-per-key first pass"
+        );
+        assert!(
+            !cap_applies("IMG_0001.jpg"),
+            "the cap is not in play for this name"
+        );
+
+        // A long name does get the sweep, and it stays bounded: one entry per
+        // truncation point of the tag, per key.
+        let long = supplemental_candidates("9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG");
+        assert!(long.len() > short.len());
+        assert!(
+            long.len()
+                <= supplemental_keys("9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG").len()
+                    * (SUPP_TAG.chars().count() + 1),
+            "fallback stays bounded by tag length, got {}",
+            long.len()
+        );
     }
 
     #[test]
