@@ -423,7 +423,10 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
     )
     .await?
     .get(0)?;
-    assert_eq!(classified_runs, 1, "classified rows refreshed, not duplicated");
+    assert_eq!(
+        classified_runs, 1,
+        "classified rows refreshed, not duplicated"
+    );
     // The single classified_file row for our media file was refreshed, not
     // stacked: a resume must not double-insert it under the same run.
     let classified_files: i64 = one_row(
@@ -433,7 +436,10 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
     )
     .await?
     .get(0)?;
-    assert_eq!(classified_files, 1, "classified_file refreshed in place on resume");
+    assert_eq!(
+        classified_files, 1,
+        "classified_file refreshed in place on resume"
+    );
 
     // --clear wipes everything, including the run-scoped tables, and rebuilds
     // from scratch without a "FOREIGN KEY constraint failed" on the deletes.
@@ -492,7 +498,10 @@ async fn test_db_scan_resumes_and_adds_new_files() -> anyhow::Result<()> {
     let count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
         .await?
         .get(0)?;
-    assert_eq!(count, 2, "second run adds the new file and keeps the old one");
+    assert_eq!(
+        count, 2,
+        "second run adds the new file and keeps the old one"
+    );
     assert_eq!(
         first_id,
         media_item_id_of(&conn, "Canon_40D.jpg").await?,
