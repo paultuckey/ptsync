@@ -53,6 +53,11 @@ Options:
       --clear <CLEAR>
           Clear existing rows before scanning; also rebuilds the database if its schema is out of
           date [default: false] [possible values: true, false]
+      --skip-media
+          Skip inspecting photo and video files; leaves the media_item tables untouched, so only the
+          classified tables are written
+      --skip-albums
+          Skip inspecting albums
       --s3-region <S3_REGION>
           AWS region for `s3://` paths (else `AWS_REGION` / the profile's region)
       --s3-endpoint-url <S3_ENDPOINT_URL>

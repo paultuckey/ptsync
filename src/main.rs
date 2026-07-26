@@ -104,6 +104,15 @@ enum Commands {
         #[arg(long, action = clap::ArgAction::Set, default_value_t = false)]
         clear: bool,
 
+        /// Skip inspecting photo and video files; leaves the media_item tables
+        /// untouched, so only the classified tables are written
+        #[arg(long)]
+        skip_media: bool,
+
+        /// Skip inspecting albums
+        #[arg(long)]
+        skip_albums: bool,
+
         #[command(flatten)]
         s3: S3Opts,
     },
@@ -164,11 +173,21 @@ fn go() -> anyhow::Result<()> {
             input,
             output,
             clear,
+            skip_media,
+            skip_albums,
             s3,
         } => {
             enable_debug(debug);
             s3_fs::set_s3_config(s3.to_config());
-            db_cmd::main(&input, &output, clear)?
+            db_cmd::main(
+                &input,
+                &output,
+                db_cmd::DbScanOpts {
+                    clear,
+                    skip_media,
+                    skip_albums,
+                },
+            )?
         }
         Commands::Sync {
             debug,

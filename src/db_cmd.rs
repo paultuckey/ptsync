@@ -6,6 +6,11 @@
 //! A run is keyed on its `--input`, not on the invocation, so re-running the
 //! same input resumes it: media already recorded is skipped rather than
 //! re-hashed. See [`run_db_scan`].
+//!
+//! The two skip flags in [`DbScanOpts`] cut whole phases out of that flow. They
+//! are independent, and because a resumed run re-visits the album pass, a
+//! `--skip-media` scan followed by a full one still ends up with complete
+//! `album_file` links.
 
 use crate::classify::{classify_dir, classify_file};
 use crate::file_type::QuickFileType;
@@ -35,7 +40,19 @@ use schema::{
 
 const DB_BATCH_SIZE: usize = 100;
 
-pub(crate) fn main(input: &String, output: &str, clear: bool) -> anyhow::Result<()> {
+/// Which phases of a scan to run. Defaults to a full scan.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct DbScanOpts {
+    /// Clear existing rows before scanning, rebuilding a stale schema.
+    pub(crate) clear: bool,
+    /// Skip inspecting photo and video files, leaving `media_item` and its
+    /// dependent tables untouched.
+    pub(crate) skip_media: bool,
+    /// Skip parsing album files, leaving `album` and `album_file` untouched.
+    pub(crate) skip_albums: bool,
+}
+
+pub(crate) fn main(input: &String, output: &str, opts: DbScanOpts) -> anyhow::Result<()> {
     debug!("Inspecting: {input}");
     let container = open_input(input)?;
 
@@ -47,7 +64,7 @@ pub(crate) fn main(input: &String, output: &str, clear: bool) -> anyhow::Result<
     // released here, on a plain blocking thread, after `block_on` returns.
     let result = rt.block_on(async {
         let (_db, conn) = open_conn(output).await?;
-        run_db_scan(container.clone(), &conn, clear, input).await
+        run_db_scan(container.clone(), &conn, opts, input).await
     });
     drop(container);
     result
@@ -56,10 +73,10 @@ pub(crate) fn main(input: &String, output: &str, clear: bool) -> anyhow::Result<
 async fn run_db_scan(
     container: Arc<dyn FileSystem>,
     conn: &Connection,
-    clear: bool,
+    opts: DbScanOpts,
     run_input: &str,
 ) -> anyhow::Result<()> {
-    db_prepare(conn, clear).await?;
+    db_prepare(conn, opts.clear).await?;
 
     // A run is identified by its input: re-running for same input reuses run row.
     let run_id = match query_one(conn, DB_RUN_FIND_BY_INPUT, [run_input]).await? {
@@ -79,106 +96,116 @@ async fn run_db_scan(
 
     db_classify_paths(conn, &files, run_id).await?;
 
-    // Everything classified as media, before we set aside the ones already done.
-    let all_media: Vec<&ScanInfo> = files
-        .iter()
-        .filter(|m| m.quick_file_type == QuickFileType::Media)
-        .collect();
+    if opts.skip_media {
+        info!("Skipping inspection of photo and video files");
+    } else {
+        // Everything classified as media, before we set aside the ones already done.
+        let all_media: Vec<&ScanInfo> = files
+            .iter()
+            .filter(|m| m.quick_file_type == QuickFileType::Media)
+            .collect();
 
-    // Media already recorded by an earlier run are skipped so we don't re-hash
-    // them. Only re-hash if size changes.
-    let recorded = load_recorded_media(conn).await?;
-    let media_si_files: Vec<ScanInfo> = all_media
-        .iter()
-        .filter(|m| match recorded.get(&media_item_id_for(&m.file_path)) {
-            Some(&size) => size != m.file_size as i64,
-            None => true,
-        })
-        .map(|m| (*m).clone())
-        .collect();
+        // Media already recorded by an earlier run are skipped so we don't re-hash
+        // them. Only re-hash if size changes.
+        let recorded = load_recorded_media(conn).await?;
+        let media_si_files: Vec<ScanInfo> = all_media
+            .iter()
+            .filter(|m| match recorded.get(&media_item_id_for(&m.file_path)) {
+                Some(&size) => size != m.file_size as i64,
+                None => true,
+            })
+            .map(|m| (*m).clone())
+            .collect();
 
-    let skipped_done = all_media.len() - media_si_files.len();
-    if skipped_done > 0 {
-        info!(
-            "Resuming: {skipped_done} of {} photo and video files already recorded",
-            all_media.len()
-        );
-    }
-    info!("Inspecting {} photo and video files", media_si_files.len());
-    let prog = Arc::new(Progress::new(media_si_files.len() as u64));
-
-    // Inspect in parallel and stream the results straight into the db, committing
-    // in batches to avoid the per-row fsync of autocommit. A single writer drains
-    // the channel; the parallelism lives in `inspect_media_files`.
-    conn.execute("BEGIN", ()).await?;
-    let mut batch_count = 0;
-    let mut inspected = inspect_media_files(container.clone(), media_si_files, prog.clone());
-    for info in inspected.by_ref() {
-        db_record(conn, &info).await?;
-        batch_count += 1;
-        if batch_count >= DB_BATCH_SIZE {
-            conn.execute("COMMIT", ()).await?;
-            conn.execute("BEGIN", ()).await?;
-            batch_count = 0;
+        let skipped_done = all_media.len() - media_si_files.len();
+        if skipped_done > 0 {
+            info!(
+                "Resuming: {skipped_done} of {} photo and video files already recorded",
+                all_media.len()
+            );
         }
-    }
-    conn.execute("COMMIT", ()).await?;
+        info!("Inspecting {} photo and video files", media_si_files.len());
+        let prog = Arc::new(Progress::new(media_si_files.len() as u64));
 
-    let skipped = inspected.skipped_count();
-    if skipped > 0 {
-        warn!("{skipped} files could not be processed");
-    }
-
-    drop(prog);
-
-    let album_si_files = files
-        .iter()
-        .filter(|m| {
-            matches!(
-                m.quick_file_type,
-                QuickFileType::AlbumCsv | QuickFileType::AlbumJson
-            )
-        })
-        .collect::<Vec<&ScanInfo>>();
-
-    info!("Inspecting {} album files", album_si_files.len());
-    let prog_albums = Progress::new(album_si_files.len() as u64);
-
-    conn.execute("BEGIN", ()).await?;
-    for album_si in album_si_files {
-        if let Some(album) = crate::album::parse_album(container.as_ref(), album_si, &files) {
-            let album_id = crate::util::album_id_for(&album_si.file_path);
-            conn.execute(
-                DB_ALBUM_INSERT,
-                (
-                    album_id.as_str(),
-                    album.title.as_str(),
-                    album_si.file_path.as_str(),
-                ),
-            )
-            .await?;
-            for file in &album.files {
-                // Album members reference scanned file paths; link them to the
-                // media_item row for that path. Skip any that weren't indexed as
-                // media (e.g. an unsupported type).
-                let media_item_id: Option<String> =
-                    match query_one(conn, DB_MEDIA_ITEM_ID_BY_PATH, [file.as_str()]).await? {
-                        Some(row) => Some(row.get::<String>(0)?),
-                        None => None,
-                    };
-                match media_item_id {
-                    Some(id) => {
-                        conn.execute(DB_ALBUM_FILE_INSERT, (album_id.as_str(), id.as_str()))
-                            .await?;
-                    }
-                    None => debug!("Album {:?} references unindexed file {file:?}", album.title),
-                }
+        // Inspect in parallel and stream the results straight into the db, committing
+        // in batches to avoid the per-row fsync of autocommit. A single writer drains
+        // the channel; the parallelism lives in `inspect_media_files`.
+        conn.execute("BEGIN", ()).await?;
+        let mut batch_count = 0;
+        let mut inspected = inspect_media_files(container.clone(), media_si_files, prog.clone());
+        for info in inspected.by_ref() {
+            db_record(conn, &info).await?;
+            batch_count += 1;
+            if batch_count >= DB_BATCH_SIZE {
+                conn.execute("COMMIT", ()).await?;
+                conn.execute("BEGIN", ()).await?;
+                batch_count = 0;
             }
         }
-        prog_albums.inc();
+        conn.execute("COMMIT", ()).await?;
+
+        let skipped = inspected.skipped_count();
+        if skipped > 0 {
+            warn!("{skipped} files could not be processed");
+        }
+
+        drop(prog);
     }
-    conn.execute("COMMIT", ()).await?;
-    drop(prog_albums);
+
+    if opts.skip_albums {
+        info!("Skipping album files");
+    } else {
+        let album_si_files = files
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.quick_file_type,
+                    QuickFileType::AlbumCsv | QuickFileType::AlbumJson
+                )
+            })
+            .collect::<Vec<&ScanInfo>>();
+
+        info!("Inspecting {} album files", album_si_files.len());
+        let prog_albums = Progress::new(album_si_files.len() as u64);
+
+        conn.execute("BEGIN", ()).await?;
+        for album_si in album_si_files {
+            if let Some(album) = crate::album::parse_album(container.as_ref(), album_si, &files) {
+                let album_id = crate::util::album_id_for(&album_si.file_path);
+                conn.execute(
+                    DB_ALBUM_INSERT,
+                    (
+                        album_id.as_str(),
+                        album.title.as_str(),
+                        album_si.file_path.as_str(),
+                    ),
+                )
+                .await?;
+                for file in &album.files {
+                    // Album members reference scanned file paths; link them to the
+                    // media_item row for that path. Skip any that weren't indexed as
+                    // media (e.g. an unsupported type, or a --skip-media run).
+                    let media_item_id: Option<String> =
+                        match query_one(conn, DB_MEDIA_ITEM_ID_BY_PATH, [file.as_str()]).await? {
+                            Some(row) => Some(row.get::<String>(0)?),
+                            None => None,
+                        };
+                    match media_item_id {
+                        Some(id) => {
+                            conn.execute(DB_ALBUM_FILE_INSERT, (album_id.as_str(), id.as_str()))
+                                .await?;
+                        }
+                        None => {
+                            debug!("Album {:?} references unindexed file {file:?}", album.title)
+                        }
+                    }
+                }
+            }
+            prog_albums.inc();
+        }
+        conn.execute("COMMIT", ()).await?;
+        drop(prog_albums);
+    }
 
     // Fold WAL back into the main file so the output is a single, file.
     let _ = query_one(conn, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
