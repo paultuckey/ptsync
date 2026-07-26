@@ -6,11 +6,6 @@
 
 const DOC_PATH: &str = "docs/db-schema.md";
 
-/// Every `CREATE TABLE` statement, in the order the tables are created.
-fn create_statements() -> Vec<&'static str> {
-    crate::db_cmd::SCHEMA_TABLE_STATEMENTS.to_vec()
-}
-
 struct Column {
     name: String,
     col_type: String,
@@ -159,7 +154,7 @@ fn parse_table(create_sql: &str) -> anyhow::Result<Table> {
 }
 
 fn generate() -> anyhow::Result<String> {
-    let tables: Vec<Table> = create_statements()
+    let tables: Vec<Table> = crate::db_cmd::schema::SCHEMA_TABLE_STATEMENTS
         .iter()
         .map(|s| parse_table(s))
         .collect::<anyhow::Result<_>>()?;

@@ -14,7 +14,7 @@ Let's use the most basic rust we can to make the code as approachable as possibl
 - Avoid low value tests for trivial logic.
 - Prefer high value black box tests were possible.
 - Prefer fakes over mocks, mocks over spys.
-- Avoid low value source comments, only add comments where the actual variable or method behavior is not implied by its name.
+- Do not add low value source comments, never describe the change, only add comments where the actual variable or method behavior is not implied by its name.
 
 ## Technical goals
 

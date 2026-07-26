@@ -108,7 +108,10 @@ pub(crate) fn media_file_derived_from_media_info(
 ///   - no timezone info, unavailable in zips, somewhat unreliable in directories due to file
 ///     copying / syncing not preserving, only use as a last resort
 ///
-/// Result returned as ISO 8601 string
+/// Result returned as an RFC 3339 string. Every source above normalizes to that
+/// one form, because [`get_desired_media_path`] parses it back and files anything
+/// it cannot read under `undated/` — a source that returns its own native
+/// spelling silently loses the date it just found.
 pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo) -> Option<String> {
     if let Some(dt) = info
         .supp_info
