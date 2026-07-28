@@ -90,7 +90,7 @@ fn sync_over_hostile_input_names_stays_within_output() -> Result<()> {
     let input_s = input.to_string_lossy().to_string();
     let output_s = Some(output.to_string_lossy().to_string());
     // The sync must complete without panicking or erroring on these names.
-    crate::sync_cmd::main(false, &input_s, &output_s, false, false, false)?;
+    crate::sync_cmd::main(false, &input_s, &output_s, false, false, false, true)?;
 
     // Every file the sync produced must sit under the output root - the derived
     // names are date/checksum based, so nothing leaks the hostile input names.

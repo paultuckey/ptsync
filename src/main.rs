@@ -21,6 +21,7 @@ mod sync_cmd;
 mod test_util;
 mod track_util;
 mod util;
+mod xmp;
 
 use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;
@@ -84,6 +85,10 @@ enum Commands {
         /// Photo, video or album to view info for
         #[arg(short, long)]
         input: String,
+
+        /// Skip reading `.xmp` sidecars written by other photo tools
+        #[arg(long)]
+        skip_xmp: bool,
     },
     /// Scan files in an archive or directory and collect meta info into a sqlite database
     Db {
@@ -112,6 +117,10 @@ enum Commands {
         /// Skip inspecting albums
         #[arg(long)]
         skip_albums: bool,
+
+        /// Skip reading `.xmp` sidecars written by other photo tools
+        #[arg(long)]
+        skip_xmp: bool,
 
         #[command(flatten)]
         s3: S3Opts,
@@ -146,6 +155,10 @@ enum Commands {
         #[arg(long)]
         skip_albums: bool,
 
+        /// Skip reading `.xmp` sidecars written by other photo tools
+        #[arg(long)]
+        skip_xmp: bool,
+
         #[command(flatten)]
         s3: S3Opts,
     },
@@ -164,9 +177,14 @@ fn main() {
 fn go() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Info { debug, root, input } => {
+        Commands::Info {
+            debug,
+            root,
+            input,
+            skip_xmp,
+        } => {
             enable_debug(debug);
-            info_cmd::main(&input, &root)?
+            info_cmd::main(&input, &root, !skip_xmp)?
         }
         Commands::Db {
             debug,
@@ -175,6 +193,7 @@ fn go() -> anyhow::Result<()> {
             clear,
             skip_media,
             skip_albums,
+            skip_xmp,
             s3,
         } => {
             enable_debug(debug);
@@ -186,6 +205,7 @@ fn go() -> anyhow::Result<()> {
                     clear,
                     skip_media,
                     skip_albums,
+                    skip_xmp,
                 },
             )?
         }
@@ -197,6 +217,7 @@ fn go() -> anyhow::Result<()> {
             output,
             skip_media,
             skip_albums,
+            skip_xmp,
             s3,
         } => {
             enable_debug(debug);
@@ -209,6 +230,7 @@ fn go() -> anyhow::Result<()> {
                 skip_markdown,
                 skip_media,
                 skip_albums,
+                skip_xmp,
             )?;
         }
     }

@@ -35,6 +35,12 @@ erDiagram
         INTEGER display_rotate
         TEXT geohash
         TEXT kind
+        INTEGER rating
+        TEXT label
+        TEXT title
+        TEXT description
+        INTEGER favorite
+        INTEGER archived
     }
     person {
         TEXT person_id PK

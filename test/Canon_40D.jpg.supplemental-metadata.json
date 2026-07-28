@@ -1,0 +1,34 @@
+{
+  "title": "Canon_40D.jpg",
+  "description": "First frame off the 40D, straight out of the camera.",
+  "imageViews": "4",
+  "creationTime": {
+    "timestamp": "1212398047",
+    "formatted": "2 Jun 2008, 09:14:07 UTC"
+  },
+  "photoTakenTime": {
+    "timestamp": "1212162961",
+    "formatted": "30 May 2008, 15:56:01 UTC"
+  },
+  "geoData": {
+    "latitude": 0.0,
+    "longitude": 0.0,
+    "altitude": 0.0,
+    "latitudeSpan": 0.0,
+    "longitudeSpan": 0.0
+  },
+  "geoDataExif": {
+    "latitude": 0.0,
+    "longitude": 0.0,
+    "altitude": 0.0,
+    "latitudeSpan": 0.0,
+    "longitudeSpan": 0.0
+  },
+  "favorited": true,
+  "url": "https://photos.google.com/photo/AF1QipN8yYd2rQ6Xz3kK9m0vLpTbHcS4WgJf",
+  "googlePhotosOrigin": {
+    "webUpload": {
+      "computerUpload": {}
+    }
+  }
+}

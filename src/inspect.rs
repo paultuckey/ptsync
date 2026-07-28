@@ -3,6 +3,7 @@ use crate::media::{MediaFileInfo, media_file_info_from_readable};
 use crate::progress::Progress;
 use crate::supplemental_info::{detect_supplemental_info, load_supplemental_info};
 use crate::util::{ScanInfo, checksum_bytes};
+use crate::xmp::{detect_xmp, load_xmp};
 use anyhow::anyhow;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -32,6 +33,7 @@ pub(crate) fn inspect_media_files(
     container: Arc<dyn FileSystem>,
     media_si_files: Vec<ScanInfo>,
     prog: Arc<Progress>,
+    skip_xmp: bool,
 ) -> InspectMediaIter {
     // Bound the channel so fast parallel producers can't outrun the single
     // consumer and pile up in memory.
@@ -42,7 +44,7 @@ pub(crate) fn inspect_media_files(
     let worker_skipped = Arc::clone(&skipped);
     let handle = std::thread::spawn(move || {
         media_si_files.par_iter().for_each(|media_si| {
-            match analyze_file(container.as_ref(), media_si) {
+            match analyze_file(container.as_ref(), media_si, skip_xmp) {
                 Ok(Some(info)) => {
                     let _ = tx.send(info);
                 }
@@ -112,17 +114,26 @@ impl Drop for InspectMediaIter {
     }
 }
 
-/// Inspect a single media file: load any supplemental info, checksum the bytes,
+/// Inspect a single media file: load any sidecar metadata, checksum the bytes,
 /// then derive its type and metadata. Returns `Ok(None)` when the file isn't a
 /// supported media type, and `Err` when it can't be read or hashed.
+///
+/// This is the one place every command loads a media file, so a sidecar source
+/// wired in here reaches `sync`, `db` and `info` alike.
 pub(crate) fn analyze_file(
     root: &dyn FileSystem,
     media_si: &ScanInfo,
+    skip_xmp: bool,
 ) -> anyhow::Result<Option<MediaFileInfo>> {
     let mut supp_info_o = None;
     let supp_info_path_o = detect_supplemental_info(&media_si.file_path, root);
     if let Some(supp_info_path) = supp_info_path_o {
-        supp_info_o = load_supplemental_info(&supp_info_path, root);
+        supp_info_o = load_supplemental_info(&supp_info_path, &media_si.file_path, root);
+    }
+
+    let mut xmp_info_o = None;
+    if !skip_xmp && let Some(xmp_path) = detect_xmp(&media_si.file_path, root) {
+        xmp_info_o = load_xmp(&xmp_path, root);
     }
 
     let mut reader = root.open(&media_si.file_path)?;
@@ -139,7 +150,7 @@ pub(crate) fn analyze_file(
     };
 
     let media_info_r =
-        media_file_info_from_readable(media_si, &mut reader, &supp_info_o, &hash_info);
+        media_file_info_from_readable(media_si, &mut reader, &supp_info_o, &xmp_info_o, &hash_info);
     match media_info_r {
         Ok(media_info) => Ok(Some(media_info)),
         Err(_) => Ok(None),
@@ -164,7 +175,7 @@ mod tests {
         let prog = Arc::new(Progress::new(media_si_files.len() as u64));
 
         let results: Vec<MediaFileInfo> =
-            inspect_media_files(container, media_si_files, prog).collect();
+            inspect_media_files(container, media_si_files, prog, true).collect();
 
         assert!(
             results
@@ -207,7 +218,7 @@ mod tests {
         assert_eq!(media_si_files.len(), 2, "both files classify as media");
 
         let prog = Arc::new(Progress::new(media_si_files.len() as u64));
-        let mut inspected = inspect_media_files(container, media_si_files, prog);
+        let mut inspected = inspect_media_files(container, media_si_files, prog, true);
         let results: Vec<MediaFileInfo> = inspected.by_ref().collect();
 
         assert_eq!(results.len(), 1, "only the valid media file is yielded");

@@ -19,6 +19,7 @@ pub(crate) fn main(
     skip_markdown: bool,
     skip_media: bool,
     skip_albums: bool,
+    skip_xmp: bool,
 ) -> anyhow::Result<()> {
     let container = open_input(input)?;
 
@@ -54,7 +55,8 @@ pub(crate) fn main(
         // this thread since it mutates the shared collection. Files with the
         // same content hash collapse into one entry, recording each original
         // path (see `Deduplicator`).
-        let mut inspected = inspect_media_files(container.clone(), media_si_files, prog.clone());
+        let mut inspected =
+            inspect_media_files(container.clone(), media_si_files, prog.clone(), skip_xmp);
         for media in inspected.by_ref() {
             deduper.add(media);
         }
@@ -257,7 +259,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let archive = temp.path().join("archive");
         let output = Some(archive.to_string_lossy().to_string());
-        main(false, input, &output, false, false, false)?;
+        main(false, input, &output, false, false, false, true)?;
         Ok((temp, archive))
     }
 
@@ -366,7 +368,7 @@ mod tests {
         let input = TAKEOUT_BASIC.to_string();
 
         // First run populates the archive
-        main(false, &input, &output, false, false, false)?;
+        main(false, &input, &output, false, false, false, true)?;
         let first = mtimes_under(&archive)?;
         assert!(
             first.contains_key("albums/Holiday.md")
@@ -376,7 +378,7 @@ mod tests {
         );
 
         // Re-running over identical input must be a no-op in writes
-        main(false, &input, &output, false, false, false)?;
+        main(false, &input, &output, false, false, false, true)?;
         let second = mtimes_under(&archive)?;
         assert_eq!(
             first, second,
@@ -406,12 +408,298 @@ mod tests {
             false,
             false,
             false,
+            true,
         )?;
 
         let after = output_tree(&input)?;
         assert_eq!(
             before, after,
             "sync must not add, remove, or modify any file in the input tree"
+        );
+        Ok(())
+    }
+
+    /// The note beside a media file: its extension swapped for `.md` - see
+    /// [`crate::markdown::get_desired_markdown_path`]. Only valid where no
+    /// same-instant sibling in another format is competing for the name.
+    fn note_path(media: &Path) -> PathBuf {
+        media.with_extension("md")
+    }
+
+    /// Two different files captured in the same millisecond but stored in
+    /// different formats both keep the bare date name (collisions are resolved
+    /// per full name, extension included), so they prefer the same note name.
+    /// One takes it and the other falls back to the appended form; sharing it
+    /// would pool a photo's and a video's `original-paths` under a single
+    /// checksum and leave one of them with no note at all.
+    #[test]
+    fn sync_same_instant_different_formats_get_separate_notes() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+
+        // A photo and a video sharing one photoTakenTime, as a live photo would.
+        for src in ["test/Canon_40D.jpg", "test/Hello.mp4"] {
+            let name = Path::new(src)
+                .file_name()
+                .ok_or_else(|| anyhow!("fixture has no file name: {src}"))?;
+            fs::copy(src, input.join(name))?;
+            fs::write(
+                input.join(format!(
+                    "{}.supplemental-metadata.json",
+                    name.to_string_lossy()
+                )),
+                r#"{"photoTakenTime":{"timestamp":"1700000000"}}"#,
+            )?;
+        }
+
+        let input_s = input.to_string_lossy().to_string();
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(false, &input_s, &output_s, false, false, false, true)?;
+
+        let notes: Vec<PathBuf> = files_under(&output)?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+            .collect();
+        assert_eq!(
+            notes.len(),
+            2,
+            "each file must have its own note: {notes:?}"
+        );
+
+        // Which of the two wins the bare name depends on inspection order, so
+        // the names are checked as a set: one preferred, one disambiguated.
+        let names: BTreeSet<String> = notes
+            .iter()
+            .filter_map(|p| Some(p.file_name()?.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            names.contains("2213-20000.md"),
+            "one note should keep the bare date name: {names:?}"
+        );
+        assert!(
+            names.contains("2213-20000.jpg.md") || names.contains("2213-20000.mp4.md"),
+            "the other should fall back to the appended name: {names:?}"
+        );
+
+        // Each note records only its own file, so neither claims the other's
+        // bytes as a duplicate of itself.
+        let bodies = notes
+            .iter()
+            .map(read_to_string)
+            .collect::<Result<Vec<String>, _>>()?;
+        let jpg_md = bodies
+            .iter()
+            .find(|b| b.contains("- Canon_40D.jpg"))
+            .ok_or_else(|| anyhow!("no note recorded the photo: {bodies:?}"))?;
+        let mp4_md = bodies
+            .iter()
+            .find(|b| b.contains("- Hello.mp4"))
+            .ok_or_else(|| anyhow!("no note recorded the video: {bodies:?}"))?;
+        assert!(!jpg_md.contains("- Hello.mp4"));
+        assert!(!mp4_md.contains("- Canon_40D.jpg"));
+        assert!(jpg_md.contains("![](2213-20000.jpg)"));
+        assert!(mp4_md.contains("![](2213-20000.mp4)"));
+        Ok(())
+    }
+
+    /// A note sitting at the appended name is kept there rather than stranded,
+    /// so an archive synced while that was the default keeps the prose in it.
+    #[test]
+    fn sync_keeps_an_existing_appended_note_for_the_same_file() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+        fs::copy("test/Canon_40D.jpg", input.join("Canon_40D.jpg"))?;
+
+        let input_s = input.to_string_lossy().to_string();
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(false, &input_s, &output_s, false, false, false, true)?;
+
+        // Rename the note to the appended form and add prose, as an archive
+        // synced by the version that appended `.md` would look.
+        let dir = output.join("2008/05/30");
+        let appended = dir.join("1556-01000.jpg.md");
+        fs::rename(dir.join("1556-01000.md"), &appended)?;
+        let mut body = read_to_string(&appended)?;
+        body.push_str("\nProse written years ago.\n");
+        fs::write(&appended, &body)?;
+
+        main(false, &input_s, &output_s, false, false, false, true)?;
+
+        assert!(
+            appended.is_file(),
+            "the existing note must be kept, not replaced"
+        );
+        assert!(
+            !dir.join("1556-01000.md").exists(),
+            "keeping the existing note must not also write one under the preferred name"
+        );
+        assert!(
+            read_to_string(&appended)?.contains("Prose written years ago."),
+            "the prose in the existing note must survive"
+        );
+        Ok(())
+    }
+
+    /// Metadata from an `.xmp` sidecar reaches the note, and `--skip-xmp` keeps
+    /// it out.
+    #[test]
+    fn sync_reads_xmp_sidecars() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        fs::create_dir_all(&input)?;
+        fs::copy("test/Canon_40D.jpg", input.join("Canon_40D.jpg"))?;
+        fs::copy("test/Canon_40D.jpg.xmp", input.join("Canon_40D.jpg.xmp"))?;
+        let input_s = input.to_string_lossy().to_string();
+
+        let with_xmp = temp.path().join("with");
+        let with_xmp_s = Some(with_xmp.to_string_lossy().to_string());
+        main(false, &input_s, &with_xmp_s, false, false, false, false)?;
+        let md = read_to_string(with_xmp.join("2008/05/30/1556-01000.md"))?;
+        assert!(md.contains("rating: 5"), "xmp rating should reach the note");
+        assert!(md.contains("label: Green"));
+        assert!(md.contains("title: A Canon 40D test frame"));
+        // Hierarchical keywords arrive re-spelled for Obsidian, flat ones as-is.
+        assert!(md.contains("- cameras/canon"));
+        assert!(md.contains("- test-fixture"));
+        assert!(md.contains("[[Ada Lovelace]]"));
+        // The title heads the body and the description follows it, both below
+        // the image embed.
+        assert!(md.contains(
+            "![](1556-01000.jpg)\n\n# A Canon 40D test frame\n\nSample image used by the ptsync test suite.\n"
+        ));
+
+        let without = temp.path().join("without");
+        let without_s = Some(without.to_string_lossy().to_string());
+        main(false, &input_s, &without_s, false, false, false, true)?;
+        let md = read_to_string(without.join("2008/05/30/1556-01000.md"))?;
+        assert!(!md.contains("rating:"), "--skip-xmp should read no sidecar");
+        assert!(!md.contains("Ada Lovelace"));
+        Ok(())
+    }
+
+    /// A title and caption set in Google Photos reach the note body, under the
+    /// image embed. Nothing else in the archive carries them: Takeout writes
+    /// them only into its json, so if they don't land here they are lost.
+    #[test]
+    fn sync_reads_supplemental_title_and_description() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+        // No `.xmp` beside it, so the json is the only source of either field.
+        fs::copy("test/Canon_40D.jpg", input.join("Canon_40D.jpg"))?;
+        fs::write(
+            input.join("Canon_40D.jpg.supplemental-metadata.json"),
+            r#"{
+              "title": "First light",
+              "description": "Straight out of the camera.",
+              "photoTakenTime": { "timestamp": "1212162961", "formatted": "30 May 2008, 15:56:01 UTC" }
+            }"#,
+        )?;
+
+        let input_s = input.to_string_lossy().to_string();
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(false, &input_s, &output_s, false, false, false, true)?;
+
+        let md = read_to_string(output.join("2008/05/30/1556-01000.md"))?;
+        assert!(
+            md.contains("![](1556-01000.jpg)\n\n# First light\n\nStraight out of the camera.\n"),
+            "title and description belong under the embed, got:\n{md}"
+        );
+        assert!(md.contains("title: First light"));
+        Ok(())
+    }
+
+    /// Google fills `title` with the uploaded file's name, which is not a title
+    /// and must not become one.
+    #[test]
+    fn sync_ignores_a_supplemental_title_that_is_the_file_name() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+        fs::copy("test/Canon_40D.jpg", input.join("Canon_40D.jpg"))?;
+        fs::write(
+            input.join("Canon_40D.jpg.supplemental-metadata.json"),
+            r#"{ "title": "Canon_40D.jpg", "description": "Straight out of the camera." }"#,
+        )?;
+
+        let input_s = input.to_string_lossy().to_string();
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(false, &input_s, &output_s, false, false, false, true)?;
+
+        let md = read_to_string(output.join("2008/05/30/1556-01000.md"))?;
+        assert!(!md.contains("title:"), "no title should be written:\n{md}");
+        assert!(!md.contains("# Canon_40D.jpg"));
+        // The description is unaffected by any of that.
+        assert!(md.contains("![](1556-01000.jpg)\n\nStraight out of the camera.\n"));
+        Ok(())
+    }
+
+    /// Google's star and archive flags reach the note as frontmatter booleans,
+    /// and only when they are set.
+    #[test]
+    fn sync_reads_supplemental_flags() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+        fs::copy("test/Canon_40D.jpg", input.join("Canon_40D.jpg"))?;
+        fs::write(
+            input.join("Canon_40D.jpg.supplemental-metadata.json"),
+            r#"{ "favorited": true }"#,
+        )?;
+
+        let input_s = input.to_string_lossy().to_string();
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(false, &input_s, &output_s, false, false, false, true)?;
+
+        let md = read_to_string(output.join("2008/05/30/1556-01000.md"))?;
+        assert!(md.contains("favorite: true"), "got:\n{md}");
+        assert!(
+            !md.contains("archived"),
+            "an unset flag writes no key at all, got:\n{md}"
+        );
+        // A favourite is not a rating, so the note gains no stars from one.
+        assert!(!md.contains("rating:"), "got:\n{md}");
+        Ok(())
+    }
+
+    /// A rating edited by hand in the archive must not be reverted to whatever
+    /// the sidecar says on the next run - the note is the master copy.
+    #[test]
+    fn sync_does_not_revert_hand_edited_xmp_fields() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+        fs::copy("test/Canon_40D.jpg", input.join("Canon_40D.jpg"))?;
+        fs::copy("test/Canon_40D.jpg.xmp", input.join("Canon_40D.jpg.xmp"))?;
+
+        let input_s = input.to_string_lossy().to_string();
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(false, &input_s, &output_s, false, false, false, false)?;
+
+        let note = output.join("2008/05/30/1556-01000.md");
+        let edited = read_to_string(&note)?.replace("rating: 5", "rating: 2");
+        fs::write(&note, &edited)?;
+
+        main(false, &input_s, &output_s, false, false, false, false)?;
+        let after = read_to_string(&note)?;
+        assert!(
+            after.contains("rating: 2") && !after.contains("rating: 5"),
+            "a hand-edited rating must survive a re-sync, got:\n{after}"
         );
         Ok(())
     }
@@ -441,7 +729,7 @@ mod tests {
 
         let input_s = input.to_string_lossy().to_string();
         let output_s = Some(output.to_string_lossy().to_string());
-        main(false, &input_s, &output_s, false, false, false)?;
+        main(false, &input_s, &output_s, false, false, false, true)?;
 
         // Both photos written, one keeps bare date name, the other is suffixed.
         let media: Vec<PathBuf> = files_under(&output)?
@@ -459,7 +747,7 @@ mod tests {
             .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "md"))
             .collect();
-        let expected: BTreeSet<PathBuf> = media.iter().map(|p| p.with_extension("md")).collect();
+        let expected: BTreeSet<PathBuf> = media.iter().map(|p| note_path(p)).collect();
         assert_eq!(
             sidecars, expected,
             "each media file must have exactly one matching sibling sidecar"
@@ -473,7 +761,7 @@ mod tests {
                 .ok_or_else(|| anyhow!("media path has no file name: {photo:?}"))?
                 .to_string_lossy()
                 .to_string();
-            let md = read_to_string(photo.with_extension("md"))?;
+            let md = read_to_string(note_path(photo))?;
             assert!(
                 md.contains(&format!("![]({file_name})")),
                 "sidecar for {file_name} should embed its own photo, got:\n{md}"
@@ -492,7 +780,7 @@ mod tests {
 
         // re-running over the same input rewrites nothing.
         let first = mtimes_under(&output)?;
-        main(false, &input_s, &output_s, false, false, false)?;
+        main(false, &input_s, &output_s, false, false, false, true)?;
         let second = mtimes_under(&output)?;
         assert_eq!(
             first, second,
@@ -541,7 +829,7 @@ mod tests {
 
         let mut deduper = Deduplicator::new();
         let prog = Arc::new(Progress::new(media_si.len() as u64));
-        let mut inspected = inspect_media_files(input.clone(), media_si, prog.clone());
+        let mut inspected = inspect_media_files(input.clone(), media_si, prog.clone(), true);
         for media in inspected.by_ref() {
             deduper.add(media);
         }

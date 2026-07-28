@@ -41,7 +41,7 @@ use schema::{
 const DB_BATCH_SIZE: usize = 100;
 
 /// Which phases of a scan to run. Defaults to a full scan.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(crate) struct DbScanOpts {
     /// Clear existing rows before scanning, rebuilding a stale schema.
     pub(crate) clear: bool,
@@ -50,6 +50,20 @@ pub(crate) struct DbScanOpts {
     pub(crate) skip_media: bool,
     /// Skip parsing album files, leaving `album` and `album_file` untouched.
     pub(crate) skip_albums: bool,
+    /// Skip `.xmp` sidecars alongside each media file.
+    pub(crate) skip_xmp: bool,
+}
+
+/// A full scan, matching what the CLI does with no flags.
+impl Default for DbScanOpts {
+    fn default() -> Self {
+        Self {
+            clear: false,
+            skip_media: false,
+            skip_albums: false,
+            skip_xmp: false,
+        }
+    }
 }
 
 pub(crate) fn main(input: &String, output: &str, opts: DbScanOpts) -> anyhow::Result<()> {
@@ -132,7 +146,12 @@ async fn run_db_scan(
         // the channel; the parallelism lives in `inspect_media_files`.
         conn.execute("BEGIN", ()).await?;
         let mut batch_count = 0;
-        let mut inspected = inspect_media_files(container.clone(), media_si_files, prog.clone());
+        let mut inspected = inspect_media_files(
+            container.clone(),
+            media_si_files,
+            prog.clone(),
+            opts.skip_xmp,
+        );
         for info in inspected.by_ref() {
             db_record(conn, &info).await?;
             batch_count += 1;

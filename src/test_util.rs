@@ -11,9 +11,16 @@ pub(crate) fn setup_log() {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
+        // Keep DEBUG for ptsync's own logic, but dependencies at DEBUG bury it:
+        // turso_core traces every page read of the :memory: test databases.
         let filter = tracing_subscriber::filter::Targets::new()
             .with_default(Level::DEBUG)
-            .with_target("nom_exif", Level::ERROR);
+            .with_target("nom_exif", Level::ERROR)
+            .with_target("turso_core", Level::ERROR)
+            .with_target("turso_sdk_kit", Level::ERROR)
+            .with_target("turso_sync_engine", Level::ERROR)
+            .with_target("aws_config", Level::ERROR)
+            .with_target("aws_sdk_s3", Level::ERROR);
         let registry_layer = tracing_subscriber::fmt::layer().with_target(false);
         tracing_subscriber::registry()
             .with(registry_layer)

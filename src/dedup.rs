@@ -125,7 +125,7 @@ impl Deduplicator {
                     return Ok(DeDuplicationResult::SkipWrite(desired_output_path_with_ext));
                 }
                 Some(false) => {
-                    warn!(
+                    debug!(
                         "  Existing file is different, trying a checksum-suffixed name: {desired_output_path_with_ext}"
                     );
                     // fall through to the next candidate suffix

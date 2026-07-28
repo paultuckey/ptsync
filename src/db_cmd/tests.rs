@@ -19,6 +19,177 @@ async fn media_item_id_of(conn: &Connection, media_path: &str) -> anyhow::Result
     Ok(row.get::<String>(0)?)
 }
 
+/// XMP sidecar metadata reaches the database: the scalar fields as `media_item`
+/// columns, the named people as `person`/`media_person` rows.
+#[tokio::test]
+async fn test_db_scan_records_xmp() -> anyhow::Result<()> {
+    crate::test_util::setup_log();
+    let (_db, conn) = open_conn(":memory:").await?;
+    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
+    run_db_scan(container, &conn, DbScanOpts::default(), "test").await?;
+
+    let row = one_row(
+        &conn,
+        "SELECT rating, label, title, description FROM media_item WHERE media_path = ?1",
+        ["Canon_40D.jpg"],
+    )
+    .await?;
+    assert_eq!(row.get::<i64>(0)?, 5);
+    assert_eq!(row.get::<String>(1)?, "Green");
+    // The fixture has a Takeout sidecar beside its `.xmp`, and both carry a
+    // description; XMP outranks Google, here as in the note.
+    assert_eq!(row.get::<String>(2)?, "A Canon 40D test frame");
+    assert_eq!(
+        row.get::<String>(3)?,
+        "Sample image used by the ptsync test suite."
+    );
+
+    let media_item_id = media_item_id_of(&conn, "Canon_40D.jpg").await?;
+    let row = one_row(
+        &conn,
+        "SELECT p.name FROM person p
+           JOIN media_person mp ON mp.person_id = p.person_id
+          WHERE mp.media_item_id = ?1",
+        [media_item_id.as_str()],
+    )
+    .await?;
+    assert_eq!(row.get::<String>(0)?, "Ada Lovelace");
+    Ok(())
+}
+
+/// With no XMP anywhere - the ordinary Takeout archive - the title and caption
+/// in Google's json reach the database, through the same resolvers the note
+/// uses. A `title` that is only the file's own name is not one of them.
+#[tokio::test]
+async fn test_db_scan_records_supplemental_title_and_description() -> anyhow::Result<()> {
+    crate::test_util::setup_log();
+    let test_dir = Path::new("target/test_db_supp_text");
+    if test_dir.exists() {
+        fs::remove_dir_all(test_dir)?;
+    }
+    fs::create_dir_all(test_dir)?;
+    fs::copy("test/Canon_40D.jpg", test_dir.join("named.jpg"))?;
+    fs::write(
+        test_dir.join("named.jpg.supplemental-metadata.json"),
+        r#"{ "title": "First light", "description": "Straight out of the camera." }"#,
+    )?;
+    fs::copy("test/Canon_40D.jpg", test_dir.join("unnamed.jpg"))?;
+    fs::write(
+        test_dir.join("unnamed.jpg.supplemental-metadata.json"),
+        r#"{ "title": "unnamed.jpg", "description": "" }"#,
+    )?;
+
+    let (_db, conn) = open_conn(":memory:").await?;
+    let test_dir_str = test_dir.to_string_lossy();
+    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
+    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+
+    let row = one_row(
+        &conn,
+        "SELECT title, description FROM media_item WHERE media_path = ?1",
+        ["named.jpg"],
+    )
+    .await?;
+    assert_eq!(row.get::<String>(0)?, "First light");
+    assert_eq!(row.get::<String>(1)?, "Straight out of the camera.");
+
+    let row = one_row(
+        &conn,
+        "SELECT title IS NULL, description IS NULL FROM media_item WHERE media_path = ?1",
+        ["unnamed.jpg"],
+    )
+    .await?;
+    assert_eq!(
+        row.get::<i64>(0)?,
+        1,
+        "a file-name title must not be stored"
+    );
+    assert_eq!(row.get::<i64>(1)?, 1, "an empty description is not a value");
+
+    fs::remove_dir_all(test_dir)?;
+    Ok(())
+}
+
+/// Google's two flags become their own columns, and neither is derived from - or
+/// derives - a rating.
+#[tokio::test]
+async fn test_db_scan_records_flags() -> anyhow::Result<()> {
+    crate::test_util::setup_log();
+    let test_dir = Path::new("target/test_db_flags");
+    if test_dir.exists() {
+        fs::remove_dir_all(test_dir)?;
+    }
+    fs::create_dir_all(test_dir)?;
+    fs::copy("test/Canon_40D.jpg", test_dir.join("starred.jpg"))?;
+    fs::write(
+        test_dir.join("starred.jpg.supplemental-metadata.json"),
+        r#"{ "favorited": true, "archived": true }"#,
+    )?;
+    fs::copy("test/Canon_40D.jpg", test_dir.join("plain.jpg"))?;
+
+    let (_db, conn) = open_conn(":memory:").await?;
+    let test_dir_str = test_dir.to_string_lossy();
+    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
+    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+
+    let row = one_row(
+        &conn,
+        "SELECT favorite, archived, rating IS NULL FROM media_item WHERE media_path = ?1",
+        ["starred.jpg"],
+    )
+    .await?;
+    assert_eq!(row.get::<i64>(0)?, 1);
+    assert_eq!(row.get::<i64>(1)?, 1);
+    assert_eq!(
+        row.get::<i64>(2)?,
+        1,
+        "a favourite must not be recorded as a rating"
+    );
+
+    // A photo with no sidecar at all: both flags default to false, not NULL.
+    let row = one_row(
+        &conn,
+        "SELECT favorite, archived FROM media_item WHERE media_path = ?1",
+        ["plain.jpg"],
+    )
+    .await?;
+    assert_eq!(row.get::<i64>(0)?, 0);
+    assert_eq!(row.get::<i64>(1)?, 0);
+
+    fs::remove_dir_all(test_dir)?;
+    Ok(())
+}
+
+/// `--skip-xmp` leaves the sidecar unread, so none of it reaches the database.
+#[tokio::test]
+async fn test_db_scan_skip_xmp() -> anyhow::Result<()> {
+    crate::test_util::setup_log();
+    let (_db, conn) = open_conn(":memory:").await?;
+    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
+    let opts = DbScanOpts {
+        skip_xmp: true,
+        ..DbScanOpts::default()
+    };
+    run_db_scan(container, &conn, opts, "test").await?;
+
+    let row = one_row(
+        &conn,
+        "SELECT COUNT(*) FROM media_item WHERE media_path = ?1 AND rating IS NOT NULL",
+        ["Canon_40D.jpg"],
+    )
+    .await?;
+    assert_eq!(row.get::<i64>(0)?, 0, "no rating should be recorded");
+
+    let row = one_row(
+        &conn,
+        "SELECT COUNT(*) FROM person WHERE name = ?1",
+        ["Ada Lovelace"],
+    )
+    .await?;
+    assert_eq!(row.get::<i64>(0)?, 0, "no person should be recorded");
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_db_scan() -> anyhow::Result<()> {
     crate::test_util::setup_log();

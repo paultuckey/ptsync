@@ -1,4 +1,5 @@
 use crate::fs::FileSystem;
+use crate::util::non_zero_coords;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use tracing::{debug, warn};
@@ -266,8 +267,13 @@ fn is_motion_clip(ext: &str) -> bool {
     ext.eq_ignore_ascii_case(".mp4") || ext.eq_ignore_ascii_case(".mov")
 }
 
+/// Read the sidecar at `path`, which describes `media_file_path`.
+///
+/// The media file's own name is needed to make sense of the `title` field — see
+/// [`PsSupplementalInfo::drop_file_name_title`].
 pub(crate) fn load_supplemental_info(
-    path: &String,
+    path: &str,
+    media_file_path: &str,
     container: &dyn FileSystem,
 ) -> Option<PsSupplementalInfo> {
     let reader_r = container.open(path);
@@ -276,7 +282,9 @@ pub(crate) fn load_supplemental_info(
         return None;
     };
     debug!("  Loaded: {path}");
-    parse_supplemental_info(reader)
+    let mut info = parse_supplemental_info(reader)?;
+    info.drop_file_name_title(media_file_path);
+    Some(info)
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -297,6 +305,19 @@ pub(crate) struct SupplementalInfoDateTime {
     pub(crate) formatted: Option<String>,
 }
 
+#[cfg(test)]
+impl SupplementalInfoDateTime {
+    /// Build one from the unix-seconds string Takeout writes, so tests in other
+    /// modules can exercise date precedence without the `timestamp` field
+    /// leaving this one.
+    pub(crate) fn new_for_test(timestamp_s: &str) -> Self {
+        Self {
+            timestamp: Some(timestamp_s.to_string()),
+            formatted: None,
+        }
+    }
+}
+
 impl SupplementalInfoDateTime {
     pub(crate) fn timestamp_s_as_iso_8601(&self) -> Option<String> {
         if let Some(ts) = &self.timestamp
@@ -311,9 +332,39 @@ impl SupplementalInfoDateTime {
         None
     }
 }
-#[derive(Deserialize, Serialize, Debug, Clone)]
+// `Default` so a test can name the one or two fields it cares about and leave
+// the rest alone, rather than every construction site having to be touched each
+// time Takeout gains a field worth reading.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
 pub(crate) struct PsSupplementalInfo {
+    /// Google's `title`, which is the name of the file as it was uploaded and
+    /// only rarely a title anyone wrote. Cleared when it is just that name — see
+    /// [`PsSupplementalInfo::drop_file_name_title`] — so what survives here is
+    /// something a person chose.
+    pub(crate) title: Option<String>,
+    /// The caption typed into Google Photos. Nothing else carries it: Takeout
+    /// writes it here and not into the media file's own EXIF or XMP, so a
+    /// description dropped on the floor here is one that cannot be recovered
+    /// from the archive later.
+    pub(crate) description: Option<String>,
+    /// Google Photos' star. Written as `"favorited": true` and simply absent
+    /// when the photo is not one, so absent and false mean the same thing.
+    ///
+    /// Nothing else in the archive carries it: XMP has no favourite property at
+    /// all, so like the caption it is lost for good if it is not read here.
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub(crate) favorited: bool,
+    /// Whether the photo was archived - hidden from the main Google Photos grid
+    /// but not deleted.
+    ///
+    /// Exports also express this by putting the file under an `Archive/`
+    /// directory, which [`crate::classify`] recognises as
+    /// [`KnownDir::GpArchive`](crate::classify::KnownDir::GpArchive); the key is
+    /// read too because it costs nothing and is the only signal that survives a
+    /// file being moved out of that directory.
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub(crate) archived: bool,
     pub(crate) geo_data: Option<SupplementalInfoGeoData>,
     pub(crate) geo_data_exif: Option<SupplementalInfoGeoData>,
     #[serde(default)]
@@ -322,9 +373,89 @@ pub(crate) struct PsSupplementalInfo {
     pub(crate) creation_time: Option<SupplementalInfoDateTime>,
 }
 
+impl PsSupplementalInfo {
+    /// Clear a `title` that merely repeats the name of the file it describes,
+    /// and normalise both free-text fields.
+    ///
+    /// Takeout fills `title` with the original upload's filename for every photo,
+    /// so taken at face value it would stamp a filename onto notes that already
+    /// name the file twice over. Only a title that is *not* the filename was
+    /// typed by someone, and only that is worth keeping.
+    ///
+    /// The names to compare against are exactly the ones a sidecar can be keyed
+    /// on, which [`supplemental_keys`] already enumerates: that covers the
+    /// extension-less upload of rule 3 (`PicasaSync` for `PicasaSync(6).jpg`)
+    /// and the original behind a derived file in rule 4, whose title a rendition
+    /// inherits along with the rest of the sidecar (`IMG_1189.JPG` for
+    /// `IMG_1189-edited.JPG`).
+    ///
+    /// Takeout writes `""` rather than omitting a field it has nothing for, so
+    /// blanks become `None` here and no consumer has to test for both.
+    fn drop_file_name_title(&mut self, media_file_path: &str) {
+        self.title = self.title.take().filter(|t| !t.trim().is_empty());
+        self.description = self.description.take().filter(|d| !d.trim().is_empty());
+
+        let (_, media_file_name) = split_dir(media_file_path);
+        if let Some(title) = &self.title
+            && title_is_file_name(title.trim(), media_file_name)
+        {
+            debug!("  Ignoring supplemental title {title:?}: it is the file's own name");
+            self.title = None;
+        }
+    }
+}
+
+impl PsSupplementalInfo {
+    /// Drop a `geoData`/`geoDataExif` block that locates nothing.
+    ///
+    /// Takeout writes `0, 0` rather than omitting the block when it has no fix,
+    /// and a pair missing one half locates nothing either. Clearing the whole
+    /// block (rather than leaving zeros, or a half-filled struct) means a
+    /// `geo_data` that survives parsing is always a real position, so no
+    /// consumer - resolver, database, or `info` report - has to know Google's
+    /// convention. Same rule as [`crate::exif_util::parse_exif_info`] and
+    /// [`crate::xmp::parse_xmp`].
+    fn drop_zero_coords(&mut self) {
+        for geo in [&mut self.geo_data, &mut self.geo_data_exif] {
+            if geo
+                .as_ref()
+                .is_some_and(|g| non_zero_coords(g.latitude, g.longitude).is_none())
+            {
+                *geo = None;
+            }
+        }
+    }
+}
+
+/// Deserialize a flag without letting an unexpected spelling cost the whole
+/// sidecar.
+///
+/// Serde's own `bool` rejects `"true"` or `1`, and rejecting means
+/// [`parse_supplemental_info`] discards the entire file — so one flag Google
+/// decided to write differently would take a photo's date, location and caption
+/// down with it. A flag is the least important thing in the file; anything not
+/// recognisably true reads as false, which is also what an absent key means.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer) {
+        Ok(serde_json::Value::Bool(b)) => b,
+        Ok(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("true") || s == "1",
+        Ok(serde_json::Value::Number(n)) => n.as_f64().is_some_and(|n| n != 0.0),
+        _ => false,
+    })
+}
+
+/// Whether `title` is one of the file names this sidecar could have been keyed
+/// on, rather than something written about the photo.
+fn title_is_file_name(title: &str, media_file_name: &str) -> bool {
+    supplemental_keys(media_file_name)
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(title))
+}
+
 fn parse_supplemental_info<R: Read>(json_reader: R) -> Option<PsSupplementalInfo> {
     let gs_r: Result<PsSupplementalInfo, _> = serde_json::from_reader(json_reader);
-    if let Ok(gs) = gs_r {
+    if let Ok(mut gs) = gs_r {
+        gs.drop_zero_coords();
         return Some(gs);
     }
     None
@@ -643,6 +774,118 @@ mod tests {
             ct.timestamp.ok_or_else(|| anyhow!("Missing timestamp"))?,
             "1716539968"
         );
+        Ok(())
+    }
+
+    /// Load `json` as the sidecar for `media`, the way `analyze_file` does.
+    fn load_for(media: &str, json: &str) -> anyhow::Result<PsSupplementalInfo> {
+        use anyhow::anyhow;
+        let dir = tempfile::tempdir()?;
+        let name = format!("{media}.supplemental-metadata.json");
+        std::fs::write(dir.path().join(&name), json)?;
+        let fs = OsFileSystem::new(&dir.path().to_string_lossy());
+        load_supplemental_info(&name, media, &fs).ok_or_else(|| anyhow!("failed to parse"))
+    }
+
+    /// Takeout fills `geoData` with zeros for a photo it has no location for,
+    /// so the block is dropped at the parse rather than passed on as a position.
+    #[test]
+    fn test_parse_supp_zero_coords_dropped() -> anyhow::Result<()> {
+        use anyhow::anyhow;
+        crate::test_util::setup_log();
+        let info = load_for(
+            "IMG_0001.jpg",
+            r#"{"geoData":{"latitude":0.0,"longitude":0.0},
+                "geoDataExif":{"latitude":51.5,"longitude":-0.125}}"#,
+        )?;
+        assert!(info.geo_data.is_none());
+        // A real fix in the same sidecar is untouched.
+        let exif_geo = info
+            .geo_data_exif
+            .ok_or_else(|| anyhow!("missing geoDataExif"))?;
+        assert_eq!(exif_geo.latitude, Some(51.5));
+        assert_eq!(exif_geo.longitude, Some(-0.125));
+
+        // Half a pair locates nothing either, so it goes the same way.
+        let info = load_for("IMG_0001.jpg", r#"{"geoData":{"latitude":51.5}}"#)?;
+        assert!(info.geo_data.is_none());
+        Ok(())
+    }
+
+    /// A caption typed into Google Photos is the one thing in a Takeout sidecar
+    /// that exists nowhere else, so it has to survive the parse.
+    #[test]
+    fn test_parse_supp_description() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let info = load_for(
+            "IMG_0001.jpg",
+            r#"{"title":"Sunset","description":"Low tide at Porthcurno."}"#,
+        )?;
+        assert_eq!(info.description.as_deref(), Some("Low tide at Porthcurno."));
+        assert_eq!(info.title.as_deref(), Some("Sunset"));
+
+        // Takeout writes "" rather than omitting a field, and an empty string is
+        // not a description.
+        let info = load_for("IMG_0001.jpg", r#"{"description":"   "}"#)?;
+        assert_eq!(info.description, None);
+        Ok(())
+    }
+
+    /// The favourite star and the archived flag, neither of which any other
+    /// source in an archive carries.
+    #[test]
+    fn test_parse_supp_flags() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let info = load_for("IMG_0001.jpg", r#"{"favorited":true,"archived":true}"#)?;
+        assert!(info.favorited);
+        assert!(info.archived);
+
+        // Google omits both keys for the ordinary photo, which reads as false.
+        let info = load_for("IMG_0001.jpg", r#"{"description":"Plain."}"#)?;
+        assert!(!info.favorited);
+        assert!(!info.archived);
+
+        // A flag spelled some other way must cost only the flag. Rejecting it
+        // would discard the whole sidecar, taking the date and caption with it.
+        let info = load_for(
+            "IMG_0001.jpg",
+            r#"{"favorited":"true","archived":[],"description":"Plain."}"#,
+        )?;
+        assert!(info.favorited, "a stringly-typed true is still true");
+        assert!(!info.archived, "an unreadable flag reads as false");
+        assert_eq!(
+            info.description.as_deref(),
+            Some("Plain."),
+            "the rest of the sidecar must survive an odd flag"
+        );
+        Ok(())
+    }
+
+    /// Google's `title` is the uploaded file's name for all but a handful of
+    /// photos, and repeating that in a note is worse than having no title.
+    #[test]
+    fn test_parse_supp_ignores_a_file_name_title() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        for (media, title) in [
+            // The file's own name, and the same name in another case.
+            ("IMG_0001.jpg", "IMG_0001.jpg"),
+            ("IMG_0001.jpg", "img_0001.JPG"),
+            // Rule 3: an upload with no extension is keyed on the bare title.
+            ("PicasaSync(6).jpg", "PicasaSync"),
+            ("11 8_30_46 AM.jpg", "11 8_30_46 AM"),
+            // Rule 4: a rendition inherits the original's sidecar, so it
+            // inherits a title naming a file that is not even this one.
+            ("IMG_1189-edited.JPG", "IMG_1189.JPG"),
+            ("FullSizeRender-ANIMATION.gif", "FullSizeRender.jpg"),
+        ] {
+            let json = format!(r#"{{"title":"{title}"}}"#);
+            let info = load_for(media, &json)?;
+            assert_eq!(info.title, None, "{title:?} is a file name, not a title");
+        }
+
+        // A title someone actually typed stays, even one that mentions a file.
+        let info = load_for("IMG_0001.jpg", r#"{"title":"IMG_0001 reshoot"}"#)?;
+        assert_eq!(info.title.as_deref(), Some("IMG_0001 reshoot"));
         Ok(())
     }
 

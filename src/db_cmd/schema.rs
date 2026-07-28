@@ -29,7 +29,13 @@ const DB_MEDIA_ITEM_CREATE: &str = "
         display_mirrored INTEGER NOT NULL DEFAULT 0, -- 1 if the image must be flipped horizontally for display
         display_rotate INTEGER NOT NULL DEFAULT 0, -- clockwise degrees to rotate for display (-90/0/90/180)
         geohash TEXT, -- geohash of the coordinates, NULL if no location
-        kind TEXT -- 'p' for photo, 'v' for video, NULL if neither
+        kind TEXT, -- 'p' for photo, 'v' for video, NULL if neither
+        rating INTEGER, -- xmp:Rating from a sidecar, 0-5 (-1 rejected), NULL if none
+        label TEXT, -- xmp:Label from a sidecar, usually a colour name
+        title TEXT, -- title from a sidecar (dc:title, else Google's), NULL if none
+        description TEXT, -- description from a sidecar (dc:description, else Google's caption)
+        favorite INTEGER NOT NULL DEFAULT 0, -- 1 if starred in Google Photos; unrelated to rating
+        archived INTEGER NOT NULL DEFAULT 0 -- 1 if archived in Google Photos (hidden, not deleted)
     )
 ";
 
@@ -42,8 +48,9 @@ pub(super) const DB_MEDIA_ITEM_INSERT: &str = "
     INSERT OR REPLACE INTO media_item (media_path, long_hash, short_hash, quick_file_type,
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
         latitude, longitude, camera_make, camera_model, width, height,
-        duration_ms, orientation, display_mirrored, display_rotate, geohash, kind, media_item_id)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+        duration_ms, orientation, display_mirrored, display_rotate, geohash, kind,
+        rating, label, title, description, favorite, archived, media_item_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)
 ";
 pub(super) const DB_MEDIA_ITEM_ID_BY_PATH: &str =
     "SELECT media_item_id FROM media_item WHERE media_path = ?1";
@@ -180,7 +187,7 @@ pub(super) const DB_CLASSIFIED_DIR_DELETE_BY_RUN: &str =
 // Bump whenever a CREATE TABLE statement changes. `user_version` defaults to 0.
 // Consider migrating users existing DBs on incrementing. The `schema_hash_is_current`
 // test fails on any schema change to force this bump; see it before editing.
-const DB_SCHEMA_VERSION: i64 = 3;
+const DB_SCHEMA_VERSION: i64 = 6;
 
 // The whole schema, as the ordered statements `db_prepare` runs to build it:
 // tables first (parents before children so foreign keys resolve), then indexes.
@@ -313,9 +320,9 @@ mod tests {
     #[test]
     fn schema_hash_is_current() {
         const EXPECTED_SCHEMA_HASH: &str =
-            "9fd9349c863b762b7926e2f205c1f47b7686f9f674c369b1e0726b416299f030";
+            "cf061587eaea04b92cdf8cc99ea8965fe614f70096673d70561e921428d990ea";
         let actual = schema_hash();
-        assert_eq!(DB_SCHEMA_VERSION, 3);
+        assert_eq!(DB_SCHEMA_VERSION, 6);
         assert_eq!(
             actual, EXPECTED_SCHEMA_HASH,
             "\n\nDatabase schema changed (hash is now {actual}).\n\

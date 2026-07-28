@@ -33,6 +33,7 @@ Options:
   -d, --debug          Turn debugging information on
   -r, --root <ROOT>    The takeout or iCloud zip/directory
   -i, --input <INPUT>  Photo, video or album to view info for
+      --skip-xmp       Skip reading `.xmp` sidecars written by other photo tools
   -h, --help           Print help
 ```
 
@@ -58,6 +59,8 @@ Options:
           classified tables are written
       --skip-albums
           Skip inspecting albums
+      --skip-xmp
+          Skip reading `.xmp` sidecars written by other photo tools
       --s3-region <S3_REGION>
           AWS region for `s3://` paths (else `AWS_REGION` / the profile's region)
       --s3-endpoint-url <S3_ENDPOINT_URL>
@@ -90,6 +93,8 @@ Options:
           Skip inspecting and copying photo and video files
       --skip-albums
           Skip inspecting and copying albums
+      --skip-xmp
+          Skip reading `.xmp` sidecars written by other photo tools
       --s3-region <S3_REGION>
           AWS region for `s3://` paths (else `AWS_REGION` / the profile's region)
       --s3-endpoint-url <S3_ENDPOINT_URL>

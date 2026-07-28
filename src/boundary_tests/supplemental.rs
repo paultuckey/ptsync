@@ -40,6 +40,12 @@ fn supplemental_json_never_panics_on_malformed() -> Result<()> {
             "unicode.json",
             r#"{"people":[{"name":"Ñoño 📸"}],"photoTakenTime":{"timestamp":"not-a-number"}}"#,
         ),
+        // Free text where a scalar string is expected, and vice versa.
+        ("bad_title.json", r#"{"title":42,"description":["a","b"]}"#),
+        // Blank title and description: both must come back as absent, not "".
+        ("blank_text.json", r#"{"title":"  ","description":""}"#),
+        // A title that is the media file's own name, in the other case.
+        ("file_name_title.json", r#"{"title":"PHOTO.JPG"}"#),
     ];
 
     for (name, body) in cases {
@@ -59,7 +65,20 @@ fn supplemental_json_never_panics_on_malformed() -> Result<()> {
         }
         // The only invariant is "does not panic". Malformed JSON returns None,
         // valid-but-odd JSON may return Some; either is acceptable here.
-        let _ = load_supplemental_info(&name.to_string(), &fs);
+        let info = load_supplemental_info(name, "photo.jpg", &fs);
+        // Whatever the input, no consumer should ever see a blank title or
+        // description, or a title that is only the file's name back again.
+        if let Some(info) = info {
+            assert_ne!(info.title.as_deref().map(str::trim), Some(""));
+            assert_ne!(info.description.as_deref().map(str::trim), Some(""));
+            assert_eq!(
+                info.title
+                    .as_deref()
+                    .filter(|t| t.eq_ignore_ascii_case("photo.jpg")),
+                None,
+                "{name}: a file-name title must be dropped"
+            );
+        }
     }
     Ok(())
 }

@@ -3,7 +3,10 @@
 //! columns) and links any named people through `person`/`media_person`.
 
 use super::schema::{DB_MEDIA_ITEM_INSERT, DB_MEDIA_PERSON_INSERT, DB_PERSON_INSERT};
-use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
+use crate::media::{
+    MediaFileInfo, best_guess_archived, best_guess_description, best_guess_favorite,
+    best_guess_lat_long, best_guess_rating, best_guess_taken_dt, best_guess_title,
+};
 use crate::util::{GEOHASH_PRECISION, geohash_encode, orientation};
 use turso::{Connection, params};
 
@@ -42,6 +45,7 @@ pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow
         .unwrap_or((false, 0));
     let display_rotate = display_rotate as i64;
 
+    let xmp = info.xmp_info.as_ref();
     let long_hash = &info.hash_info.long_checksum;
     let short_hash = &info.hash_info.short_checksum;
     let media_item_id = crate::util::media_item_id_for(&info.original_file_this_run);
@@ -69,6 +73,16 @@ pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow
         display_rotate,
         geohash,
         kind,
+        label: xmp.and_then(|x| x.label.clone()),
+        // Resolved rather than read straight off a sidecar, so the index and the
+        // note cannot disagree - the same guarantee `best_guess_lat_long` buys
+        // for coordinates. `rating` and `favorite` stay strictly separate: see
+        // `best_guess_rating`.
+        rating: best_guess_rating(info),
+        title: best_guess_title(info),
+        description: best_guess_description(info),
+        favorite: best_guess_favorite(info),
+        archived: best_guess_archived(info),
     };
 
     let mut stmt = conn.prepare_cached(DB_MEDIA_ITEM_INSERT).await?;
@@ -95,27 +109,42 @@ pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow
         item.display_rotate,
         item.geohash.as_deref(),
         item.kind,
+        item.rating,
+        item.label.as_deref(),
+        item.title.as_deref(),
+        item.description.as_deref(),
+        item.favorite,
+        item.archived,
         item.media_item_id.as_str(),
     ])
     .await?;
 
-    // Named people come from Google supplemental metadata. Each name resolves to
-    // a stable, content-derived person id (shared across items and rebuilds), so
-    // we upsert the person then link it to this media item.
-    if let Some(supp) = &info.supp_info {
-        let mut stmt_person = conn.prepare_cached(DB_PERSON_INSERT).await?;
-        let mut stmt_media_person = conn.prepare_cached(DB_MEDIA_PERSON_INSERT).await?;
-        for person in &supp.people {
-            if let Some(name) = &person.name {
-                let person_id = crate::util::person_id_for(name);
-                stmt_person
-                    .execute((person_id.as_str(), name.as_str()))
-                    .await?;
-                stmt_media_person
-                    .execute((media_item_id.as_str(), person_id.as_str()))
-                    .await?;
-            }
+    // Named people come from Google supplemental metadata and from any XMP
+    // sidecar (`PersonInImage` plus MWG face regions). Each name resolves to a
+    // stable, content-derived person id (shared across items and rebuilds), so
+    // we upsert the person then link it to this media item. `media_person` is
+    // UNIQUE on the pair, so a person named by both sources links once.
+    let people_from_supp = info
+        .supp_info
+        .iter()
+        .flat_map(|supp| supp.people.iter())
+        .filter_map(|p| p.name.as_deref());
+    let people_from_xmp = xmp
+        .into_iter()
+        .flat_map(|x| x.people.iter())
+        .map(String::as_str);
+    let mut stmt_person = conn.prepare_cached(DB_PERSON_INSERT).await?;
+    let mut stmt_media_person = conn.prepare_cached(DB_MEDIA_PERSON_INSERT).await?;
+    for name in people_from_supp.chain(people_from_xmp) {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
         }
+        let person_id = crate::util::person_id_for(name);
+        stmt_person.execute((person_id.as_str(), name)).await?;
+        stmt_media_person
+            .execute((media_item_id.as_str(), person_id.as_str()))
+            .await?;
     }
 
     Ok(())
@@ -137,6 +166,15 @@ struct DbMediaItem {
     created_at: i64,
     // file size in bytes
     file_size: i64,
+    // xmp:Rating / xmp:Label from a sidecar, None when there is none
+    rating: Option<i64>,
+    label: Option<String>,
+    // title and description pooled across both sidecars, None when neither set one
+    title: Option<String>,
+    description: Option<String>,
+    // Google Photos flags; false when there is no supplemental sidecar
+    favorite: bool,
+    archived: bool,
     // best-guess GPS coordinates, None if unknown
     latitude: Option<f64>,
     longitude: Option<f64>,

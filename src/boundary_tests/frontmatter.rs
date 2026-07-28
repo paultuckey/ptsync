@@ -6,11 +6,7 @@ fn sample_fm() -> PhotoSorterFrontMatter {
     PhotoSorterFrontMatter {
         path_original: vec!["p1".to_string()],
         checksum: "abcdef".to_string(),
-        datetime: None,
-        latitude: None,
-        longitude: None,
-        people: vec![],
-        albums: vec![],
+        ..PhotoSorterFrontMatter::default()
     }
 }
 
