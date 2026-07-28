@@ -1,0 +1,33 @@
+{
+  "title": "IMG_3221.HEIC",
+  "description": "",
+  "imageViews": "10",
+  "creationTime": {
+    "timestamp": "1674031919",
+    "formatted": "Jan 18, 2023, 8:51:59 AM UTC"
+  },
+  "photoTakenTime": {
+    "timestamp": "1674029138",
+    "formatted": "Jan 18, 2023, 8:05:38 AM UTC"
+  },
+  "geoData": {
+    "latitude": -41.2818,
+    "longitude": 174.765,
+    "altitude": 64.52,
+    "latitudeSpan": 0.0,
+    "longitudeSpan": 0.0
+  },
+  "geoDataExif": {
+    "latitude": -41.2818,
+    "longitude": 174.765,
+    "altitude": 64.52,
+    "latitudeSpan": 0.0,
+    "longitudeSpan": 0.0
+  },
+  "url": "https://photos.google.com/photo/AF1QipOEZt0Pd1zxuvOHhiXbTbAf-6iZqpLDSdLqkRJe",
+  "googlePhotosOrigin": {
+    "mobileUpload": {
+      "deviceType": "IOS_PHONE"
+    }
+  }
+}
