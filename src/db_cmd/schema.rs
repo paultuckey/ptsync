@@ -35,7 +35,8 @@ const DB_MEDIA_ITEM_CREATE: &str = "
         title TEXT, -- title from a sidecar (dc:title, else Google's), NULL if none
         description TEXT, -- description from a sidecar (dc:description, else Google's caption)
         favorite INTEGER NOT NULL DEFAULT 0, -- 1 if starred in Google Photos; unrelated to rating
-        archived INTEGER NOT NULL DEFAULT 0 -- 1 if archived in Google Photos (hidden, not deleted)
+        archived INTEGER NOT NULL DEFAULT 0, -- 1 if archived in Google Photos (hidden, not deleted)
+        content_identifier TEXT -- Apple's per-asset uuid, shared by a live photo's two halves; NULL if none
     )
 ";
 
@@ -49,8 +50,8 @@ pub(super) const DB_MEDIA_ITEM_INSERT: &str = "
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
         latitude, longitude, camera_make, camera_model, width, height,
         duration_ms, orientation, display_mirrored, display_rotate, geohash, kind,
-        rating, label, title, description, favorite, archived, media_item_id)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)
+        rating, label, title, description, favorite, archived, content_identifier, media_item_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)
 ";
 pub(super) const DB_MEDIA_ITEM_ID_BY_PATH: &str =
     "SELECT media_item_id FROM media_item WHERE media_path = ?1";
@@ -61,6 +62,12 @@ pub(super) const DB_MEDIA_ITEM_LOAD_RECORDED: &str =
 // Album building and many info queries look media rows up by `media_path`
 const DB_MEDIA_ITEM_PATH_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_media_item_media_path ON media_item (media_path)";
+// The two halves of a live photo share one `content_identifier`, so asset-level
+// questions ("which files are this one photo?") are lookups by it, and a partial
+// index keeps the rows that have none - most of an archive - out of the way.
+const DB_MEDIA_ITEM_CONTENT_IDENTIFIER_INDEX: &str = "
+    CREATE INDEX IF NOT EXISTS idx_media_item_content_identifier
+    ON media_item (content_identifier) WHERE content_identifier IS NOT NULL";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
     DELETE FROM media_item
 ";
@@ -187,7 +194,7 @@ pub(super) const DB_CLASSIFIED_DIR_DELETE_BY_RUN: &str =
 // Bump whenever a CREATE TABLE statement changes. `user_version` defaults to 0.
 // Consider migrating users existing DBs on incrementing. The `schema_hash_is_current`
 // test fails on any schema change to force this bump; see it before editing.
-const DB_SCHEMA_VERSION: i64 = 6;
+const DB_SCHEMA_VERSION: i64 = 7;
 
 // The whole schema, as the ordered statements `db_prepare` runs to build it:
 // tables first (parents before children so foreign keys resolve), then indexes.
@@ -203,7 +210,10 @@ pub(crate) const SCHEMA_TABLE_STATEMENTS: [&str; 8] = [
     DB_CLASSIFIED_FILE_CREATE,
     DB_CLASSIFIED_DIR_CREATE,
 ];
-const SCHEMA_INDEX_STATEMENTS: [&str; 1] = [DB_MEDIA_ITEM_PATH_INDEX];
+const SCHEMA_INDEX_STATEMENTS: [&str; 2] = [
+    DB_MEDIA_ITEM_PATH_INDEX,
+    DB_MEDIA_ITEM_CONTENT_IDENTIFIER_INDEX,
+];
 
 pub(super) async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result<()> {
     let version = query_one(conn, "PRAGMA user_version", ())
@@ -320,9 +330,9 @@ mod tests {
     #[test]
     fn schema_hash_is_current() {
         const EXPECTED_SCHEMA_HASH: &str =
-            "cf061587eaea04b92cdf8cc99ea8965fe614f70096673d70561e921428d990ea";
+            "b0ff16fa0f15b2c5ce2448805dac663057e362f5fa4f76104c540ebaa5b0066c";
         let actual = schema_hash();
-        assert_eq!(DB_SCHEMA_VERSION, 6);
+        assert_eq!(DB_SCHEMA_VERSION, 7);
         assert_eq!(
             actual, EXPECTED_SCHEMA_HASH,
             "\n\nDatabase schema changed (hash is now {actual}).\n\

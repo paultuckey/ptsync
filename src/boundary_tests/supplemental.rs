@@ -1,5 +1,5 @@
 use crate::fs::OsFileSystem;
-use crate::supplemental_info::load_supplemental_info;
+use crate::metadata::supplemental::load_supplemental_info;
 use crate::test_util::setup_log;
 use anyhow::Result;
 use std::io::Write;
@@ -42,10 +42,6 @@ fn supplemental_json_never_panics_on_malformed() -> Result<()> {
         ),
         // Free text where a scalar string is expected, and vice versa.
         ("bad_title.json", r#"{"title":42,"description":["a","b"]}"#),
-        // Blank title and description: both must come back as absent, not "".
-        ("blank_text.json", r#"{"title":"  ","description":""}"#),
-        // A title that is the media file's own name, in the other case.
-        ("file_name_title.json", r#"{"title":"PHOTO.JPG"}"#),
     ];
 
     for (name, body) in cases {

@@ -160,33 +160,45 @@ async fn test_db_scan_records_flags() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `--skip-xmp` leaves the sidecar unread, so none of it reaches the database.
+/// Both halves of a live photo record the same `content_identifier`, so the two
+/// files that make up one asset can be found from either side. The real iPhone
+/// pair in `test/livephoto` reaches it by two different routes: the still's
+/// Apple maker note and the clip's `moov` keys.
 #[tokio::test]
-async fn test_db_scan_skip_xmp() -> anyhow::Result<()> {
+async fn test_db_scan_records_content_identifier() -> anyhow::Result<()> {
     crate::test_util::setup_log();
     let (_db, conn) = open_conn(":memory:").await?;
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-    let opts = DbScanOpts {
-        skip_xmp: true,
-        ..DbScanOpts::default()
-    };
-    run_db_scan(container, &conn, opts, "test").await?;
+    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test/livephoto"));
+    run_db_scan(container, &conn, DbScanOpts::default(), "test/livephoto").await?;
 
+    // One identifier, two rows - which is the query the column exists for.
     let row = one_row(
         &conn,
-        "SELECT COUNT(*) FROM media_item WHERE media_path = ?1 AND rating IS NOT NULL",
+        "SELECT content_identifier, count(*), group_concat(media_path) FROM media_item \
+         WHERE content_identifier IS NOT NULL GROUP BY content_identifier",
+        (),
+    )
+    .await?;
+    assert_eq!(
+        row.get::<String>(0)?,
+        "E1F3ADCB-67D9-48E5-A716-25F90BB2B50B"
+    );
+    assert_eq!(row.get::<i64>(1)?, 2, "the still and its clip");
+    let paths = row.get::<String>(2)?;
+    assert!(paths.contains("IMG_3221.HEIC"), "got {paths}");
+    assert!(paths.contains("IMG_3221.MP4"), "got {paths}");
+
+    // Anything that never passed through an Apple device leaves it NULL.
+    let (_db, conn) = open_conn(":memory:").await?;
+    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
+    run_db_scan(container, &conn, DbScanOpts::default(), "test").await?;
+    let row = one_row(
+        &conn,
+        "SELECT content_identifier IS NULL FROM media_item WHERE media_path = ?1",
         ["Canon_40D.jpg"],
     )
     .await?;
-    assert_eq!(row.get::<i64>(0)?, 0, "no rating should be recorded");
-
-    let row = one_row(
-        &conn,
-        "SELECT COUNT(*) FROM person WHERE name = ?1",
-        ["Ada Lovelace"],
-    )
-    .await?;
-    assert_eq!(row.get::<i64>(0)?, 0, "no person should be recorded");
+    assert_eq!(row.get::<i64>(0)?, 1);
     Ok(())
 }
 

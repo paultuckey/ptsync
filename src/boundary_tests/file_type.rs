@@ -2,7 +2,6 @@
 //! not its extension, so "a JPEG that's really a PNG" is caught.
 
 use super::{fake_png, real_jpeg};
-use crate::exif_util::parse_exif_info;
 use crate::file_type::{AccurateFileType, determine_file_type};
 use crate::test_util::setup_log;
 use anyhow::Result;
@@ -14,14 +13,13 @@ fn file_type_detection_is_content_based_not_extension() -> Result<()> {
     // A file that lies about its type via its extension must be classified by
     // its bytes, so a re-extension attack cannot smuggle unsupported content
     // through as media.
-    let png_named_jpg = fake_png();
+    // Feeding that same mislabeled file to the EXIF parser is covered by
+    // `super::exif`, which fuzzes `fake_png()` along with the rest.
     assert_eq!(
-        determine_file_type(Cursor::new(png_named_jpg.clone()), &"photo.jpg".to_string())?,
+        determine_file_type(Cursor::new(fake_png()), &"photo.jpg".to_string())?,
         AccurateFileType::Png,
         "a PNG named .jpg must be detected as PNG from its content"
     );
-    // ...and feeding that same mislabelled file to the EXIF parser must not panic.
-    assert!(parse_exif_info(Cursor::new(png_named_jpg)).is_ok());
 
     // A real JPEG named .png is still a JPEG.
     assert_eq!(

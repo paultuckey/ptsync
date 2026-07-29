@@ -1,5 +1,5 @@
 use super::{fake_png, real_jpeg};
-use crate::exif_util::parse_exif_info;
+use crate::metadata::exif::parse_exif_info;
 use crate::test_util::setup_log;
 use anyhow::Result;
 use std::io::Cursor;

@@ -5,7 +5,7 @@
 use super::{escapes_output, hostile_names, real_jpeg};
 use crate::file_type::find_quick_file_type;
 use crate::markdown::get_desired_markdown_path;
-use crate::media::get_desired_media_path;
+use crate::output_path::get_desired_media_path;
 use crate::test_util::setup_log;
 use crate::util::{ScanInfo, dir_part, name_part};
 use anyhow::Result;

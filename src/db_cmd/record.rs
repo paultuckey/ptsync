@@ -3,9 +3,10 @@
 //! columns) and links any named people through `person`/`media_person`.
 
 use super::schema::{DB_MEDIA_ITEM_INSERT, DB_MEDIA_PERSON_INSERT, DB_PERSON_INSERT};
-use crate::media::{
-    MediaFileInfo, best_guess_archived, best_guess_description, best_guess_favorite,
-    best_guess_lat_long, best_guess_rating, best_guess_taken_dt, best_guess_title,
+use crate::metadata::MediaFileInfo;
+use crate::metadata::reconcile::{
+    best_guess_archived, best_guess_description, best_guess_favorite, best_guess_lat_long,
+    best_guess_rating, best_guess_taken_dt, best_guess_title,
 };
 use crate::util::{GEOHASH_PRECISION, geohash_encode, orientation};
 use turso::{Connection, params};
@@ -25,23 +26,29 @@ pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow
     let track = info.track_info.as_ref();
 
     let camera_make = exif
-        .and_then(crate::exif_util::camera_make)
+        .and_then(crate::metadata::exif::camera_make)
         .or_else(|| track.and_then(|t| t.make.clone()));
     let camera_model = exif
-        .and_then(crate::exif_util::camera_model)
+        .and_then(crate::metadata::exif::camera_model)
         .or_else(|| track.and_then(|t| t.model.clone()));
     let width = exif
-        .and_then(crate::exif_util::image_width)
+        .and_then(crate::metadata::exif::image_width)
         .or_else(|| track.and_then(|t| t.width).map(|w| w as i64));
     let height = exif
-        .and_then(crate::exif_util::image_height)
+        .and_then(crate::metadata::exif::image_height)
         .or_else(|| track.and_then(|t| t.height).map(|h| h as i64));
 
     let duration_ms = track.and_then(|t| t.duration_ms).map(|d| d as i64);
+    // Apple stamps one uuid on both halves of a live photo, reaching us from the
+    // still's maker note or the clip's `moov` keys - never both on one file, so
+    // whichever is present is this file's.
+    let content_identifier = exif
+        .and_then(|e| e.content_identifier.clone())
+        .or_else(|| track.and_then(|t| t.content_identifier.clone()));
     let kind = crate::file_type::media_kind(&info.accurate_file_type);
     let orientation = orientation(width, height).map(str::to_string);
     let (display_mirrored, display_rotate) = exif
-        .and_then(crate::exif_util::exif_display_transform)
+        .and_then(crate::metadata::exif::exif_display_transform)
         .unwrap_or((false, 0));
     let display_rotate = display_rotate as i64;
 
@@ -83,6 +90,7 @@ pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow
         description: best_guess_description(info),
         favorite: best_guess_favorite(info),
         archived: best_guess_archived(info),
+        content_identifier,
     };
 
     let mut stmt = conn.prepare_cached(DB_MEDIA_ITEM_INSERT).await?;
@@ -115,6 +123,7 @@ pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow
         item.description.as_deref(),
         item.favorite,
         item.archived,
+        item.content_identifier.as_deref(),
         item.media_item_id.as_str(),
     ])
     .await?;
@@ -196,4 +205,8 @@ struct DbMediaItem {
     geohash: Option<String>,
     // 'p' for photo, 'v' for video, None if neither
     kind: Option<&'static str>,
+    // Apple's per-asset uuid, shared by a live photo's still and clip. None for
+    // anything that never passed through an Apple device, or whose maker note
+    // was stripped on the way here.
+    content_identifier: Option<String>,
 }

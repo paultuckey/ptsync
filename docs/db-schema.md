@@ -41,6 +41,7 @@ erDiagram
         TEXT description
         INTEGER favorite
         INTEGER archived
+        TEXT content_identifier
     }
     person {
         TEXT person_id PK
