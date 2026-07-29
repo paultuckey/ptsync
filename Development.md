@@ -1,4 +1,3 @@
-
 # Development
 
 ## Rust code
@@ -6,23 +5,25 @@
 Let's use the most basic rust we can to make the code as approachable as possible.
 
 - Don't use lifetimes
-- Don't use `unsafe`, `expect()` or `unwrap()` — not even in tests. 
+- Don't use `unsafe`, `expect()` or `unwrap()` — not even in tests.
 - In tests, return `anyhow::Result` and use `?`, or use `assert!`/`ok_or_else`.
 - Use `.clone()` to avoid hard things.
 - Use `anyhow::Result` for fallible functions and propagate errors with `?`.
-- Write unit tests within the module (typically a `tests` module at the bottom of the file), and call `crate::test_util::setup_log()` at the start of tests to enable logging output.
+- Write unit tests within the module (typically a `tests` module at the bottom of the file), and call
+  `crate::test_util::setup_log()` at the start of tests to enable logging output.
 - Avoid low value tests for trivial logic.
 - Prefer high value black box tests were possible.
 - Prefer fakes over mocks, mocks over spys.
-- Do not add low value source comments, never describe the change, only add comments where the actual variable or method behavior is not implied by its name.
+- Do not add low value source comments, never describe the change, only add comments where the actual variable or method
+  behavior is not implied by its name.
 
 ## Technical goals
 
 - User should never lose a media file, an album or a metadata file during processing
 - Processing the same source zip or directory multiple times should result in no changes
 - It should run as quickly as possible
-- It should work and be documented clearly for the languages of at least half to world population: 
-  - English (primary language, source code comments), Mandarin, Hindi, Spanish
+- It should work and be documented clearly for the languages of at least half to world population:
+    - English (primary language, source code comments), Mandarin, Hindi, Spanish
 
 ## Tech Stack
 
@@ -40,24 +41,48 @@ Keep the tech stack as small and as simple as possible. Use only the basics.
 
 The source code is located in `src/`:
 
--   **`main.rs`**: Entry point. Defines the CLI structure using `clap` and orchestrates subcommands.
--   **`*_cmd.rs`**: Implementations for specific CLI commands:
-  -   `sync_cmd.rs`: Core logic for syncing files, deduplication, and writing to the output directory.
-  -   `db_cmd.rs`: Logic for scanning files and populating a SQLite database with metadata. Also stores each file/directory's known-pattern classification (via `classify.rs`) in the `classified_file`/`classified_dir` tables.
-  -   `info_cmd.rs`: Inspects and displays details for a single file.
--   **`classify.rs`**: Classifies input directory/zip paths against known Google Takeout / iCloud file and directory patterns using regex. Consumed by `db_cmd.rs` (not a standalone command).
--   **`media.rs`**: Core data structures (`MediaFileInfo`, `MediaFileDerivedInfo`) and logic for extracting metadata, calculating checksums, and deriving target paths/dates.
--   **`album.rs`**: Logic for parsing album metadata (from CSV or JSON) and generating album Markdown files.
--   **`markdown.rs`**: Utilities for reading/writing Markdown files and managing YAML frontmatter.
--   **`util.rs`**: General utilities, including the `PsContainer` trait which abstracts file system access (supporting both directories and zip files).
--   **`test_util.rs`**: Helper functions for testing, primarily logging setup.
+- **`main.rs`**: Entry point. Defines the CLI structure using `clap` and orchestrates subcommands.
+- **`*_cmd.rs`**: Implementations for specific CLI commands:
+- `sync_cmd.rs`: Core logic for syncing files, deduplication, and writing to the output directory.
+- `db_cmd.rs`: Logic for scanning files and populating a SQLite database with metadata. Also stores each
+  file/directory's known-pattern classification (via `classify.rs`) in the `classified_file`/`classified_dir` tables.
+- `info_cmd.rs`: Inspects and displays details for a single file.
+- **`classify.rs`**: Classifies input directory/zip paths against known Google Takeout / iCloud file and directory
+  patterns using regex. Consumed by `db_cmd.rs` (not a standalone command).
+- **`media.rs`**: Core data structures (`MediaFileInfo`, `MediaFileDerivedInfo`) and logic for extracting metadata,
+  calculating checksums, and deriving target paths/dates.
+- **`album.rs`**: Logic for parsing album metadata (from CSV or JSON) and generating album Markdown files.
+- **`markdown.rs`**: Utilities for reading/writing Markdown files and managing YAML frontmatter. Also owns the note
+  naming scheme (`<media file>.md` — appended, not extension-swapped) and the legacy-note fallback.
+- **`xmp.rs`**: Reads `.xmp` sidecars written by other photo tools (Lightroom, darktable, digiKam, ExifTool). Read-only
+  by design — ptsync never writes XMP.
+- **`util.rs`**: General utilities, including the `PsContainer` trait which abstracts file system access (supporting
+  both directories and zip files).
+- **`test_util.rs`**: Helper functions for testing, primarily logging setup.
 
 ## Key Concepts
 
--   **PsContainer**: An abstraction to treat directories and zip files uniformly.
--   **ScanInfo**: Basic information about a file found during a scan.
--   **MediaFileInfo**: detailed metadata about a media file (EXIF, checksum, etc.).
--   **Supplemental Info**: JSON sidecar files (often from Google Takeout) containing metadata like creation time and GPS coordinates.
+- **PsContainer**: An abstraction to treat directories and zip files uniformly.
+- **ScanInfo**: Basic information about a file found during a scan.
+- **MediaFileInfo**: detailed metadata about a media file (EXIF, checksum, etc.).
+- **Supplemental Info**: JSON sidecar files (often from Google Takeout) containing metadata like creation time and GPS
+  coordinates.
+- **XMP sidecar**: `.xmp` files written by other photo tools, carrying ratings, color labels, titles, keywords, GPS,
+  capture dates and named faces. Both naming conventions are accepted (`IMG_1234.jpg.xmp` and `IMG_1234.xmp`, the former
+  preferred since it is unambiguous). Parsed in `xmp.rs` by *namespace URI* rather than prefix, because writers disagree
+  on prefixes for the same namespace.
+- **Human before camera**: the single rule ordering every metadata source, in `best_guess_taken_dt` and
+  `best_guess_lat_long` (both in `media.rs`). A value a person deliberately set (XMP; Google's `photoTakenTime`/
+  `geoData`, which its UI lets you edit) outranks the device's own reading (EXIF, video track metadata, Google's
+  `geoDataExif` copy of the EXIF fix). Google's `creationTime` is an *upload* timestamp, not a capture time, so it sits
+  below the camera despite sharing a file with `photoTakenTime`. Adding a source means placing it in one of those three
+  tiers.
+- **Master copy**: the Markdown note, not the sidecar. XMP is an inbound source only. Derived facts (`checksum`,
+  `datetime`) are re-written every run; list fields (`people`, `tags`, `albums`) are merged; opinions (`rating`,
+  `label`, `title`) are seeded once and never overwritten, so a hand edit survives a re-sync. Adding a metadata source
+  means deciding which of those three it falls into.
+- **Sidecar detection is centralized**: `inspect.rs::analyze_file` is the single place every command loads a media file,
+  so a new sidecar source wired in there reaches `sync`, `db` and `info` at once.
 
 ## Commands
 
@@ -111,8 +136,6 @@ Make a database for iCloud:
 cargo run -- db --debug --input "input/iCloud Photos"
 ```
 
-
-
 Dry run a sync operation:
 
 ```shell
@@ -136,17 +159,15 @@ cargo run -- sync --input "input/takeout" --output "output/archive"
 cargo run -- sync --input "input/icloud photos" --output "output/archive"
 ```
 
-
 ## Output
 
-Console output is based on rsync. 
+Console output is based on rsync.
 
 ```sh
 rsync --dry-run -a --verbose ../input/takeout-small/ ../output/takeout-small/
 ```
 
 ## Zip File Debugging
-
 
 ```sh
 zipinfo -m input/takeout-20250614T030613Z-1-001.zip > output/takeout-list.txt
@@ -169,8 +190,7 @@ exiftool "input/iCloud Photos/Photos/IMG_3986.HEIC" > b.txt
 
 ## Update docs
 
-Regenerate `docs/cli.md` and `docs/db-schema.md` (a plain `cargo test` fails if
-they are stale):
+Regenerate `docs/cli.md` and `docs/db-schema.md` (a plain `cargo test` fails if they are stale):
 
 ```shell
 UPDATE_DOCS=1 cargo test
@@ -187,9 +207,8 @@ cargo test --test sync_snapshot     # builds target/demo/ with the fixture zip
 vhs docs/demo.tape                  # re-records docs/demo.gif
 ```
 
-`tests/sync_snapshot.rs` runs the same sync and diffs the console
-output against `tests/snapshots/sync.txt`, so a plain `cargo test` fails when
-output changes. **If that snapshot changes, re-record the demo too.**
+`tests/sync_snapshot.rs` runs the same sync and diffs the console output against `tests/snapshots/sync.txt`, so a plain
+`cargo test` fails when output changes. **If that snapshot changes, re-record the demo too.**
 
 ## Notes
 
