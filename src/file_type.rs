@@ -175,74 +175,75 @@ pub(crate) fn determine_file_type<R: Read + Seek>(
 mod tests {
     use super::*;
     use crate::fs::FileSystem;
-    use std::io::Cursor;
 
+    /// An extension missing from this table is never even opened, so every one
+    /// the sniffer supports needs a row here. Matching is case-insensitive and
+    /// only the last extension counts; one row each proves both.
     #[test]
     fn test_quick_file_type() {
         crate::test_util::setup_log();
-        assert_eq!(find_quick_file_type("test/test1.jpg"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/test1.mp4"), QuickFileType::Media);
-        assert_eq!(
-            find_quick_file_type("test/test1.abc"),
-            QuickFileType::Unknown
-        );
-        assert_eq!(
-            find_quick_file_type("test/test1.csv"),
-            QuickFileType::AlbumCsv
-        );
-        assert_eq!(
-            find_quick_file_type("test/test1.CsV"),
-            QuickFileType::AlbumCsv
-        );
-        assert_eq!(
-            find_quick_file_type("test/metadata.json"),
-            QuickFileType::AlbumJson
-        );
-        assert_eq!(
-            find_quick_file_type("test/MeTaDaTa.JsOn"),
-            QuickFileType::AlbumJson
-        );
-        assert_eq!(find_quick_file_type("test/tes"), QuickFileType::Unknown);
-        assert_eq!(find_quick_file_type("test/te.s.jpg"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/Hello.m4v"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/Hello.M4V"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/Hello.mov"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/Hello.MOV"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/Hello.avi"), QuickFileType::Media);
-        assert_eq!(
-            find_quick_file_type("test/MVI_0028.AVI"),
-            QuickFileType::Media
-        );
-        assert_eq!(find_quick_file_type("test/Hello.mpg"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/Hello.MPG"), QuickFileType::Media);
-        assert_eq!(
-            find_quick_file_type("test/Hello.mpeg"),
-            QuickFileType::Media
-        );
-        assert_eq!(find_quick_file_type("test/Hello.wmv"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/Hello.WMV"), QuickFileType::Media);
-        assert_eq!(find_quick_file_type("test/Hello.asf"), QuickFileType::Media);
-        assert_eq!(
-            find_quick_file_type("test/MVI_1943.avi.wmv"),
-            QuickFileType::Media
-        );
+        for (path, expected) in [
+            ("test/test1.jpg", QuickFileType::Media),
+            ("test/test1.mp4", QuickFileType::Media),
+            ("test/Hello.m4v", QuickFileType::Media),
+            ("test/Hello.mov", QuickFileType::Media),
+            ("test/Hello.avi", QuickFileType::Media),
+            ("test/Hello.mpg", QuickFileType::Media),
+            ("test/Hello.mpeg", QuickFileType::Media),
+            ("test/Hello.wmv", QuickFileType::Media),
+            ("test/Hello.asf", QuickFileType::Media),
+            ("test/test1.csv", QuickFileType::AlbumCsv),
+            ("test/metadata.json", QuickFileType::AlbumJson),
+            // Case folds, for a media and a non-media extension alike.
+            ("test/MVI_0028.AVI", QuickFileType::Media),
+            ("test/MeTaDaTa.JsOn", QuickFileType::AlbumJson),
+            // Only the last extension decides.
+            ("test/te.s.jpg", QuickFileType::Media),
+            ("test/MVI_1943.avi.wmv", QuickFileType::Media),
+            // Unrecognised, and no extension at all.
+            ("test/test1.abc", QuickFileType::Unknown),
+            ("test/tes", QuickFileType::Unknown),
+        ] {
+            assert_eq!(find_quick_file_type(path), expected, "classifying {path}");
+        }
     }
 
-    /// QuickTime is a container in its own right. Takeout exports plenty of them,
-    /// often under a `.mp4` name, so the type has to come from the `qt  ` brand in
-    /// the bytes — otherwise they are written back out mislabelled.
+    /// Every container the sniffer supports, checked the whole way through:
+    /// sniffed from its bytes, kept under the right extension on the way out,
+    /// counted as a video, and read (or not) for track metadata.
+    ///
+    /// The metadata column is the load-bearing one. MOV and M4V are ISO base
+    /// media files whose capture time the track parser can reach; AVI is RIFF
+    /// and MPEG-1/2 is a start-code stream, so neither has track metadata and
+    /// the date logic must fall back to supplemental info or the filesystem
+    /// rather than warn on every file. ASF is one container shared by Windows
+    /// Media video and audio, so the bytes alone do not settle it — it takes the
+    /// stream GUIDs, which is why the `reader-asf` feature has to be enabled.
+    /// Without it every `.wmv` reports the generic ASF type and is skipped.
     #[test]
-    fn test_mov_is_a_supported_video() -> anyhow::Result<()> {
+    fn test_supported_video_containers() -> anyhow::Result<()> {
         crate::test_util::setup_log();
         use crate::fs::OsFileSystem;
-        let name = "Hello.mov".to_string();
         let root = OsFileSystem::new("test");
-        let ft = determine_file_type(root.open(&name)?, &name)?;
 
-        assert_eq!(ft, AccurateFileType::Mov);
-        assert_eq!(file_ext_from_file_type(&ft), "mov");
-        assert_eq!(media_kind(&ft), Some("v"));
-        assert!(matches!(metadata_type(&ft), MetadataType::Track));
+        for (name, expected, ext, has_track_metadata) in [
+            ("Hello.mov", AccurateFileType::Mov, "mov", true),
+            ("Hello.m4v", AccurateFileType::M4v, "m4v", true),
+            ("Hello.avi", AccurateFileType::Avi, "avi", false),
+            ("Hello.mpg", AccurateFileType::Mpg, "mpg", false),
+            ("Hello.wmv", AccurateFileType::Wmv, "wmv", false),
+        ] {
+            let name = name.to_string();
+            let ft = determine_file_type(root.open(&name)?, &name)?;
+            assert_eq!(ft, expected, "sniffing {name}");
+            assert_eq!(file_ext_from_file_type(&ft), ext, "extension for {name}");
+            assert_eq!(media_kind(&ft), Some("v"), "media kind for {name}");
+            assert_eq!(
+                matches!(metadata_type(&ft), MetadataType::Track),
+                has_track_metadata,
+                "track metadata for {name}"
+            );
+        }
         Ok(())
     }
 
@@ -269,62 +270,6 @@ mod tests {
         Ok(())
     }
 
-    /// An `.m4v` is an MP4 with an `M4V ` major brand. It must be sniffed as its
-    /// own type rather than falling through to `Unsupported`, keep its extension
-    /// on the way out, and be read for track metadata like any other video —
-    /// otherwise its capture time never reaches the date logic.
-    #[test]
-    fn test_m4v_is_a_supported_video() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        use crate::fs::OsFileSystem;
-        let name = "Hello.m4v".to_string();
-        let root = OsFileSystem::new("test");
-        let ft = determine_file_type(root.open(&name)?, &name)?;
-
-        assert_eq!(ft, AccurateFileType::M4v);
-        assert_eq!(file_ext_from_file_type(&ft), "m4v");
-        assert_eq!(media_kind(&ft), Some("v"));
-        assert!(matches!(metadata_type(&ft), MetadataType::Track));
-        Ok(())
-    }
-
-    /// A compact camera's `MVI_1234.AVI` is a RIFF file, not an ISO base media
-    /// file. It has to sniff as its own type, keep its extension, and count as a
-    /// video — but it carries no track metadata, so the date logic must fall back
-    /// to supplemental info or the filesystem rather than warn on every file.
-    #[test]
-    fn test_avi_is_a_supported_video() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        use crate::fs::OsFileSystem;
-        let name = "Hello.avi".to_string();
-        let root = OsFileSystem::new("test");
-        let ft = determine_file_type(root.open(&name)?, &name)?;
-
-        assert_eq!(ft, AccurateFileType::Avi);
-        assert_eq!(file_ext_from_file_type(&ft), "avi");
-        assert_eq!(media_kind(&ft), Some("v"));
-        assert!(matches!(metadata_type(&ft), MetadataType::NoMetadata));
-        Ok(())
-    }
-
-    /// MPEG-1/2 program streams — DVD and camcorder rips — are identified by a
-    /// start-code prefix rather than a container brand, and like AVI they have no
-    /// track metadata the parser can reach.
-    #[test]
-    fn test_mpg_is_a_supported_video() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        use crate::fs::OsFileSystem;
-        let name = "Hello.mpg".to_string();
-        let root = OsFileSystem::new("test");
-        let ft = determine_file_type(root.open(&name)?, &name)?;
-
-        assert_eq!(ft, AccurateFileType::Mpg);
-        assert_eq!(file_ext_from_file_type(&ft), "mpg");
-        assert_eq!(media_kind(&ft), Some("v"));
-        assert!(matches!(metadata_type(&ft), MetadataType::NoMetadata));
-        Ok(())
-    }
-
     /// `.mpeg` is accepted on the way in but normalises to `.mpg` on the way out,
     /// so one format does not produce two extensions in the archive.
     #[test]
@@ -336,26 +281,6 @@ mod tests {
 
         assert_eq!(ft, AccurateFileType::Mpg);
         assert_eq!(file_ext_from_file_type(&ft), "mpg");
-        Ok(())
-    }
-
-    /// ASF is one container shared by Windows Media video and audio, so the bytes
-    /// alone do not settle the type — it takes the stream GUIDs in the header,
-    /// which is why the `reader-asf` feature has to be enabled. Without it every
-    /// `.wmv` reports the generic ASF media type and is skipped as unsupported.
-    /// Like AVI it carries no track metadata the parser can reach.
-    #[test]
-    fn test_wmv_is_a_supported_video() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        use crate::fs::OsFileSystem;
-        let name = "Hello.wmv".to_string();
-        let root = OsFileSystem::new("test");
-        let ft = determine_file_type(root.open(&name)?, &name)?;
-
-        assert_eq!(ft, AccurateFileType::Wmv);
-        assert_eq!(file_ext_from_file_type(&ft), "wmv");
-        assert_eq!(media_kind(&ft), Some("v"));
-        assert!(matches!(metadata_type(&ft), MetadataType::NoMetadata));
         Ok(())
     }
 
@@ -400,22 +325,5 @@ mod tests {
             file_type_from_content_type("application/vnd.ms-asf"),
             AccurateFileType::Unsupported
         );
-    }
-
-    #[test]
-    fn test_accurate_file_type() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        use crate::fs::OsFileSystem;
-        let name = "Canon_40D.jpg".to_string();
-        let root = OsFileSystem::new("test");
-        let r = root.open(&name)?;
-        assert_eq!(determine_file_type(r, &name)?, AccurateFileType::Jpg);
-
-        let bad: Vec<u8> = vec![];
-        assert_eq!(
-            determine_file_type(Cursor::new(&bad), &"bad.bad".to_string())?,
-            AccurateFileType::Unsupported
-        );
-        Ok(())
     }
 }

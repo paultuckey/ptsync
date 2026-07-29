@@ -6,22 +6,21 @@ mod db_cmd;
 mod dedup;
 #[cfg(test)]
 mod docs_generator;
-mod exif_util;
 mod file_type;
 mod fs;
 mod info_cmd;
 mod inspect;
+mod live_photo;
 mod markdown;
-mod media;
+mod metadata;
+mod output_path;
+mod path;
 mod progress;
 mod s3_fs;
 mod s3_uri;
-mod supplemental_info;
 mod sync_cmd;
 mod test_util;
-mod track_util;
 mod util;
-mod xmp;
 
 use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;

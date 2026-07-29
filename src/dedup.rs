@@ -1,5 +1,6 @@
 use crate::fs::FileSystem;
-use crate::media::{MediaFileDerivedInfo, MediaFileInfo};
+use crate::metadata::MediaFileInfo;
+use crate::output_path::MediaFileDerivedInfo;
 use crate::util::is_existing_file_same;
 use anyhow::anyhow;
 use std::collections::HashMap;

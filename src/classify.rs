@@ -290,8 +290,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_no_match() {
+    fn test_find_known_files() {
         crate::test_util::setup_log();
+        // A path matching no known Takeout/iCloud pattern classifies as nothing.
         assert_eq!(find_known_files("/hello"), vec![]);
         assert_eq!(
             find_known_files("Google Photos/Photos from 2012/IMG_1234.jpg"),

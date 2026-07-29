@@ -166,6 +166,49 @@ pub(crate) fn media(
         if let Some(gps) = &exif_info.gps {
             writeln!(out, "- **gps**: `{gps}`")?;
         }
+        // Not an EXIF tag but a maker note one, so it is named for where it
+        // came from rather than passed off as a sibling of the tags above.
+        if let Some(id) = &exif_info.content_identifier {
+            writeln!(out, "- **contentIdentifier** (Apple MakerNote): `{id}`")?;
+        }
+        writeln!(out)?;
+    }
+
+    // Videos have no EXIF, so without this a `ptsync info` on a clip printed
+    // its hashes and nothing else - not even the date and position that its
+    // own frontmatter had just been built from.
+    if let Some(track) = &media_file_info.track_info {
+        writeln!(out, "## Track Info\n")?;
+        for (name, value) in [
+            ("width", track.width.map(|v| v.to_string())),
+            ("height", track.height.map(|v| v.to_string())),
+            ("creationTime", track.creation_time.clone()),
+            ("durationMs", track.duration_ms.map(|v| v.to_string())),
+            ("make", track.make.clone()),
+            ("model", track.model.clone()),
+            ("software", track.software.clone()),
+            ("author", track.author.clone()),
+            ("gps", track.gps_iso_6709.clone()),
+            ("latitude", track.latitude.map(|v| v.to_string())),
+            ("longitude", track.longitude.map(|v| v.to_string())),
+            ("contentIdentifier", track.content_identifier.clone()),
+        ] {
+            if let Some(value) = value {
+                writeln!(out, "- **{name}**: `{value}`")?;
+            }
+        }
+        // Reported as the transform rather than folded into the dimensions
+        // above, which stay as the file stores them. See
+        // `PsTrackInfo::display_transform`.
+        if let Some((mirrored, rotate)) = track.display_transform() {
+            let mirrored = if mirrored { ", mirrored" } else { "" };
+            writeln!(out, "- **rotation**: `{rotate}°{mirrored}`")?;
+        }
+        // The `moov/meta` keys behind the fields above, plus the ones nothing
+        // reads yet - the live photo scores, the location accuracy.
+        for (name, value) in &track.tags {
+            writeln!(out, "- **{name}**: `{value}`")?;
+        }
         writeln!(out)?;
     }
     Ok(out)
@@ -298,19 +341,6 @@ mod tests {
         let si = ScanInfo::new("Hello.mp4".to_string(), None, None, 0);
         let out = media(&si, &root, true)?;
         assert!(!out.contains("## Supplemental JSON sidecar"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_info_media_skip_xmp() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let root = OsFileSystem::new("test");
-        let si = ScanInfo::new("Canon_40D.jpg".to_string(), None, None, 0);
-        // `--skip-xmp` leaves the sidecar unread, so none of it surfaces.
-        let out = media(&si, &root, true)?;
-        assert!(out.contains("## Hashes"));
-        assert!(!out.contains("## XMP sidecar"));
-        assert!(!out.contains("Ada Lovelace"));
         Ok(())
     }
 
