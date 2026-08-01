@@ -1,5 +1,9 @@
 use crate::fs::WritableFileSystem;
-use crate::media::{MediaFileInfo, best_guess_taken_dt};
+use crate::metadata::MediaFileInfo;
+use crate::metadata::reconcile::{
+    best_guess_archived, best_guess_description, best_guess_favorite, best_guess_lat_long,
+    best_guess_rating, best_guess_taken_dt, best_guess_title,
+};
 use crate::util::name_part;
 use anyhow::anyhow;
 use std::io::{Cursor, Read};
@@ -12,7 +16,10 @@ pub(crate) fn mfm_from_media_file_info(
     album_names: &[String],
 ) -> PhotoSorterFrontMatter {
     let guessed_datetime = best_guess_taken_dt(media_info);
-    let (latitude, longitude) = best_guess_coords(media_info);
+    // The note and the database column come from the same resolver, so a photo
+    // can never be at one place in its note and another in the index.
+    let (latitude, longitude) = best_guess_lat_long(media_info).unzip();
+    let xmp = media_info.xmp_info.as_ref();
     PhotoSorterFrontMatter {
         path_original: media_info.original_path.clone(),
         checksum: media_info.hash_info.long_checksum.clone(),
@@ -23,46 +30,53 @@ pub(crate) fn mfm_from_media_file_info(
         // Render album membership as wikilinks so each photo note links
         // back to the album files under `albums/`
         albums: album_names.iter().map(|n| as_wikilink(n)).collect(),
+        // Keywords stay bare strings rather than wikilinks: `tags` is a key
+        // Obsidian reads natively, and it expects tag text, not links.
+        tags: xmp.map(|x| x.tags.clone()).unwrap_or_default(),
+        label: xmp.and_then(|x| x.label.clone()),
+        // Everything below is pooled across sidecars by the same shared
+        // resolvers the date and coordinates use, so a caption written in Google
+        // Photos reaches the note even when the photo has no XMP beside it - and
+        // so the note and the index can never disagree about any of them.
+        rating: best_guess_rating(media_info),
+        title: best_guess_title(media_info),
+        description: best_guess_description(media_info),
+        favorite: best_guess_favorite(media_info),
+        archived: best_guess_archived(media_info),
+        // Not derivable from the file itself: which clip belongs to this still
+        // is a property of the archive around it, so `sync_markdown` fills it in
+        // once the clip's output path is known.
+        motion: None,
     }
 }
 
-/// Best guess at GPS coordinates, preferring the EXIF embedded in the file, then
-/// the supplemental metadata Google ships alongside it (Takeout often strips EXIF
-/// GPS but keeps it in the metadata JSON). Google writes `0,0` to mean "no
-/// location", so it's treated as absent.
-fn best_guess_coords(media_info: &MediaFileInfo) -> (Option<f64>, Option<f64>) {
-    if let Some(exif) = &media_info.exif_info
-        && let Some(coords) = non_null_island(exif.latitude, exif.longitude)
-    {
-        return (Some(coords.0), Some(coords.1));
-    }
-    if let Some(supp) = &media_info.supp_info {
-        for geo in [&supp.geo_data, &supp.geo_data_exif].into_iter().flatten() {
-            if let Some(coords) = non_null_island(geo.latitude, geo.longitude) {
-                return (Some(coords.0), Some(coords.1));
-            }
-        }
-    }
-    (None, None)
-}
-
-fn non_null_island(lat: Option<f64>, long: Option<f64>) -> Option<(f64, f64)> {
-    match (lat, long) {
-        (Some(lat), Some(long)) if lat != 0.0 || long != 0.0 => Some((lat, long)),
-        _ => None,
-    }
-}
-
-/// People (face tags) from Google supplemental metadata, rendered as wikilinks
+/// People (face tags) rendered as wikilinks, from Google's supplemental metadata
+/// and from any XMP sidecar, pooled.
+///
+/// The two sources name the same people in the same archive - Google's face tags
+/// for photos that came from Takeout, XMP's `PersonInImage` and face regions for
+/// photos that passed through digiKam or Lightroom - so a person tagged in both
+/// must yield one wikilink, not two. Order is source order with repeats dropped,
+/// which keeps re-runs from reshuffling a note's frontmatter.
 fn people_links(media_info: &MediaFileInfo) -> Vec<String> {
-    let Some(supp) = &media_info.supp_info else {
-        return vec![];
-    };
-    supp.people
+    let from_supp = media_info
+        .supp_info
         .iter()
+        .flat_map(|supp| supp.people.iter())
         .filter_map(|p| p.name.as_ref())
-        .map(|n| n.trim())
+        .map(String::as_str);
+    let from_xmp = media_info
+        .xmp_info
+        .iter()
+        .flat_map(|xmp| xmp.people.iter())
+        .map(String::as_str);
+
+    let mut seen = std::collections::HashSet::new();
+    from_supp
+        .chain(from_xmp)
+        .map(str::trim)
         .filter(|n| !n.is_empty())
+        .filter(|n| seen.insert(n.to_lowercase()))
         .map(as_wikilink)
         .collect()
 }
@@ -71,6 +85,10 @@ fn as_wikilink(name: &str) -> String {
     format!("[[{name}]]")
 }
 
+// `Default` so a test can name the keys it is exercising and leave the rest
+// alone, rather than every construction site being touched whenever a new key
+// is derived from a sidecar.
+#[derive(Default)]
 pub(crate) struct PhotoSorterFrontMatter {
     pub(crate) path_original: Vec<String>,
     pub(crate) checksum: String,
@@ -81,13 +99,44 @@ pub(crate) struct PhotoSorterFrontMatter {
     pub(crate) people: Vec<String>,
     /// Albums this photo belongs to, as wikilinks.
     pub(crate) albums: Vec<String>,
+    /// Keywords from an XMP sidecar, as plain Obsidian tag text.
+    pub(crate) tags: Vec<String>,
+    /// `xmp:Rating`, 0-5 (or -1 for rejected).
+    pub(crate) rating: Option<i64>,
+    /// `xmp:Label` - a colour name in most tools.
+    pub(crate) label: Option<String>,
+    /// `dc:title`, or Google's `title` when it is not just the file name. Heads
+    /// the note body on first write as well as being a frontmatter key, so the
+    /// note reads as a titled page and not only as metadata.
+    pub(crate) title: Option<String>,
+    /// `dc:description`, or the caption from Google's supplemental json. Seeds
+    /// the note body on first write rather than becoming a frontmatter key,
+    /// since it is prose and the body is where prose belongs.
+    pub(crate) description: Option<String>,
+    /// Google Photos' star. Absent from a note means false, so the key is only
+    /// written when it is true.
+    pub(crate) favorite: bool,
+    /// Archived in Google Photos - hidden from its main grid, not deleted.
+    /// Written only when true, like [`Self::favorite`].
+    pub(crate) archived: bool,
+    /// This live photo's motion clip, for a still that has one: its file name
+    /// when it sits beside the note, otherwise its path within the archive. The
+    /// clip has no note of its own, so this key is the only thing tying the two
+    /// halves together once they are in the vault. See [`crate::live_photo`].
+    pub(crate) motion: Option<String>,
 }
 
+/// Write (or update) the note beside a media file.
+///
+/// `motion_path` is the archive path of this still's live-photo clip, for the
+/// still half of a pair. The clip itself gets no note - see [`crate::live_photo`]
+/// - so this is what records that the two belong together.
 pub(crate) fn sync_markdown(
     dry_run: bool,
     media_file: &MediaFileInfo,
     resolved_media_path: &str,
     album_names: &[String],
+    motion_path: Option<&str>,
     output_c: &dyn WritableFileSystem,
 ) -> anyhow::Result<()> {
     // The sidecar is placed beside the *resolved* media file (the path
@@ -96,12 +145,27 @@ pub(crate) fn sync_markdown(
     // suffix (`2213-20000-ccf63c8.jpg`); deriving the sidecar from the resolved
     // path gives each its own note (`2213-20000-ccf63c8.md`) instead of having
     // them all clobber a single `2213-20000.md`.
-    let output_path = get_desired_markdown_path(resolved_media_path)?;
-    let mfm = mfm_from_media_file_info(media_file, album_names);
+    let Some(output_path) = resolve_markdown_path(resolved_media_path, media_file, output_c)?
+    else {
+        // Two same-instant files in different formats want one note name. The
+        // one that got there first keeps it; say so rather than inventing a
+        // second name, so the clash is the user's to see and resolve.
+        warn!(
+            "No note written for {resolved_media_path}: {} already holds another file's note",
+            get_desired_markdown_path(resolved_media_path)?
+        );
+        return Ok(());
+    };
+    let mut mfm = mfm_from_media_file_info(media_file, album_names);
+    mfm.motion = motion_path.map(|clip| relative_to_note(&output_path, clip));
     // On first creation the body embeds the photo itself, so opening the note in
     // A markdown viewer shows the image. The body is preserved
     // verbatim on later runs, so user notes and this embed are never clobbered.
-    let mut e_md = new_note_body(resolved_media_path);
+    let mut e_md = new_note_body(
+        resolved_media_path,
+        mfm.title.as_deref(),
+        mfm.description.as_deref(),
+    );
     let mut e_yaml = None;
 
     if output_c.exists(&output_path) {
@@ -128,6 +192,24 @@ pub(crate) fn sync_markdown(
         output_c.write(dry_run, &output_path, &mut Cursor::new(&md_bytes))?;
     }
     Ok(())
+}
+
+/// How to name `target` in `note_path`'s frontmatter: its bare file name when the
+/// two sit in one directory, its whole archive path otherwise.
+///
+/// A live photo's two halves usually land together, since the clip inherits the
+/// still's capture date through Google's shared sidecar json. Where they do not -
+/// an iCloud export dates each half from its own metadata, which can differ by a
+/// second and cross midnight - the bare name would point at nothing, so the full
+/// path is used instead.
+fn relative_to_note(note_path: &str, target: &str) -> String {
+    fn dir_of(p: &str) -> Option<&str> {
+        p.rfind('/').map(|i| &p[..i])
+    }
+    if dir_of(note_path) == dir_of(target) {
+        return name_part(&target.to_string());
+    }
+    target.to_string()
 }
 
 /// Grab anything between "---[\r]\n" and "---[\r]\n" and put into .0. Put everything else into .1.
@@ -280,6 +362,40 @@ fn merge_yaml(s: &Option<String>, fm: &PhotoSorterFrontMatter) -> anyhow::Result
     yaml_array_merge(&mut root, &"original-paths".to_string(), &fm.path_original);
     yaml_array_merge(&mut root, &"people".to_string(), &fm.people);
     yaml_array_merge(&mut root, &"albums".to_string(), &fm.albums);
+    yaml_array_merge(&mut root, &"tags".to_string(), &fm.tags);
+
+    // Rating, label and title are opinions, not derived facts, so they are
+    // seeded from the sidecar once and then left alone. Re-deriving them every
+    // run would mean a star added in Obsidian is silently reverted to whatever
+    // darktable thought on the next sync - the archive is the master copy, and a
+    // hand-edited value has to survive.
+    if let Some(rating) = fm.rating {
+        set_scalar_if_absent(&mut root, "rating", Yaml::Integer(rating));
+    }
+    if let Some(label) = &fm.label {
+        set_scalar_if_absent(&mut root, "label", Yaml::String(label.to_string()));
+    }
+    if let Some(title) = &fm.title {
+        set_scalar_if_absent(&mut root, "title", Yaml::String(title.to_string()));
+    }
+    // Flags are written only when set. An absent key already means false, so
+    // stamping `favorite: false` onto every note in an archive would be noise -
+    // and because these go through `set_scalar_if_absent` like the other
+    // opinions, un-favouriting a photo in the vault survives the next run.
+    // (Rendering them as `tags` instead would not: `tags` is unioned, never
+    // truncated, so a tag ptsync added could never be removed.)
+    for (key, set) in [("favorite", fm.favorite), ("archived", fm.archived)] {
+        if set {
+            set_scalar_if_absent(&mut root, key, Yaml::Boolean(true));
+        }
+    }
+
+    // Derived from where the clip actually landed, so it is re-stated every run
+    // rather than seeded once: an archive reorganised by a later sync would
+    // otherwise leave the still pointing at a file that has moved.
+    if let Some(motion) = &fm.motion {
+        set_scalar(&mut root, "motion", Yaml::String(motion.to_string()));
+    }
 
     if let Some(lat) = fm.latitude {
         set_scalar(&mut root, "latitude", Yaml::Real(lat.to_string()));
@@ -294,6 +410,16 @@ fn merge_yaml(s: &Option<String>, fm: &PhotoSorterFrontMatter) -> anyhow::Result
         yaml: merged,
         changed,
     })
+}
+
+/// Set a scalar key only when the note does not already carry it, so a value the
+/// user has edited by hand is never re-derived over the top. A key present but
+/// empty counts as set - clearing a rating is a decision too.
+fn set_scalar_if_absent(root: &mut Hash, key: &str, value: Yaml) {
+    let k = Yaml::String(key.to_string());
+    if root.get(&k).is_none() {
+        root.insert(k, value);
+    }
 }
 
 /// Set a scalar key, updating an existing entry in place (preserving its
@@ -365,33 +491,138 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
     }
 }
 
-/// Body is a relative markdown image embed of the sibling media file.
-/// A relative link (rather than a
-/// `![[wikilink]]`) renders in plain markdown viewers too and is unambiguous
-/// because the photo is in the same directory as the note. The embed uses the
-/// resolved media file name (including any collision-resolving checksum suffix)
-/// so each same-instant photo embeds its own file, not a shared bare name.
-fn new_note_body(resolved_media_path: &str) -> String {
+/// Body for a note being created for the first time: a relative markdown image
+/// embed of the sibling media file, with whatever title and description its
+/// sidecars carried written underneath it.
+///
+/// A relative link (rather than a `![[wikilink]]`) renders in plain markdown
+/// viewers too and is unambiguous because the photo is in the same directory as
+/// the note. The embed uses the resolved media file name (including any
+/// collision-resolving checksum suffix) so each same-instant photo embeds its
+/// own file, not a shared bare name.
+///
+/// Title and description go in the body rather than in frontmatter alone
+/// because they are what a person wrote about the photo, which is exactly what
+/// the body is for - and putting them here means they are theirs to edit from
+/// then on, since later runs never touch the body. They sit *under* the embed so
+/// the photo is still the first thing the note shows.
+pub(crate) fn new_note_body(
+    resolved_media_path: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+) -> String {
+    fn non_blank(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|v| !v.is_empty())
+    }
+
     let file_name = name_part(&resolved_media_path.to_string());
-    format!("\n![]({file_name})\n")
+    let mut body = format!("\n![]({file_name})\n");
+    // A heading rather than a plain line: markdown viewers give the note a
+    // visible name, and Obsidian's outline picks it up.
+    if let Some(title) = non_blank(title) {
+        body.push_str(&format!("\n# {title}\n"));
+    }
+    if let Some(description) = non_blank(description) {
+        body.push_str(&format!("\n{description}\n"));
+    }
+    body
 }
 
-/// The sidecar markdown path for a media file: the media file's own path with
-/// its extension swapped for `.md`, so the note is a sibling of the photo even
-/// when the photo's name carries a collision-resolving checksum suffix
-/// (`2213-20000-ccf63c8.jpg` -> `2213-20000-ccf63c8.md`).
+/// The sidecar markdown path for a media file: the media extension swapped for
+/// `.md` (`2213-20000-ccf63c8.jpg` -> `2213-20000-ccf63c8.md`). A name with no
+/// extension keeps its whole self and gains one (`abc` -> `abc.md`).
+///
+/// Photo and note differing only in extension is what makes an archive read as
+/// one thing in Obsidian rather than as files with `.jpg.md` tacked on.
+///
+/// The name is not always free. `resolve_output_path`
+/// ([`crate::dedup::Deduplicator::resolve_output_path`]) resolves media
+/// collisions per *full* name, extension included, so two different files
+/// captured in the same millisecond but stored in different formats - a photo
+/// and a video, say - both keep the bare date name and would want one note
+/// between them. That is what [`disambiguated_markdown_path`] is for. Callers
+/// should go through [`resolve_markdown_path`], which picks between the two;
+/// this function is the name to *prefer*, not always the name to write.
 pub(crate) fn get_desired_markdown_path(resolved_media_path: &str) -> anyhow::Result<String> {
     if resolved_media_path.is_empty() {
         return Err(anyhow!("Resolved media path is empty"));
     }
-    // Swap the trailing extension for `.md`. The file name carries exactly one
-    // dot (the extension); date-based names, checksums and the `undated` folder
-    // contain none, so the final dot - when it sits in the file name - is the
-    // extension separator.
+    Ok(format!(
+        "{}.md",
+        crate::path::strip_ext(resolved_media_path)
+    ))
+}
+
+/// The fallback note name for a media file whose preferred one is taken: `.md`
+/// appended to the *whole* name, extension included
+/// (`2213-20000.mp4` -> `2213-20000.mp4.md`).
+///
+/// Unique by construction, since the media names it is derived from are already
+/// unique. `None` when the media name has no extension, because then it would
+/// equal [`get_desired_markdown_path`] and disambiguate nothing.
+///
+/// This is also the convention darktable and digiKam use for `.xmp` sidecars
+/// (`IMG_1234.jpg.xmp`) - see [`crate::metadata::xmp`].
+fn disambiguated_markdown_path(resolved_media_path: &str) -> Option<String> {
     let last_slash = resolved_media_path.rfind('/').map_or(0, |i| i + 1);
-    match resolved_media_path[last_slash..].rfind('.') {
-        Some(dot) => Ok(format!("{}.md", &resolved_media_path[..last_slash + dot])),
-        None => Ok(format!("{resolved_media_path}.md")),
+    let dot = resolved_media_path[last_slash..].rfind('.')?;
+    (dot > 0).then(|| format!("{resolved_media_path}.md"))
+}
+
+/// Where this media file's note lives, or `None` when another file's note is
+/// already sitting at the name it wants.
+///
+/// A note is this file's when its frontmatter records this checksum. That is the
+/// only proof available - a same-instant sibling in another format wants the
+/// exact same name - so anything else (a note holding a different checksum, or
+/// none at all) is left alone and this file goes without one. Writing there
+/// anyway would pool two files' `original-paths` under a single checksum; the
+/// blocked file is reported by the caller so the clash is visible rather than
+/// quietly worked around.
+///
+/// A note already sitting at the [`disambiguated_markdown_path`] for *this* file
+/// is kept there rather than re-created under the preferred name, so an archive
+/// synced while that was the default keeps the prose someone wrote in it.
+fn resolve_markdown_path(
+    resolved_media_path: &str,
+    media_file: &MediaFileInfo,
+    output_c: &dyn WritableFileSystem,
+) -> anyhow::Result<Option<String>> {
+    let desired = get_desired_markdown_path(resolved_media_path)?;
+    let checksum = &media_file.hash_info.long_checksum;
+
+    if output_c.exists(&desired) {
+        return match read_note_checksum(&desired, output_c) {
+            Some(existing) if &existing == checksum => Ok(Some(desired)),
+            _ => Ok(None),
+        };
+    }
+
+    if let Some(disambiguated) = disambiguated_markdown_path(resolved_media_path)
+        && output_c.exists(&disambiguated)
+        && read_note_checksum(&disambiguated, output_c).as_deref() == Some(checksum.as_str())
+    {
+        debug!("Keeping existing note {disambiguated} for {resolved_media_path}");
+        return Ok(Some(disambiguated));
+    }
+    Ok(Some(desired))
+}
+
+/// The `checksum` recorded in an existing note's frontmatter, if it has one. An
+/// unreadable or unparseable note yields `None`, which the caller reads as "not
+/// this file's note".
+fn read_note_checksum(path: &str, output_c: &dyn WritableFileSystem) -> Option<String> {
+    let mut reader = output_c.open(path).ok()?;
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok()?;
+    let (yaml, _) = split_frontmatter(&String::from_utf8_lossy(&bytes));
+    let docs = YamlLoader::load_from_str(&yaml).ok()?;
+    let Yaml::Hash(hash) = docs.into_iter().next()? else {
+        return None;
+    };
+    match hash.get(&Yaml::String("checksum".to_string()))? {
+        Yaml::String(s) => Some(s.clone()),
+        _ => None,
     }
 }
 
@@ -412,12 +643,8 @@ mod tests {
     fn get_mfi() -> PhotoSorterFrontMatter {
         PhotoSorterFrontMatter {
             path_original: vec!["p1".to_string(), "p2".to_string()],
-            datetime: None,
             checksum: "abcdefg".to_string(),
-            latitude: None,
-            longitude: None,
-            people: vec![],
-            albums: vec![],
+            ..PhotoSorterFrontMatter::default()
         }
     }
 
@@ -553,8 +780,8 @@ checksum: abcdefg
     fn test_desired_md_path() {
         crate::test_util::setup_log();
         assert_eq!(get_desired_markdown_path("").ok(), None);
-        // The media extension is swapped for `.md`, so the sidecar is a sibling
-        // of the photo it describes...
+        // The media extension is swapped for `.md`, so note and photo differ
+        // only in extension...
         assert_eq!(
             get_desired_markdown_path("2025/02/09/1818-44000.jpg").ok(),
             Some("2025/02/09/1818-44000.md".to_string())
@@ -564,51 +791,144 @@ checksum: abcdefg
             get_desired_markdown_path("2025/02/09/1818-44000-ccf63c8.jpg").ok(),
             Some("2025/02/09/1818-44000-ccf63c8.md".to_string())
         );
-        // A name without an extension just gains `.md` (dots only ever appear in
-        // the file name, never in the date directories).
+        // Two same-instant files differing only by extension prefer one name
+        // between them; `resolve_markdown_path` is what keeps them apart.
+        assert_eq!(
+            get_desired_markdown_path("2025/02/09/1818-44000.heic").ok(),
+            get_desired_markdown_path("2025/02/09/1818-44000.mp4").ok()
+        );
+        // No extension to swap: `.md` is appended instead.
         assert_eq!(
             get_desired_markdown_path("abc").ok(),
             Some("abc.md".to_string())
         );
+        // A leading dot names a hidden file, it does not start an extension.
+        assert_eq!(
+            get_desired_markdown_path("2025/.hidden").ok(),
+            Some("2025/.hidden.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_disambiguated_md_path() {
+        // Appending keeps the extension, so the fallback name is unique.
+        assert_eq!(
+            disambiguated_markdown_path("2025/02/09/1818-44000.jpg"),
+            Some("2025/02/09/1818-44000.jpg.md".to_string())
+        );
+        assert_ne!(
+            disambiguated_markdown_path("2025/02/09/1818-44000.heic"),
+            disambiguated_markdown_path("2025/02/09/1818-44000.mp4")
+        );
+        // No extension means it would equal the preferred name, so there is none.
+        assert_eq!(disambiguated_markdown_path("abc"), None);
+        assert_eq!(disambiguated_markdown_path("2025/.hidden"), None);
     }
 
     #[test]
     fn test_new_note_body_embeds_sibling_photo() {
         assert_eq!(
-            new_note_body("2025/02/09/1818-44000.jpg"),
+            new_note_body("2025/02/09/1818-44000.jpg", None, None),
             "\n![](1818-44000.jpg)\n"
         );
         // The embed uses the resolved (suffixed) file name, not the bare date name.
         assert_eq!(
-            new_note_body("2025/02/09/1818-44000-ccf63c8.jpg"),
+            new_note_body("2025/02/09/1818-44000-ccf63c8.jpg", None, None),
             "\n![](1818-44000-ccf63c8.jpg)\n"
+        );
+        // A description seeds the body below the embed.
+        assert_eq!(
+            new_note_body("2025/02/09/1818-44000.jpg", None, Some("Low tide.")),
+            "\n![](1818-44000.jpg)\n\nLow tide.\n"
+        );
+        // An empty description is not worth a blank paragraph.
+        assert_eq!(
+            new_note_body("2025/02/09/1818-44000.jpg", None, Some("   ")),
+            "\n![](1818-44000.jpg)\n"
+        );
+    }
+
+    /// The flags are frontmatter booleans, written only when set - and, like the
+    /// other opinions, never re-derived over a hand edit.
+    #[test]
+    fn test_flags_are_written_only_when_set() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let fm = PhotoSorterFrontMatter {
+            checksum: "abc".to_string(),
+            favorite: true,
+            ..PhotoSorterFrontMatter::default()
+        };
+        let md = assemble_markdown(&fm, &None, "")?.into_string();
+        assert!(md.contains("favorite: true"), "got:\n{md}");
+        assert!(
+            !md.contains("archived"),
+            "an unset flag is left out entirely, got:\n{md}"
+        );
+
+        // Un-favourited by hand in the vault. The next run merges the derived
+        // keys in around it and must leave that decision alone rather than
+        // putting the star back.
+        let existing = Some("favorite: false".to_string());
+        let md = assemble_markdown(&fm, &existing, "")?.into_string();
+        assert!(md.contains("favorite: false"), "got:\n{md}");
+        assert!(!md.contains("favorite: true"));
+        assert!(md.contains("checksum: abc"), "got:\n{md}");
+
+        // And a note that already says what the sidecar says is not rewritten
+        // at all, so no file is touched just to restate a flag.
+        let existing = Some("checksum: abc\nfavorite: true".to_string());
+        assert!(matches!(
+            assemble_markdown(&fm, &existing, "body")?,
+            AssembledMarkdown::Unchanged(_)
+        ));
+        Ok(())
+    }
+
+    /// A title heads the prose, and both sit under the embed so the photo stays
+    /// the first thing the note shows.
+    #[test]
+    fn test_new_note_body_puts_title_under_the_embed() {
+        assert_eq!(
+            new_note_body(
+                "2025/02/09/1818-44000.jpg",
+                Some("Sunset"),
+                Some("Low tide.")
+            ),
+            "\n![](1818-44000.jpg)\n\n# Sunset\n\nLow tide.\n"
+        );
+        // A title with no description, and the reverse, each stand alone.
+        assert_eq!(
+            new_note_body("2025/02/09/1818-44000.jpg", Some("Sunset"), None),
+            "\n![](1818-44000.jpg)\n\n# Sunset\n"
+        );
+        assert_eq!(
+            new_note_body("2025/02/09/1818-44000.jpg", Some(" "), Some("Low tide.")),
+            "\n![](1818-44000.jpg)\n\nLow tide.\n"
         );
     }
 
     fn mfi_with_supp(
-        geo: Option<crate::supplemental_info::SupplementalInfoGeoData>,
+        geo: Option<crate::metadata::supplemental::SupplementalInfoGeoData>,
         people: &[&str],
     ) -> MediaFileInfo {
-        use crate::supplemental_info::{PsSupplementalInfo, SupplementalInfoPerson};
+        use crate::metadata::supplemental::{PsSupplementalInfo, SupplementalInfoPerson};
         let mut m = MediaFileInfo::new_for_test();
         m.supp_info = Some(PsSupplementalInfo {
             geo_data: geo,
-            geo_data_exif: None,
             people: people
                 .iter()
                 .map(|n| SupplementalInfoPerson {
                     name: Some(n.to_string()),
                 })
                 .collect(),
-            photo_taken_time: None,
-            creation_time: None,
+            ..PsSupplementalInfo::default()
         });
         m
     }
 
     #[test]
     fn test_mfm_people_albums_and_supplemental_gps() {
-        use crate::supplemental_info::SupplementalInfoGeoData;
+        use crate::metadata::supplemental::SupplementalInfoGeoData;
         // People come from supplemental metadata; blank names are dropped. GPS is
         // taken from supplemental geo_data when EXIF has none.
         let geo = SupplementalInfoGeoData {
@@ -623,18 +943,62 @@ checksum: abcdefg
         assert_eq!(mfm.longitude, Some(152.2605));
     }
 
+    /// The note's coordinates are whatever [`best_guess_lat_long`] resolved, for
+    /// every kind of source. This is the guarantee centralising bought: the two
+    /// used to be separate implementations that disagreed, so a video had
+    /// coordinates in the database and none in its note, and a photo with both
+    /// Google geo fields set could be placed differently in each.
     #[test]
-    fn test_mfm_null_island_gps_is_dropped() {
-        use crate::supplemental_info::SupplementalInfoGeoData;
-        // Google writes 0,0 to mean "no location"; it must not be recorded.
-        let geo = SupplementalInfoGeoData {
-            latitude: Some(0.0),
-            longitude: Some(0.0),
+    fn test_mfm_gps_matches_the_shared_resolver() {
+        use crate::metadata::exif::PsExifInfo;
+        use crate::metadata::supplemental::{PsSupplementalInfo, SupplementalInfoGeoData};
+        use crate::metadata::track::PsTrackInfo;
+
+        let geo = |lat: f64, long: f64| SupplementalInfoGeoData {
+            latitude: Some(lat),
+            longitude: Some(long),
         };
-        let m = mfi_with_supp(Some(geo), &[]);
-        let mfm = mfm_from_media_file_info(&m, &[]);
-        assert_eq!(mfm.latitude, None);
-        assert_eq!(mfm.longitude, None);
+
+        // A video with GPS only in its track metadata - the case the note used
+        // to miss entirely.
+        let mut video = MediaFileInfo::new_for_test();
+        video.track_info = Some(PsTrackInfo {
+            gps_iso_6709: Some("+27.5916+086.5640/".to_string()),
+            latitude: Some(27.5916),
+            longitude: Some(86.5640),
+            ..Default::default()
+        });
+
+        // A photo carrying both of Google's geo fields, which the two
+        // implementations used to rank in opposite orders.
+        let mut both_geo = MediaFileInfo::new_for_test();
+        both_geo.supp_info = Some(PsSupplementalInfo {
+            geo_data: Some(geo(5.0, 6.0)),
+            geo_data_exif: Some(geo(3.0, 4.0)),
+            ..PsSupplementalInfo::default()
+        });
+
+        // EXIF present, which must still outrank everything else.
+        let mut with_exif = both_geo.clone();
+        with_exif.exif_info = Some(PsExifInfo {
+            latitude: Some(1.0),
+            longitude: Some(2.0),
+            ..Default::default()
+        });
+
+        for info in [&video, &both_geo, &with_exif] {
+            let mfm = mfm_from_media_file_info(info, &[]);
+            assert_eq!(
+                (mfm.latitude, mfm.longitude),
+                best_guess_lat_long(info).unzip(),
+                "note coordinates must be exactly what the shared resolver returns"
+            );
+        }
+        // And the video really does get coordinates now, rather than silently none.
+        assert_eq!(
+            mfm_from_media_file_info(&video, &[]).latitude,
+            Some(27.5916)
+        );
     }
 
     #[test]
@@ -693,15 +1057,5 @@ checksum: abcdefg
             "re-running over current frontmatter must not rewrite the sidecar"
         );
         Ok(())
-    }
-
-    #[test]
-    fn test_malformed_frontmatter_errors_rather_than_dropping_metadata() {
-        crate::test_util::setup_log();
-        // Unparseable YAML must surface as an error so the caller leaves the file
-        // untouched, instead of silently discarding the generated metadata.
-        assert!(merge_yaml(&Some("foo: [unclosed".to_string()), &get_mfi()).is_err());
-        // A non-mapping root is equally unusable.
-        assert!(merge_yaml(&Some("- a\n- b\n".to_string()), &get_mfi()).is_err());
     }
 }

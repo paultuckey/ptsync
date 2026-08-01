@@ -29,6 +29,9 @@ app-independent archive you can back up anywhere, this is for you.
 - **Plain-text & future-proof** - every photo and video gets a sibling Markdown file with
   its metadata in [YAML](https://en.wikipedia.org/wiki/YAML) frontmatter, readable in any
   editor and friendly to tools like [Obsidian](https://obsidian.md/).
+- **Reads XMP sidecars** - ratings, keywords, titles and named faces written by Lightroom,
+  darktable, digiKam or ExifTool are picked up and folded into the Markdown, so a library
+  you have already curated arrives with its work intact.
 - **Albums travel with you** - Google (JSON) and iCloud (CSV) albums become Markdown files
   under `albums/`.
 - **Non-destructive & repeatable** - additive only, and idempotent: running it again
@@ -54,13 +57,13 @@ archive/
 ├── 2024/
 │   └── 07/
 │       └── 15/
-│           ├── 1430-22417.heic          # taken 14:30:22.417
-│           ├── 1430-22417.md            # metadata + your editable notes
-│           ├── 1430-22417-a1b2c3d.jpg   # same instant, different photo → checksum suffix
+│           ├── 1430-22417.heic              # taken 14:30:22.417
+│           ├── 1430-22417.md                # metadata + your editable notes
+│           ├── 1430-22417-a1b2c3d.jpg       # same instant and format → checksum suffix
 │           └── 1430-22417-a1b2c3d.md
-├── undated/                             # no reliable date → named by checksum
+├── undated/                                 # no reliable date → named by checksum
 │   ├── 9f8e7d6.png
-│   └── 9f8e7d6.md
+│   └── 9f8e7d6.png.md
 └── albums/
     └── summer-trip-2024.md
 ```
@@ -77,14 +80,34 @@ people:
   - "[[Paul]]"
 albums:
   - "[[Summer trip 2024]]"
+tags:
+  - beach
+  - Places/United-Kingdom/Brighton
+rating: 4
+label: Red
+title: Sunset over the pier
+favorite: true
 latitude: 12.3456
 longitude: -78.9012
 ---
 
 ![](1430-22417.heic)
 
+# Sunset over the pier
+
+Long exposure from the end of the pier, just after the tide turned.
+
 Add your own notes here - they survive every later run.
 ```
+
+The title and description under the embed come from whatever sidecar had them - `dc:title`
+and `dc:description` in an `.xmp`, or `title` and `description` in a Google Takeout json.
+They are written once, when the note is created, and are yours to edit after that.
+
+`favorite` and `archived` come only from a Google Takeout json, since XMP has no property
+for either, and each is written only when true. They are kept strictly apart from `rating`:
+a five-star rating is not a Google favourite, and a rejected photo (`rating: -1`) is not an
+archived one - reading either as the other would invent an opinion you never expressed.
 
 ## Quick start
 
@@ -160,26 +183,35 @@ ptsync only ever **adds** objects — it never deletes.
 | `ptsync info` | Inspect the metadata ptsync would extract from a single photo, video or album.                                                                        |
 | `ptsync db`   | Scan an archive into a SQLite [database](docs/db-schema.md) of file metadata (helpful for inspection). [Example queries](docs/db-example-queries.md). |
 
-`sync` also accepts `--skip-markdown`, `--skip-media` and `--skip-albums` to process only
-part of an archive. See the full [CLI reference](docs/cli.md) for every option, or run
+`sync` also accepts `--skip-markdown`, `--skip-media`, `--skip-albums` and `--skip-xmp` to
+process only part of an archive. See the full [CLI reference](docs/cli.md) for every option, or run
 `ptsync --help`.
 
 ## How it works
 
-- **Dates** are read from EXIF metadata, supplemental JSON sidecars (common in Google
+- **Dates** are read from EXIF metadata, XMP, supplemental JSON sidecars (common in Google
   Takeout), or the file's modification time as a fallback.
 - **File paths** follow `yyyy/mm/dd/hhmm-ssms.ext` - for example
   `2024/07/15/1430-22417.jpg` is 15 July 2024 at 14:30:22.417. If two *different* photos
   share the same instant, the second gets a checksum suffix
   (`1430-22417-a1b2c3d.jpg`). Files with no determinable date go into `undated/`, named by
   their checksum.
+- **Live photos** are one asset in two files, and are named as one: the motion clip is a
+  sidecar of the still
 - **Duplicates** are detected by a SHA256 checksum over the file's bytes, so identical
   content is stored only once no matter how it was named or where it came from.
 - **Extensions** are corrected by inspecting the file's actual bytes, so a mislabeled
   `.jpg` that is really a `.png` is named correctly.
-- **Per-photo Markdown** is written alongside each file. The YAML frontmatter holds
-  metadata (date, checksum, original paths, people, albums, GPS); the body is yours to
-  edit and is preserved verbatim on every later run.
+- **Per-photo Markdown** is written alongside each file, named `<media file>.md`. The YAML
+  frontmatter holds metadata (date, checksum, original paths, people, albums, GPS, and
+  anything found in an `.xmp` sidecar); the body holds the photo, any title and description
+  its sidecars carried, and whatever you write - and is preserved verbatim on every later
+  run.
+- **XMP sidecars** beside your photos are read, never written. ptsync accepts both naming
+  conventions (`IMG_1234.jpg.xmp` and `IMG_1234.xmp`) and takes ratings, colour labels,
+  titles, keywords, GPS, capture dates and named faces (including
+  [MWG](https://en.wikipedia.org/wiki/Metadata_Working_Group) face regions) from them. Pass
+  `--skip-xmp` to ignore them.
 - **Albums** become Markdown files under `albums/`. The photo list is regenerated each
   run, but anything you write below the `<!-- ptsync:notes -->` marker is kept, so albums
   can be annotated like any other note.
@@ -197,6 +229,20 @@ be taken within the same millisecond, so the checksum makes them unique when nee
 Markdown is widely supported and human-readable without any special software. As with
 [Obsidian](https://obsidian.md/), you can edit the files in any text editor and back the
 directories up to any storage you like.
+
+> Why read XMP but not write it?
+
+XMP is the format the rest of the photo world speaks, so reading it means nothing you have
+already tagged, rated or named is lost on the way in. But XMP describes one file in
+isolation - it has no standard way to say "these photos are an album", and no room for a
+note you write yourself. Those are the things this archive is *for*, so the Markdown file
+stays the master copy and XMP is treated purely as an inbound source.
+
+Because the note is the master copy, values that are opinions rather than facts - `rating`,
+`label`, `title` - are seeded from the sidecar once and then left alone. Change a rating in
+your editor and later runs will respect it. Derived facts like `checksum` and `datetime`
+are always kept current, and list fields like `people`, `tags` and `albums` are merged, never
+truncated.
 
 > What format is the short checksum?
 

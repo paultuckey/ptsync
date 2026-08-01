@@ -20,6 +20,11 @@
 //! [`MediaFileInfo`] is the union of all four. Where they disagree,
 //! [`reconcile`] decides - and it is the only place that does, so a photo's note
 //! and its database row cannot come to different conclusions.
+//!
+//! [`taken`] is the vocabulary those four share for a capture time: the sources
+//! differ not only on *when* a photo was taken but on whether they are quoting a
+//! wall clock or an instant, and that difference decides which day directory it
+//! lands in.
 
 use crate::file_type::{
     AccurateFileType, MetadataType, QuickFileType, determine_file_type, metadata_type,
@@ -38,6 +43,7 @@ mod isobmff;
 pub(crate) mod exif;
 pub(crate) mod reconcile;
 pub(crate) mod supplemental;
+pub(crate) mod taken;
 pub(crate) mod track;
 pub(crate) mod xmp;
 

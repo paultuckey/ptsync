@@ -1,7 +1,7 @@
 use crate::file_type::{QuickFileType, find_quick_file_type};
 use crate::fs::FileSystem;
 use anyhow::Result;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
@@ -122,8 +122,11 @@ pub(crate) fn name_part(file_path_s: &String) -> String {
     file_name_str.to_string_lossy().to_string()
 }
 
-pub(crate) fn timestamp_to_rfc3339(ts: i64) -> Option<String> {
-    DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())
+/// An epoch-millisecond count as the instant it is. Nothing about a Unix
+/// timestamp says what the clock on the wall read, which is why callers wrap
+/// this in [`crate::metadata::taken::TakenAt::Instant`].
+pub(crate) fn timestamp_to_utc(ts: i64) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp_millis(ts)
 }
 
 /// Pair up a latitude/longitude only when both are present and not the `(0, 0)`

@@ -9,6 +9,8 @@
 //! them back off the same file and this module merges the two.
 
 use super::isobmff::parse_mov_extras;
+use super::taken::TakenAt;
+use chrono::DateTime;
 use nom_exif::{MediaKind, MediaParser, MediaSource, TrackInfo, TrackInfoTag};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -17,6 +19,10 @@ use tracing::{debug, warn};
 
 /// Apple's key for the uuid shared by both halves of a live photo.
 const CONTENT_IDENTIFIER_KEY: &str = "com.apple.quicktime.content.identifier";
+
+/// Apple's capture-time key, and the only date in a QuickTime file that records
+/// the zone it was read in. See [`PsTrackInfo::taken_at`].
+const CREATION_DATE_KEY: &str = "com.apple.quicktime.creationdate";
 
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all(serialize = "camelCase"))]
@@ -62,6 +68,47 @@ impl PsTrackInfo {
     /// lose the distinction rather than record it.
     pub(crate) fn display_transform(&self) -> Option<(bool, i32)> {
         Some((self.mirrored?, self.rotation?))
+    }
+
+    /// The clip's capture time, and what the container knew about its zone.
+    ///
+    /// QuickTime holds a date in two places and they are not the same kind of
+    /// thing:
+    ///
+    /// - `moov/meta`'s `com.apple.quicktime.creationdate`, which Apple devices
+    ///   write with a real offset (`2019-02-12T15:27:12+08:00`). Both halves
+    ///   known, so [`TakenAt::Zoned`].
+    /// - `mvhd`'s creation time, seconds since 1904 and nothing else. The
+    ///   ISO-BMFF spec says that is UTC, and phones honour it - but cameras
+    ///   predating GPS overwhelmingly wrote *local* time into it, and many still
+    ///   do. That is why ExifTool leaves the value alone unless you ask for
+    ///   `QuickTimeUTC`.
+    ///
+    /// So `mvhd` is reported as a [`TakenAt::WallClock`]: a reading whose zone
+    /// nothing recorded. Calling it an `Instant` would be asserting UTC, which
+    /// would license a later pass to shift it - correct for an Android clip and
+    /// an hours-long error for a Canon. `WallClock` claims only what is true,
+    /// that these digits are the best reading we have and no offset came with
+    /// them, and it files exactly where the value files today.
+    ///
+    /// The Keys atom is read here rather than taken from `creation_time`
+    /// because that field is whichever of the two `nom_exif` preferred, and by
+    /// the time it is a string the two are indistinguishable - which is the
+    /// whole problem [`TakenAt`] exists to fix.
+    ///
+    /// It is parsed with `%+` rather than as RFC 3339 because Apple writes the
+    /// offset without its colon - `2023-01-18T21:05:38+1300` - which the strict
+    /// grammar rejects. `nom_exif` reads the same key the same lenient way.
+    pub(crate) fn taken_at(&self) -> Option<TakenAt> {
+        if let Some(raw) = self.tags.get(CREATION_DATE_KEY)
+            && let Ok(dt) = DateTime::parse_from_str(raw, "%+")
+        {
+            return Some(TakenAt::Zoned(dt));
+        }
+        // `creation_time` is already normalised by `nom_exif`, so RFC 3339 is
+        // the only spelling that reaches here.
+        let dt = DateTime::parse_from_rfc3339(self.creation_time.as_deref()?).ok()?;
+        Some(TakenAt::WallClock(dt.naive_local()))
     }
 }
 
@@ -235,6 +282,53 @@ mod tests {
             Some(&"1".to_string())
         );
         Ok(())
+    }
+
+    /// The distinction `taken_at` exists to draw, on the two real fixtures.
+    ///
+    /// Both clips report a `creation_time` and the strings look alike, but one
+    /// is Apple's Keys atom with a genuine `+13:00` and the other is `mvhd`,
+    /// which recorded no zone at all. Same shape, different claim.
+    #[test]
+    fn test_taken_at_separates_apples_zoned_date_from_a_bare_mvhd() -> anyhow::Result<()> {
+        use anyhow::anyhow;
+        use chrono::DateTime;
+        crate::test_util::setup_log();
+
+        let c = OsFileSystem::new("test/livephoto");
+        let apple = parse_track_info(&mut c.open("IMG_3221.MP4")?)?
+            .ok_or_else(|| anyhow!("no track info"))?;
+        assert_eq!(
+            apple.taken_at(),
+            Some(TakenAt::Zoned(DateTime::parse_from_rfc3339(
+                "2023-01-18T21:05:38+13:00"
+            )?))
+        );
+
+        let c = OsFileSystem::new("test");
+        let plain =
+            parse_track_info(&mut c.open("Hello.mp4")?)?.ok_or_else(|| anyhow!("no track info"))?;
+        assert!(
+            !plain.tags.contains_key(CREATION_DATE_KEY),
+            "fixture must have no Keys date, else it proves nothing"
+        );
+        assert_eq!(
+            plain.taken_at().map(|t| t.to_string()).as_deref(),
+            Some("2024-04-18T11:24:26"),
+            "an mvhd date claims no offset, so it must not print one"
+        );
+        // ...but it still files exactly where it filed before.
+        assert_eq!(
+            plain.taken_at().map(|t| t.to_rfc3339()).as_deref(),
+            Some("2024-04-18T11:24:26+00:00")
+        );
+        Ok(())
+    }
+
+    /// A clip with no date anywhere has none to report.
+    #[test]
+    fn test_taken_at_needs_a_date() {
+        assert_eq!(PsTrackInfo::default().taken_at(), None);
     }
 
     #[test]

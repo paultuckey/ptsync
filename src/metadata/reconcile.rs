@@ -14,6 +14,8 @@
 
 use super::MediaFileInfo;
 use super::exif::best_guess_taken_exif;
+use super::taken::TakenAt;
+use chrono::{FixedOffset, Timelike};
 
 /// Best guess at the date the photo was taken from messy optional data.
 ///
@@ -44,18 +46,204 @@ use super::exif::best_guess_taken_exif;
 /// one form, because [`crate::output_path::get_desired_media_path`] parses it
 /// back and files anything it cannot read under `undated/` — a source that
 /// returns its own native spelling silently loses the date it just found.
+///
+/// The ranking settles *which reading to believe*, and only that. Two things the
+/// winner may be missing are then taken from the camera's own reading by
+/// [`refine_with_exif`]: the zone it was read in, and the fraction of a second.
+/// Both are EXIF's alone to give, and neither is a question about whose date is
+/// right - which is why they are resolved apart from the ranking and from each
+/// other.
 pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo) -> Option<String> {
+    Some(best_guess_taken(info)?.to_rfc3339())
+}
+
+/// The same answer as [`best_guess_taken_dt`], before it is flattened into a
+/// string that cannot say whether the offset on the end is real.
+///
+/// The ranking above settles *which reading* to believe. This keeps what the
+/// winning source knew about its zone, which is a separate question and the one
+/// that decides whether the reading can be filed as it stands: a
+/// [`TakenAt::WallClock`] or [`TakenAt::Zoned`] is already the local time the
+/// photographer saw, and a [`TakenAt::Instant`] is not and has nothing to say
+/// what it was.
+///
+/// An `Instant` that reaches a consumer still files under its UTC digits, which
+/// is wrong by one offset and the best that can be done with no offset to hand.
+/// [`refine_with_exif`] is what stops most of them getting that far.
+pub(crate) fn best_guess_taken(info: &MediaFileInfo) -> Option<TakenAt> {
+    let whole_second = best_guess_taken_to_the_second(info)?;
+    Some(refine_with_exif(whole_second, info))
+}
+
+/// Take from the camera's own reading the two things the winner may be missing:
+/// the zone it was read in, and the fraction of a second.
+///
+/// Both are answers EXIF alone holds, both are wanted only when the two readings
+/// describe the same shutter press, and that shared question is
+/// [`same_shutter_press`]. They are otherwise independent — a photo can want one,
+/// the other, both or neither — so they are applied in turn rather than as one
+/// decision.
+///
+/// The zone goes on first. Grafting the fraction afterwards keeps whatever
+/// offset that established, because [`TakenAt::with_millis`] preserves the kind
+/// of reading it is handed.
+fn refine_with_exif(whole_second: TakenAt, info: &MediaFileInfo) -> TakenAt {
+    let Some(exif) = best_guess_taken_exif(&info.exif_info) else {
+        return whole_second;
+    };
+    if !same_shutter_press(&whole_second, &exif) {
+        return whole_second;
+    }
+    with_exif_subsec(with_exif_zone(whole_second, &exif), &exif)
+}
+
+/// Whether two readings are one shutter press spelled two ways.
+///
+/// They are matched on **second-of-minute**, not on the instant. Requiring the
+/// same epoch second is the obvious rule and it fails on the common case: a
+/// camera that writes no `OffsetTime` gives a bare wall clock, which has no
+/// instant to compare and which [`TakenAt::instant`] can only read as UTC, so a
+/// photo taken at UTC+13 reads 13 hours off the `photoTakenTime` for the same
+/// shutter press. Every real UTC offset is a whole number of minutes, which
+/// leaves the second-of-minute untouched by the discrepancy — it is the one
+/// field of the two readings that can be compared without knowing the zone.
+///
+/// That match is loose enough to hit by chance once in sixty, so it is bounded
+/// by 26 hours, the spread from UTC-12 to UTC+14. Beyond that the two are not
+/// one instant spelled two ways but two different instants — someone re-dated
+/// the photo in Google Photos — and nothing the camera recorded belongs to the
+/// second they chose.
+fn same_shutter_press(a: &TakenAt, b: &TakenAt) -> bool {
+    const MAX_UTC_OFFSET_SPREAD_S: i64 = 26 * 60 * 60;
+
+    // Second-of-minute is the same in either reading of a clock, offsets being
+    // whole minutes, so it is read off the instant regardless of what kind of
+    // reading each side turned out to be.
+    let (a, b) = (a.instant(), b.instant());
+    a.second() == b.second() && (a - b).num_seconds().abs() <= MAX_UTC_OFFSET_SPREAD_S
+}
+
+/// Give an [`TakenAt::Instant`] the wall clock EXIF kept for it.
+///
+/// Takeout exports `photoTakenTime` as a bare epoch and no offset, so a Google
+/// photo arrives knowing when it was taken and not what the clock said - and
+/// the archive files by what the clock said. The camera's own reading is the
+/// missing half, and it is usually still in the file: Takeout strips plenty but
+/// rarely the EXIF date.
+///
+/// Two ways to get there, and only the second is arithmetic:
+///
+/// - EXIF carried an `OffsetTime` tag, so the offset is *stated*. Nothing is
+///   derived and nothing can go wrong beyond the two readings not belonging
+///   together, which [`same_shutter_press`] has already ruled out.
+/// - EXIF is a bare wall clock, so the offset is the difference between the two.
+///   That difference is exact rather than approximate: `photoTakenTime` is not
+///   an independent clock but Google's own reading of this EXIF value in a zone
+///   it inferred, so when the two describe one shutter press the gap between
+///   them is precisely that zone. Hence [`whole_minute_offset`] rejects rather
+///   than rounds - a ragged difference is not a timezone measured sloppily, it
+///   is evidence that these are two different instants after all.
+///
+/// Only an `Instant` is touched. A `WallClock` or `Zoned` winner is already the
+/// local reading the archive wants, and a wall clock with no offset files
+/// correctly whether or not anyone ever works out which zone it was.
+fn with_exif_zone(winner: TakenAt, exif: &TakenAt) -> TakenAt {
+    let TakenAt::Instant(instant) = &winner else {
+        return winner;
+    };
+    let (wall, offset) = match exif {
+        TakenAt::Zoned(dt) => (dt.naive_local(), *dt.offset()),
+        TakenAt::WallClock(wall) => {
+            // Whole seconds on both sides. EXIF's fraction is one Takeout
+            // truncated away when it stored the timestamp, and keeping it here
+            // would make an exact offset look like a ragged one.
+            let Some(offset) =
+                whole_minute_offset(wall.and_utc().timestamp() - instant.timestamp())
+            else {
+                return winner;
+            };
+            (*wall, offset)
+        }
+        // Two instants say nothing about a wall clock between them.
+        TakenAt::Instant(_) => return winner,
+    };
+    wall.and_local_timezone(offset)
+        .single()
+        .map_or(winner, TakenAt::Zoned)
+}
+
+/// A difference between two readings, as a UTC offset — or `None` when it is not
+/// one.
+///
+/// Nothing is rounded to get here. Every real UTC offset is a whole number of
+/// minutes inside `-12:00 ..= +14:00`, and the difference this is handed is
+/// exact when the two readings are the same shutter press, so anything failing
+/// either test is evidence about the *readings* rather than a zone in need of
+/// tidying up. Snapping it to the nearest quarter hour would manufacture an
+/// offset out of the one signal that says there isn't one.
+fn whole_minute_offset(seconds: i64) -> Option<FixedOffset> {
+    if seconds % 60 != 0 || !(-12 * 3600..=14 * 3600).contains(&seconds) {
+        return None;
+    }
+    FixedOffset::east_opt(i32::try_from(seconds).ok()?)
+}
+
+/// Fill in the sub-second part of a date whose whole second is already settled.
+///
+/// Ranking the sources and choosing the precision are separate questions, and
+/// collapsing them gets one of the two wrong. `photoTakenTime` outranks EXIF —
+/// it is editable in the Google Photos UI, so it can be a human correction — but
+/// Takeout stores it as integer *seconds*. Let it win outright and every photo
+/// in a Takeout lands on `...000`, including the bursts, where the frames differ
+/// only in the fraction. So the higher-ranked source keeps the second it chose
+/// and EXIF is asked only for the digits it alone holds.
+///
+/// A winner that already carries a fraction (an XMP `photoshop:DateCreated`) is
+/// left alone: it outranks EXIF on precision for the same reason it outranks it
+/// on the date. When EXIF is itself the winner this is a no-op — the fraction is
+/// already there, and grafting it back on changes nothing.
+///
+/// Whether the two readings belong together is [`same_shutter_press`]'s
+/// question, already settled by the time this is called.
+fn with_exif_subsec(whole_second: TakenAt, exif: &TakenAt) -> TakenAt {
+    // The fraction is the same in either reading of a clock, offsets being whole
+    // minutes, so it is read off the instant regardless of what kind of reading
+    // each side turned out to be.
+    let millis = exif.instant().timestamp_subsec_millis();
+    if millis == 0 || whole_second.instant().nanosecond() != 0 {
+        return whole_second;
+    }
+    whole_second.with_millis(millis).unwrap_or(whole_second)
+}
+
+/// The source ranking itself — see [`best_guess_taken`], which adds the fraction
+/// to what this returns.
+///
+/// Each source is wrapped in the [`TakenAt`] case that says what it actually
+/// knew. That is not a property of the *date* but of where it came from, which
+/// is why it is decided here beside the ranking rather than inferred later from
+/// a string: an epoch-valued source can only ever yield an `Instant`, and no
+/// amount of looking at `2024-05-22T00:17:51+00:00` afterwards will reveal that
+/// the `+00:00` was Google's and not a photographer's.
+fn best_guess_taken_to_the_second(info: &MediaFileInfo) -> Option<TakenAt> {
     // -- human tier --
-    if let Some(dt) = info.xmp_info.as_ref().and_then(|x| x.datetime.clone()) {
+    if let Some(dt) = info
+        .xmp_info
+        .as_ref()
+        .and_then(|x| x.datetime.as_deref())
+        .and_then(TakenAt::parse)
+    {
         return Some(dt);
     }
+    // Takeout exports a Unix timestamp and no offset, so what a photo's clock
+    // read is simply not in the json - see `SupplementalInfoDateTime`.
     if let Some(dt) = info
         .supp_info
         .as_ref()
         .and_then(|si| si.photo_taken_time.as_ref())
-        .and_then(|si_dt| si_dt.timestamp_s_as_iso_8601())
+        .and_then(|si_dt| si_dt.timestamp_as_utc())
     {
-        return Some(dt);
+        return Some(TakenAt::Instant(dt));
     }
 
     // -- camera tier --
@@ -65,11 +253,7 @@ pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo) -> Option<String> {
     }
     // Videos have no EXIF; their capture time lives in the track metadata, which
     // is the embedded-metadata equivalent of EXIF DateTimeOriginal for images.
-    if let Some(dt) = info
-        .track_info
-        .as_ref()
-        .and_then(|ti| ti.creation_time.clone())
-    {
+    if let Some(dt) = info.track_info.as_ref().and_then(|ti| ti.taken_at()) {
         return Some(dt);
     }
 
@@ -81,21 +265,17 @@ pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo) -> Option<String> {
         .supp_info
         .as_ref()
         .and_then(|si| si.creation_time.as_ref())
-        .and_then(|si_dt| si_dt.timestamp_s_as_iso_8601())
+        .and_then(|si_dt| si_dt.timestamp_as_utc())
     {
-        return Some(dt);
+        return Some(TakenAt::Instant(dt));
     }
-    if let Some(dt) = info.modified {
-        let o = crate::util::timestamp_to_rfc3339(dt);
-        if let Some(dt) = o {
-            return Some(dt);
-        }
+    // A filesystem timestamp is an epoch count like Google's, and just as silent
+    // about the clock on the wall.
+    if let Some(dt) = info.modified.and_then(crate::util::timestamp_to_utc) {
+        return Some(TakenAt::Instant(dt));
     }
-    if let Some(dt) = info.created {
-        let o = crate::util::timestamp_to_rfc3339(dt);
-        if let Some(dt) = o {
-            return Some(dt);
-        }
+    if let Some(dt) = info.created.and_then(crate::util::timestamp_to_utc) {
+        return Some(TakenAt::Instant(dt));
     }
     None
 }
@@ -252,6 +432,213 @@ fn non_blank(s: Option<&str>) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// The kinds, not the digits. Every source lands in the [`TakenAt`] case
+    /// that matches what it actually knew, and the two that spell themselves
+    /// `+00:00` are no longer the same value.
+    ///
+    /// This is what makes a later offset repair possible: it can find the
+    /// `Instant`s - the readings with no wall clock of their own - without
+    /// having to guess which `+00:00` was real.
+    #[test]
+    fn test_each_source_reports_what_it_knew_about_the_zone() -> anyhow::Result<()> {
+        use crate::metadata::exif::PsExifInfo;
+        use crate::metadata::supplemental::{PsSupplementalInfo, SupplementalInfoDateTime};
+        use crate::metadata::track::PsTrackInfo;
+        use anyhow::anyhow;
+        use std::collections::HashMap;
+
+        let kind_of = |info: &MediaFileInfo| -> anyhow::Result<String> {
+            let taken = best_guess_taken(info).ok_or_else(|| anyhow!("no date guessed"))?;
+            Ok(match taken {
+                TakenAt::WallClock(_) => "wall".to_string(),
+                TakenAt::Zoned(_) => "zoned".to_string(),
+                TakenAt::Instant(_) => "instant".to_string(),
+            })
+        };
+
+        // A file's mtime is an epoch count and says nothing about a wall clock.
+        let mut info = MediaFileInfo::new_for_test();
+        info.modified = Some(1_000_000_000_000);
+        assert_eq!(kind_of(&info)?, "instant");
+
+        // A video's `mvhd` date records no zone, so it claims none.
+        info = MediaFileInfo::new_for_test();
+        info.track_info = Some(PsTrackInfo {
+            creation_time: Some("2024-04-18T11:24:26+00:00".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(kind_of(&info)?, "wall");
+
+        // Apple's Keys atom on the same clip does, and outranks it.
+        if let Some(ti) = info.track_info.as_mut() {
+            ti.tags.insert(
+                "com.apple.quicktime.creationdate".to_string(),
+                "2023-01-18T21:05:38+1300".to_string(),
+            );
+        }
+        assert_eq!(kind_of(&info)?, "zoned");
+
+        // A bare EXIF reading is the camera's display and nothing more.
+        info = MediaFileInfo::new_for_test();
+        let with_date = |raw: &str| {
+            let mut tags = HashMap::new();
+            tags.insert(
+                nom_exif::ExifTag::DateTimeOriginal.to_string(),
+                raw.to_string(),
+            );
+            Some(PsExifInfo {
+                tags,
+                ..Default::default()
+            })
+        };
+        info.exif_info = with_date("2014:12:25 14:51:26");
+        assert_eq!(kind_of(&info)?, "wall");
+
+        // ...and one with an `OffsetTime` tag knows both halves.
+        info.exif_info = with_date("2014-12-25T14:51:26+11:00");
+        assert_eq!(kind_of(&info)?, "zoned");
+
+        // Google's `photoTakenTime` outranks EXIF and is a bare epoch, so on its
+        // own it wins the ranking and loses the wall clock.
+        let takeout = || {
+            Some(PsSupplementalInfo {
+                photo_taken_time: Some(SupplementalInfoDateTime::new_for_test("1419479486")),
+                ..PsSupplementalInfo::default()
+            })
+        };
+        info = MediaFileInfo::new_for_test();
+        info.supp_info = takeout();
+        assert_eq!(kind_of(&info)?, "instant");
+
+        // ...but with the camera's reading still in the file to say what the
+        // clock read, it is an instant no longer. This is `with_exif_zone`.
+        info.exif_info = with_date("2014-12-25T14:51:26+11:00");
+        assert_eq!(kind_of(&info)?, "zoned");
+        info.exif_info = with_date("2014:12:25 14:51:26");
+        assert_eq!(kind_of(&info)?, "zoned");
+        Ok(())
+    }
+
+    /// A Takeout photo whose EXIF date Google stripped, which is the case
+    /// nothing can repair: the instant is known, no reading of the clock
+    /// survives anywhere, and there is nothing to derive an offset from.
+    ///
+    /// It files under its UTC digits, in the small hours of the right day rather
+    /// than the afternoon it was taken. That is the residue `--assume-timezone`
+    /// would be for; it is not something to guess at here.
+    #[test]
+    fn test_an_instant_with_nothing_to_corroborate_it_files_as_utc() -> anyhow::Result<()> {
+        use crate::metadata::supplemental::{PsSupplementalInfo, SupplementalInfoDateTime};
+
+        let mut info = MediaFileInfo::new_for_test();
+        info.supp_info = Some(PsSupplementalInfo {
+            // 2014-12-25T03:51:26Z - a quarter to three in the afternoon at
+            // UTC+11, filed in the small hours because the offset is gone.
+            photo_taken_time: Some(SupplementalInfoDateTime::new_for_test("1419479486")),
+            ..PsSupplementalInfo::default()
+        });
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2014-12-25T03:51:26+00:00")
+        );
+        assert_eq!(
+            crate::output_path::get_desired_media_path("abc1234", &best_guess_taken_dt(&info)),
+            "2014/12/25/0351-26000"
+        );
+        Ok(())
+    }
+
+    /// The repair itself, end to end and in the units that matter: the same
+    /// photo, the same Takeout json, filed in the afternoon it was taken because
+    /// the camera's reading was still in the file to say so.
+    ///
+    /// Both spellings of the camera's half get there. The `+11:00` case is the
+    /// offset stated outright; the bare case derives it, and 14:51:26 local
+    /// against 03:51:26Z is exactly eleven hours - no rounding involved, and
+    /// none wanted.
+    #[test]
+    fn test_exif_puts_a_takeout_photo_back_in_its_own_afternoon() -> anyhow::Result<()> {
+        use crate::metadata::exif::PsExifInfo;
+        use crate::metadata::supplemental::{PsSupplementalInfo, SupplementalInfoDateTime};
+        use std::collections::HashMap;
+
+        let mut info = MediaFileInfo::new_for_test();
+        info.supp_info = Some(PsSupplementalInfo {
+            photo_taken_time: Some(SupplementalInfoDateTime::new_for_test("1419479486")),
+            ..PsSupplementalInfo::default()
+        });
+        for raw in ["2014-12-25T14:51:26+11:00", "2014:12:25 14:51:26"] {
+            let mut tags = HashMap::new();
+            tags.insert(nom_exif::ExifTag::DateTimeOriginal.to_string(), raw.into());
+            info.exif_info = Some(PsExifInfo {
+                tags,
+                ..Default::default()
+            });
+            assert_eq!(
+                best_guess_taken_dt(&info).as_deref(),
+                Some("2014-12-25T14:51:26+11:00"),
+                "from EXIF {raw:?}"
+            );
+            assert_eq!(
+                crate::output_path::get_desired_media_path("abc1234", &best_guess_taken_dt(&info)),
+                "2014/12/25/1451-26000",
+                "from EXIF {raw:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The guards, each on its own. A difference that is not a whole number of
+    /// minutes, or is larger than any zone, is not an offset - and is left
+    /// alone rather than tidied into one.
+    #[test]
+    fn test_a_ragged_difference_is_not_treated_as_a_zone() -> anyhow::Result<()> {
+        use crate::metadata::exif::PsExifInfo;
+        use crate::metadata::supplemental::{PsSupplementalInfo, SupplementalInfoDateTime};
+        use std::collections::HashMap;
+
+        // Google says 2014-12-25T03:51:26Z throughout.
+        let filed_from = |exif_raw: &str| {
+            let mut tags = HashMap::new();
+            tags.insert(
+                nom_exif::ExifTag::DateTimeOriginal.to_string(),
+                exif_raw.to_string(),
+            );
+            let mut info = MediaFileInfo::new_for_test();
+            info.supp_info = Some(PsSupplementalInfo {
+                photo_taken_time: Some(SupplementalInfoDateTime::new_for_test("1419479486")),
+                ..PsSupplementalInfo::default()
+            });
+            info.exif_info = Some(PsExifInfo {
+                tags,
+                ..Default::default()
+            });
+            best_guess_taken_dt(&info)
+        };
+
+        // Eleven hours and thirty seconds. A camera clock adrift, or two photos
+        // conflated - either way not a zone, and snapping it to +11:00 would be
+        // inventing one.
+        assert_eq!(
+            filed_from("2014:12:25 14:51:56").as_deref(),
+            Some("2014-12-25T03:51:26+00:00"),
+            "a difference of whole minutes is required"
+        );
+        // Same second-of-minute, but a year apart: someone re-dated the photo.
+        assert_eq!(
+            filed_from("2013:12:25 14:51:26").as_deref(),
+            Some("2014-12-25T03:51:26+00:00"),
+            "beyond 26 hours the two are different instants"
+        );
+        // A plausible whole-minute gap no zone actually reaches.
+        assert_eq!(
+            filed_from("2014:12:25 19:51:26").as_deref(),
+            Some("2014-12-25T03:51:26+00:00"),
+            "+16:00 is not a zone"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_best_guess_taken_dt_timestamps() -> anyhow::Result<()> {
         use anyhow::anyhow;
@@ -370,6 +757,126 @@ mod tests {
         assert_eq!(
             best_guess_taken_dt(&info).as_deref(),
             Some("2024-04-18T11:24:26+00:00")
+        );
+    }
+
+    /// The second comes from the ranking, the fraction from EXIF. Google's
+    /// `photoTakenTime` wins the second and has no fraction to give; the
+    /// camera's `SubSecTimeOriginal` fills it in.
+    #[test]
+    fn test_subsec_refines_a_higher_ranked_whole_second() {
+        use crate::metadata::exif::PsExifInfo;
+        use crate::metadata::supplemental::{PsSupplementalInfo, SupplementalInfoDateTime};
+        use std::collections::HashMap;
+
+        let with_exif = |info: &mut MediaFileInfo, date: &str, subsec: &str| {
+            let mut tags = HashMap::new();
+            tags.insert(
+                nom_exif::ExifTag::DateTimeOriginal.to_string(),
+                date.to_string(),
+            );
+            tags.insert(
+                nom_exif::ExifTag::SubSecTimeOriginal.to_string(),
+                subsec.to_string(),
+            );
+            info.exif_info = Some(PsExifInfo {
+                tags,
+                ..Default::default()
+            });
+        };
+        let taken_at = |ts: &str| PsSupplementalInfo {
+            photo_taken_time: Some(SupplementalInfoDateTime::new_for_test(ts)),
+            ..PsSupplementalInfo::default()
+        };
+
+        // The case the epoch-second rule cannot see. Takeout says
+        // 2014-12-25T03:51:26Z; the camera wrote a bare local wall clock 11
+        // hours ahead, read as UTC. Different instants as spelled, one shutter
+        // press in fact - and the matching second-of-minute is what says so.
+        //
+        // Takeout still settles which second it was; EXIF supplies the fraction,
+        // and - since the winner is an `Instant` with no wall clock of its own -
+        // the zone as well. The result is the same moment Google recorded, now
+        // spelled in the local time it was taken in.
+        let mut info = MediaFileInfo::new_for_test();
+        info.supp_info = Some(taken_at("1419479486"));
+        with_exif(&mut info, "2014:12:25 14:51:26", "674");
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2014-12-25T14:51:26.674+11:00"),
+            "the winner keeps its second; EXIF supplies the fraction and the zone"
+        );
+
+        // The same when the camera did write an offset: nothing is derived, the
+        // offset is simply taken.
+        with_exif(&mut info, "2014-12-25T14:51:26+11:00", "674");
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2014-12-25T14:51:26.674+11:00")
+        );
+
+        // Someone re-dated the photo in Google Photos: seconds coincide, but a
+        // year apart is no timezone. The camera's fraction is not theirs.
+        info.supp_info = Some(taken_at("1450990286")); // 2015-12-24T20:51:26Z
+        with_exif(&mut info, "2014:12:25 14:51:26", "674");
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2015-12-24T20:51:26+00:00")
+        );
+
+        // Seconds that simply disagree: nothing to graft.
+        info.supp_info = Some(taken_at("1419479487")); // ...:27
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2014-12-25T03:51:27+00:00")
+        );
+
+        // An XMP correction is the more deliberate value on precision too, so
+        // its own fraction stands and EXIF's is not substituted.
+        info.supp_info = Some(taken_at("1419479486"));
+        info.xmp_info = Some(crate::metadata::xmp::PsXmpInfo {
+            datetime: Some("2014-12-25T03:51:26.417+00:00".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2014-12-25T03:51:26.417+00:00")
+        );
+
+        // ...but an XMP date with no fraction still gets one, on the same terms.
+        info.xmp_info = Some(crate::metadata::xmp::PsXmpInfo {
+            datetime: Some("2014-12-25T03:51:26+00:00".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2014-12-25T03:51:26.674+00:00")
+        );
+
+        // With EXIF the winner outright, the fraction is already in place and
+        // refining is a no-op rather than a second helping.
+        info.xmp_info = None;
+        info.supp_info = None;
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2014-12-25T14:51:26.674+00:00")
+        );
+    }
+
+    /// A video has no fraction anywhere: the QuickTime container stores whole
+    /// seconds, and there is no EXIF beside it to borrow from.
+    #[test]
+    fn test_video_stays_on_the_whole_second() {
+        use crate::metadata::track::PsTrackInfo;
+
+        let mut info = MediaFileInfo::new_for_test();
+        info.track_info = Some(PsTrackInfo {
+            creation_time: Some("2023-01-18T08:05:38+00:00".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            best_guess_taken_dt(&info).as_deref(),
+            Some("2023-01-18T08:05:38+00:00")
         );
     }
 

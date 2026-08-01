@@ -31,9 +31,49 @@ pub(crate) fn split_ext(file_name: &str) -> (&str, &str) {
     }
 }
 
+/// A whole path with its file extension removed, dot included
+/// (`2024/07/15/1430-22417.jpg` -> `2024/07/15/1430-22417`).
+///
+/// Only the file name is examined, so a dot in a directory is left alone, and a
+/// name with no extension - or a hidden file, whose leading dot is part of its
+/// name - comes back whole. This is the stem a sidecar is built from: the note
+/// beside a photo ([`crate::markdown::get_desired_markdown_path`]) and the
+/// motion clip beside a live photo's still
+/// ([`crate::sync_cmd::derived_for_clip`]) are both "this path, other
+/// extension".
+pub(crate) fn strip_ext(path: &str) -> &str {
+    let (dir, name) = split_dir(path);
+    let (stem, _) = split_ext(name);
+    &path[..dir.len() + stem.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_strip_ext() {
+        assert_eq!(
+            strip_ext("2024/07/15/1430-22417.jpg"),
+            "2024/07/15/1430-22417"
+        );
+        assert_eq!(strip_ext("1430-22417.jpg"), "1430-22417");
+        // Collision suffixes are part of the stem, so a clip named from a
+        // suffixed still inherits the suffix with it.
+        assert_eq!(
+            strip_ext("a/1430-22417-a1b2c3d.heic"),
+            "a/1430-22417-a1b2c3d"
+        );
+        // Nothing to strip.
+        assert_eq!(strip_ext("a/IMG_1"), "a/IMG_1");
+        assert_eq!(strip_ext(""), "");
+        // A dot in a directory is not an extension.
+        assert_eq!(strip_ext("a.b/IMG_1"), "a.b/IMG_1");
+        // A hidden file is all name.
+        assert_eq!(strip_ext("a/.hidden"), "a/.hidden");
+        // Only the last dot separates.
+        assert_eq!(strip_ext("a/IMG_1.HEIC.json"), "a/IMG_1.HEIC");
+    }
 
     #[test]
     fn test_split_dir_composes_at_every_depth() {

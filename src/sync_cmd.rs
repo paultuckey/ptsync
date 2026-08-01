@@ -3,14 +3,17 @@ use crate::dedup::{DeDuplicationResult, Deduplicator};
 use crate::file_type::QuickFileType;
 use crate::fs::{FileSystem, WritableFileSystem, open_input, open_output};
 use crate::inspect::inspect_media_files;
+use crate::live_photo::detect_live_photo_pairs;
 use crate::markdown::sync_markdown;
-use crate::media::{MediaFileDerivedInfo, MediaFileInfo, media_file_derived_from_media_info};
+use crate::metadata::MediaFileInfo;
+use crate::output_path::{MediaFileDerivedInfo, media_file_derived_from_media_info};
+use crate::path::strip_ext;
 use crate::progress::Progress;
 use crate::util::{ScanInfo, scan_fs};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub(crate) fn main(
     dry_run: bool,
@@ -43,6 +46,14 @@ pub(crate) fn main(
     };
     let album_names_by_path = build_album_membership(&albums);
 
+    // A live photo's clip is a sidecar of its still: both are written, but only
+    // the still gets a note, which names the clip. See `crate::live_photo`.
+    let live_photo_clips = detect_live_photo_pairs(&files);
+    let clips_by_still: HashMap<&str, &str> = live_photo_clips
+        .iter()
+        .map(|(clip, still)| (still.as_str(), clip.as_str()))
+        .collect();
+
     if !skip_media {
         let media_si_files: Vec<ScanInfo> = files
             .iter()
@@ -71,44 +82,89 @@ pub(crate) fn main(
             let media_to_write = deduper.sorted_media();
             info!("Outputting {} photo and video files", media_to_write.len());
             let prog = Progress::new(media_to_write.len() as u64);
-            for media in media_to_write {
+            let mut checksum_by_original_path = HashMap::<&str, &str>::new();
+
+            // Two passes, stills before clips. A live photo's clip is named from
+            // its still (see `derived_for_clip`), so the still's resolved path
+            // has to exist by the time the clip is written - and `sorted_media`
+            // is in checksum order, which says nothing about which half of a
+            // pair comes first. The note loop below splits out for the same
+            // reason.
+            for media in &media_to_write {
+                if live_photo_still_for(&live_photo_clips, media).is_some() {
+                    continue;
+                }
                 prog.inc();
                 let derived = media_file_derived_from_media_info(media)?;
-                let write_r = write_media(
+                write_and_record(
                     media,
                     &derived,
                     dry_run,
                     container.as_ref(),
                     output_container,
+                    &mut final_path_by_checksum,
+                    &mut checksum_by_original_path,
                 );
-                match write_r {
-                    Ok(final_path) => {
-                        let long_checksum = &media.hash_info.long_checksum;
-                        final_path_by_checksum.insert(long_checksum.clone(), final_path.clone());
-                        if !skip_markdown {
-                            let album_names =
-                                album_names_for(&album_names_by_path, &media.original_path);
-                            let sync_md_r = sync_markdown(
-                                dry_run,
-                                media,
-                                &final_path,
-                                &album_names,
-                                output_container,
-                            );
-                            if let Err(e) = sync_md_r {
-                                warn!("Error writing markdown file beside {final_path:?}: {e}");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Error writing media file: {:?}, error: {}",
-                            derived.desired_media_path, e
+            }
+            for media in &media_to_write {
+                let Some(still) = live_photo_still_for(&live_photo_clips, media) else {
+                    continue;
+                };
+                prog.inc();
+                let derived = derived_for_clip(
+                    media,
+                    still,
+                    &checksum_by_original_path,
+                    &final_path_by_checksum,
+                )?;
+                write_and_record(
+                    media,
+                    &derived,
+                    dry_run,
+                    container.as_ref(),
+                    output_container,
+                    &mut final_path_by_checksum,
+                    &mut checksum_by_original_path,
+                );
+            }
+            drop(prog);
+
+            // Notes are written only once every file has landed, because a live
+            // photo's still names its clip and the two are written in checksum
+            // order - the clip may well come after the still.
+            if !skip_markdown {
+                for media in &media_to_write {
+                    let Some(final_path) =
+                        final_path_by_checksum.get(&media.hash_info.long_checksum)
+                    else {
+                        continue; // it failed to write; already warned about above
+                    };
+                    if let Some(still) = live_photo_still_for(&live_photo_clips, media) {
+                        debug!(
+                            "No note for motion clip {final_path}: covered by its still {still}"
                         );
+                        continue;
+                    }
+                    let motion_path = live_photo_clip_output_for(
+                        &clips_by_still,
+                        &checksum_by_original_path,
+                        &final_path_by_checksum,
+                        media,
+                    );
+                    let album_names = album_names_for(&album_names_by_path, &media.original_path);
+                    let sync_md_r = sync_markdown(
+                        dry_run,
+                        media,
+                        final_path,
+                        &album_names,
+                        motion_path.as_deref(),
+                        output_container,
+                    );
+                    if let Err(e) = sync_md_r {
+                        warn!("Error writing markdown file beside {final_path:?}: {e}");
                     }
                 }
             }
-            drop(prog);
         }
     }
 
@@ -140,6 +196,117 @@ pub(crate) fn main(
     }
 
     Ok(())
+}
+
+/// Write one media file and record where it landed, for the maps the note and
+/// album passes read afterwards.
+///
+/// A file that fails to write is warned about and left out of both maps, which
+/// is what makes the later passes skip it rather than name a file that is not
+/// there.
+#[allow(clippy::too_many_arguments)]
+fn write_and_record<'a>(
+    media: &'a MediaFileInfo,
+    derived: &MediaFileDerivedInfo,
+    dry_run: bool,
+    input_container: &dyn FileSystem,
+    output_container: &dyn WritableFileSystem,
+    final_path_by_checksum: &mut HashMap<String, String>,
+    checksum_by_original_path: &mut HashMap<&'a str, &'a str>,
+) {
+    match write_media(media, derived, dry_run, input_container, output_container) {
+        Ok(final_path) => {
+            let long_checksum = &media.hash_info.long_checksum;
+            final_path_by_checksum.insert(long_checksum.clone(), final_path);
+            for original in &media.original_path {
+                checksum_by_original_path.insert(original, long_checksum);
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Error writing media file: {:?}, error: {}",
+                derived.desired_media_path, e
+            );
+        }
+    }
+}
+
+/// Where a live photo's motion clip is written: beside its still, under the
+/// still's name.
+///
+/// The clip is a sidecar of the still, the same way the note is. Its own capture
+/// time is not wrong, but it is not *its* to spend on a name: the two halves are
+/// one shutter press, and left to name themselves they drift apart - the still's
+/// EXIF is a local wall clock while the clip's QuickTime time is UTC, which on a
+/// real iCloud export filed a third of live photos a day away from their own
+/// clip, and sub-second EXIF then splits even the ones that agreed.
+///
+/// Only the path is inherited. The extension still comes from the clip's own
+/// bytes, so a Takeout `.MP4` that is really QuickTime is written `.mov` beside
+/// an `.heic` still. Inheriting the *resolved* path means a still that took a
+/// collision suffix hands it on, keeping the pair together under
+/// `1430-22417-a1b2c3d.{heic,mov}`.
+///
+/// Falls back to the clip's own name when the still is not in the archive - it
+/// failed to write, and was warned about then. A clip named after a still that
+/// is not there would be a sidecar of nothing.
+pub(crate) fn derived_for_clip(
+    clip: &MediaFileInfo,
+    still: &str,
+    checksum_by_original_path: &HashMap<&str, &str>,
+    final_path_by_checksum: &HashMap<String, String>,
+) -> anyhow::Result<MediaFileDerivedInfo> {
+    let mut derived = media_file_derived_from_media_info(clip)?;
+    match checksum_by_original_path
+        .get(still)
+        .and_then(|checksum| final_path_by_checksum.get(*checksum))
+    {
+        Some(still_path) => {
+            derived.desired_media_path = Some(strip_ext(still_path).to_string());
+        }
+        None => {
+            debug!(
+                "Motion clip {:?} keeps its own name: its still {still} is not in the archive",
+                clip.original_file_this_run
+            );
+        }
+    }
+    Ok(derived)
+}
+
+/// The still this media file is the motion clip of, if it is one.
+///
+/// Dedup pools identical bytes under one entry, so a file can carry several
+/// original paths; being a clip at any one of them is enough, since the note
+/// would describe the same bytes either way.
+fn live_photo_still_for<'a>(
+    stills_by_clip: &'a HashMap<String, String>,
+    media: &MediaFileInfo,
+) -> Option<&'a str> {
+    media
+        .original_path
+        .iter()
+        .find_map(|path| stills_by_clip.get(path.as_str()))
+        .map(String::as_str)
+}
+
+/// Where this still's motion clip was written, for a still that has one.
+///
+/// `None` when the file is not a paired still, or when its clip never made it
+/// into the archive - a clip that failed to write must not be named by a note
+/// that would then point at nothing.
+fn live_photo_clip_output_for(
+    clips_by_still: &HashMap<&str, &str>,
+    checksum_by_original_path: &HashMap<&str, &str>,
+    final_path_by_checksum: &HashMap<String, String>,
+    media: &MediaFileInfo,
+) -> Option<String> {
+    let clip = media
+        .original_path
+        .iter()
+        .find_map(|path| clips_by_still.get(path.as_str()))?;
+    let checksum = checksum_by_original_path.get(clip)?;
+    final_path_by_checksum.get(*checksum).cloned()
 }
 
 /// Parse all album files in the scan into `Album`s, logging progress.
@@ -426,14 +593,200 @@ mod tests {
         media.with_extension("md")
     }
 
-    /// Two different files captured in the same millisecond but stored in
-    /// different formats both keep the bare date name (collisions are resolved
-    /// per full name, extension included), so they prefer the same note name.
-    /// One takes it and the other falls back to the appended form; sharing it
-    /// would pool a photo's and a video's `original-paths` under a single
-    /// checksum and leave one of them with no note at all.
+    /// A live photo is one asset in two files: the still owns the note and the
+    /// clip is written beside it without one, named by the still's `motion` key.
+    ///
+    /// Run against the real Takeout export in `test/livephoto` - an iPhone 13
+    /// pair with the sidecar json Google attaches to the still, which the clip
+    /// inherits, so both are dated alike and land in one folder.
     #[test]
-    fn sync_same_instant_different_formats_get_separate_notes() -> anyhow::Result<()> {
+    fn sync_live_photo_gives_the_still_the_note() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let output = temp.path().join("output");
+
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(
+            false,
+            "test/livephoto",
+            &output_s,
+            false,
+            false,
+            false,
+            true,
+        )?;
+
+        // Dated from the sidecar's `photoTakenTime` (1674029138), which outranks
+        // the camera's own reading - but named `2105` rather than `0805`, the
+        // hour Google's bare timestamp reads in UTC. Takeout exports no offset,
+        // so the still's EXIF is asked for the wall clock and says +13:00: the
+        // photo was taken at five past nine in the evening in Wellington, which
+        // is where the same json's `geoData` puts it.
+        //
+        // Without that repair this test and its neighbour below - the same two
+        // files, synced without the json beside them - disagreed by thirteen
+        // hours about when one shutter press happened.
+        let dir = output.join("2023/01/18");
+        // Named for what the bytes are, not what the archive called them:
+        // Takeout handed over a JPEG named `.HEIC` and a QuickTime named `.MP4`.
+        //
+        // One asset, one name, three extensions. The stem is the still's - the
+        // clip is a sidecar of it, like the note - so the fraction is the
+        // still's `SubSecTimeOriginal` of 489 even though the clip's own
+        // QuickTime time has no fraction to offer.
+        assert!(dir.join("2105-38489.jpg").is_file(), "the still is written");
+        assert!(dir.join("2105-38489.mov").is_file(), "the clip is written");
+
+        // ...and exactly one note describes the pair, the still's.
+        let notes: Vec<PathBuf> = files_under(&output)?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+            .collect();
+        assert_eq!(
+            notes,
+            vec![dir.join("2105-38489.md")],
+            "only the still should have a note"
+        );
+        let md = read_to_string(&notes[0])?;
+        assert!(
+            md.contains("- IMG_3221.HEIC") && !md.contains("- IMG_3221.MP4"),
+            "the note describes the still, not the clip:\n{md}"
+        );
+        // The name is now predictable, but the key still earns its place: the
+        // extension is whatever the clip's bytes turned out to be (`.mov` here,
+        // from a file Takeout called `.MP4`), and its absence is how a reader
+        // knows a photo has no clip at all.
+        assert!(
+            md.contains("motion: 2105-38489.mov"),
+            "the note should name its clip:\n{md}"
+        );
+        assert!(
+            md.contains("![](2105-38489.jpg)"),
+            "embeds the still:\n{md}"
+        );
+        // The pair's own coordinates, resolved from the sidecar Google wrote.
+        assert!(
+            md.contains("latitude: -41.2818"),
+            "the note carries the location:\n{md}"
+        );
+        Ok(())
+    }
+
+    /// Without Google's sidecar the two halves date themselves, and disagree:
+    /// the still's EXIF carries `SubSecTimeOriginal` 489 while the clip's
+    /// QuickTime time is a whole second. This is the iCloud shape - that export
+    /// has no sidecars at all - and left to itself the clip would be written
+    /// `2105-38000.mov` beside a `2105-38489.jpg` still. It takes the still's
+    /// name instead.
+    #[test]
+    fn sync_live_photo_clip_takes_the_stills_name() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+        // The pair without the `.supplemental-metadata.json` beside it.
+        for name in ["IMG_3221.HEIC", "IMG_3221.MP4"] {
+            fs::copy(Path::new("test/livephoto").join(name), input.join(name))?;
+        }
+
+        let input_s = input.to_string_lossy().to_string();
+        let output_s = Some(output.to_string_lossy().to_string());
+        main(false, &input_s, &output_s, false, false, false, true)?;
+
+        // The still's own reading: 2023-01-18T21:05:38.489+13:00.
+        let dir = output.join("2023/01/18");
+        assert!(dir.join("2105-38489.jpg").is_file(), "the still is written");
+        assert!(
+            dir.join("2105-38489.mov").is_file(),
+            "the clip takes the still's name, fraction included"
+        );
+        assert!(
+            !dir.join("2105-38000.mov").exists(),
+            "the clip must not name itself from its own whole-second time"
+        );
+        let md = read_to_string(dir.join("2105-38489.md"))?;
+        assert!(
+            md.contains("motion: 2105-38489.mov"),
+            "the note names the clip beside it:\n{md}"
+        );
+        Ok(())
+    }
+
+    /// A clip is a sidecar of its still, so it follows the still wherever the
+    /// still went - including into a different day's folder, and including onto
+    /// a collision-suffixed name - and keeps only its own extension.
+    #[test]
+    fn test_derived_for_clip_follows_the_still() -> anyhow::Result<()> {
+        let mut clip = MediaFileInfo::new_for_test();
+        clip.original_file_this_run = "IMG_1.MP4".to_string();
+        clip.accurate_file_type = crate::file_type::AccurateFileType::Mov;
+
+        let mut checksum_by_original_path = HashMap::new();
+        checksum_by_original_path.insert("IMG_1.HEIC", "still-checksum");
+        let mut final_path_by_checksum = HashMap::new();
+
+        // The still landed on a different day to anything the clip would have
+        // chosen for itself - the still's EXIF is a local wall clock, the clip's
+        // QuickTime time is UTC - and the clip goes with it.
+        final_path_by_checksum.insert(
+            "still-checksum".to_string(),
+            "2023/01/18/2105-38489.jpg".to_string(),
+        );
+        let derived = derived_for_clip(
+            &clip,
+            "IMG_1.HEIC",
+            &checksum_by_original_path,
+            &final_path_by_checksum,
+        )?;
+        assert_eq!(
+            derived.desired_media_path.as_deref(),
+            Some("2023/01/18/2105-38489")
+        );
+        assert_eq!(
+            derived.desired_media_extension, "mov",
+            "the extension stays the clip's own, read from its bytes"
+        );
+
+        // A still pushed onto a checksum suffix hands it on, so the pair stays
+        // together rather than the clip claiming the bare name.
+        final_path_by_checksum.insert(
+            "still-checksum".to_string(),
+            "2023/01/18/2105-38489-a1b2c3d.jpg".to_string(),
+        );
+        let derived = derived_for_clip(
+            &clip,
+            "IMG_1.HEIC",
+            &checksum_by_original_path,
+            &final_path_by_checksum,
+        )?;
+        assert_eq!(
+            derived.desired_media_path.as_deref(),
+            Some("2023/01/18/2105-38489-a1b2c3d")
+        );
+
+        // The still never made it into the archive. Naming the clip after it
+        // would point at nothing, so the clip keeps its own name - here the
+        // `undated/` one it gets with no date of its own.
+        let derived = derived_for_clip(
+            &clip,
+            "IMG_1.HEIC",
+            &checksum_by_original_path,
+            &HashMap::new(),
+        )?;
+        assert_eq!(derived.desired_media_path.as_deref(), Some("undated/tsc"));
+        Ok(())
+    }
+
+    /// Two *unrelated* files captured in the same millisecond and stored in
+    /// different formats both keep the bare date name (collisions are resolved
+    /// per full name, extension included), so they want one note between them.
+    /// Sharing a stem is what makes a live photo; these do not, so there is no
+    /// pair to collapse. The first there keeps the note and the second is warned
+    /// about rather than given an invented name; what must never happen is the
+    /// two sharing a note, pooling their `original-paths` under one checksum.
+    #[test]
+    fn sync_same_instant_different_formats_do_not_share_a_note() -> anyhow::Result<()> {
         crate::test_util::setup_log();
         let temp = tempfile::tempdir()?;
         let input = temp.path().join("input");
@@ -459,49 +812,37 @@ mod tests {
         let output_s = Some(output.to_string_lossy().to_string());
         main(false, &input_s, &output_s, false, false, false, true)?;
 
+        // Both files are written; only the name they share carries a note.
+        assert!(output.join("2023/11/14/2213-20000.jpg").is_file());
+        assert!(output.join("2023/11/14/2213-20000.mp4").is_file());
         let notes: Vec<PathBuf> = files_under(&output)?
             .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "md"))
             .collect();
         assert_eq!(
-            notes.len(),
-            2,
-            "each file must have its own note: {notes:?}"
+            notes,
+            vec![output.join("2023/11/14/2213-20000.md")],
+            "one note, under the preferred name, and no invented second name"
         );
 
-        // Which of the two wins the bare name depends on inspection order, so
-        // the names are checked as a set: one preferred, one disambiguated.
-        let names: BTreeSet<String> = notes
-            .iter()
-            .filter_map(|p| Some(p.file_name()?.to_string_lossy().to_string()))
-            .collect();
+        // It records exactly one of the two - whichever was inspected first -
+        // never both, which is the pooling this guards against.
+        let md = read_to_string(&notes[0])?;
+        let has_jpg = md.contains("- Canon_40D.jpg");
+        let has_mp4 = md.contains("- Hello.mp4");
         assert!(
-            names.contains("2213-20000.md"),
-            "one note should keep the bare date name: {names:?}"
+            has_jpg ^ has_mp4,
+            "the note must record one file, not both:\n{md}"
         );
+        let embedded = if has_jpg {
+            "![](2213-20000.jpg)"
+        } else {
+            "![](2213-20000.mp4)"
+        };
         assert!(
-            names.contains("2213-20000.jpg.md") || names.contains("2213-20000.mp4.md"),
-            "the other should fall back to the appended name: {names:?}"
+            md.contains(embedded),
+            "note should embed its own file:\n{md}"
         );
-
-        // Each note records only its own file, so neither claims the other's
-        // bytes as a duplicate of itself.
-        let bodies = notes
-            .iter()
-            .map(read_to_string)
-            .collect::<Result<Vec<String>, _>>()?;
-        let jpg_md = bodies
-            .iter()
-            .find(|b| b.contains("- Canon_40D.jpg"))
-            .ok_or_else(|| anyhow!("no note recorded the photo: {bodies:?}"))?;
-        let mp4_md = bodies
-            .iter()
-            .find(|b| b.contains("- Hello.mp4"))
-            .ok_or_else(|| anyhow!("no note recorded the video: {bodies:?}"))?;
-        assert!(!jpg_md.contains("- Hello.mp4"));
-        assert!(!mp4_md.contains("- Canon_40D.jpg"));
-        assert!(jpg_md.contains("![](2213-20000.jpg)"));
-        assert!(mp4_md.contains("![](2213-20000.mp4)"));
         Ok(())
     }
 
@@ -815,7 +1156,7 @@ mod tests {
     /// `recorded_checksum`, no re-read). This is the seam real S3 output reuses.
     #[test]
     fn sync_writes_through_writable_trait_to_fake_s3() -> anyhow::Result<()> {
-        use crate::media::media_file_derived_from_media_info;
+        use crate::output_path::media_file_derived_from_media_info;
         use crate::s3_fs::FakeS3FileSystem;
         crate::test_util::setup_log();
 
@@ -840,7 +1181,7 @@ mod tests {
         for media in deduper.sorted_media() {
             let derived = media_file_derived_from_media_info(media)?;
             let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
-            sync_markdown(false, media, &final_path, &[], &out)?;
+            sync_markdown(false, media, &final_path, &[], None, &out)?;
         }
         assert!(out.exists("2024/05/22/0017-51000.jpg"));
         assert!(out.exists("2024/05/22/0017-51000.md"));
@@ -859,7 +1200,7 @@ mod tests {
         for media in deduper.sorted_media() {
             let derived = media_file_derived_from_media_info(media)?;
             let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
-            sync_markdown(false, media, &final_path, &[], &out)?;
+            sync_markdown(false, media, &final_path, &[], None, &out)?;
         }
         assert_eq!(out.walk().len(), before, "re-run must not add new objects");
         Ok(())

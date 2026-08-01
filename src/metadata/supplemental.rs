@@ -1,6 +1,7 @@
 use crate::fs::FileSystem;
 use crate::path::{split_dir, split_ext};
 use crate::util::non_zero_coords;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use tracing::{debug, warn};
@@ -301,17 +302,26 @@ impl SupplementalInfoDateTime {
 }
 
 impl SupplementalInfoDateTime {
+    /// The instant Google recorded.
+    ///
+    /// A Unix timestamp and nothing else - Takeout exports no offset alongside
+    /// it, which is precisely why a photo's local time cannot be recovered from
+    /// the json alone. Callers wrap this in
+    /// [`crate::metadata::taken::TakenAt::Instant`] to keep that gap visible.
+    pub(crate) fn timestamp_as_utc(&self) -> Option<DateTime<Utc>> {
+        let ts = self.timestamp.as_ref()?;
+        let ts_i64 = ts.parse::<i64>().ok()?;
+        let millis = if ts.len() == 10 {
+            // seconds to milliseconds
+            ts_i64.checked_mul(1000)?
+        } else {
+            ts_i64
+        };
+        crate::util::timestamp_to_utc(millis)
+    }
+
     pub(crate) fn timestamp_s_as_iso_8601(&self) -> Option<String> {
-        if let Some(ts) = &self.timestamp
-            && let Ok(ts_i64) = ts.parse::<i64>()
-        {
-            if ts.len() == 10 {
-                // seconds to milliseconds
-                return crate::util::timestamp_to_rfc3339(ts_i64 * 1000);
-            }
-            return crate::util::timestamp_to_rfc3339(ts_i64);
-        }
-        None
+        self.timestamp_as_utc().map(|dt| dt.to_rfc3339())
     }
 }
 // `Default` so a test can name the one or two fields it cares about and leave

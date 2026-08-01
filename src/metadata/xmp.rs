@@ -39,7 +39,7 @@
 //! `rdf:Alt` (language alternatives). [`prop_values`] flattens all of it.
 
 use crate::fs::FileSystem;
-use crate::metadata::exif::exif_datetime_to_rfc3339;
+use crate::metadata::exif::parse_exif_datetime;
 use crate::util::non_zero_coords;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -66,8 +66,14 @@ const MAX_XMP_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all(serialize = "camelCase"))]
 pub(crate) struct PsXmpInfo {
-    /// Capture time, already normalised to RFC 3339 like every other date source
-    /// (see [`crate::metadata::reconcile::best_guess_taken_dt`], which parses it back).
+    /// Capture time, spelled as [`crate::metadata::taken::TakenAt`] writes one
+    /// and read back with `TakenAt::parse` by
+    /// [`crate::metadata::reconcile::best_guess_taken`].
+    ///
+    /// That means an offset appears here only when the sidecar carried one. A
+    /// `photoshop:DateCreated` of `2024-07-15T14:30:22.417` is a wall clock and
+    /// is kept as one, rather than being normalised to `+00:00` and afterwards
+    /// mistaken for a photographer who really was in UTC.
     pub(crate) datetime: Option<String>,
     pub(crate) latitude: Option<f64>,
     pub(crate) longitude: Option<f64>,
@@ -213,7 +219,9 @@ fn collect_from_description(desc: &roxmltree::Node, info: &mut PsXmpInfo) {
         ]
         .into_iter()
         .find_map(|(ns, name)| {
-            prop_value(desc, ns, name).and_then(|v| exif_datetime_to_rfc3339(&v))
+            prop_value(desc, ns, name)
+                .and_then(|v| parse_exif_datetime(&v))
+                .map(|t| t.to_string())
         });
     }
 
@@ -502,10 +510,10 @@ mod tests {
         assert_eq!(info.label.as_deref(), Some("Red"));
         assert_eq!(info.title.as_deref(), Some("Sunset"));
         assert_eq!(info.description.as_deref(), Some("Low tide."));
-        assert_eq!(
-            info.datetime.as_deref(),
-            Some("2024-07-15T14:30:22.417+00:00")
-        );
+        // The sidecar's `photoshop:DateCreated` carries no offset, so neither
+        // does this: it is the wall clock someone saw, and saying `+00:00` would
+        // be claiming they were in London.
+        assert_eq!(info.datetime.as_deref(), Some("2024-07-15T14:30:22.417"));
         // 51 + 30.5/60
         assert_coord(info.latitude, 51.508_333_333);
         // West is negative.
@@ -568,10 +576,7 @@ mod tests {
         // IPTC namespace - resolving by URI makes the two indistinguishable.
         assert_eq!(info.rating, Some(4));
         assert_eq!(info.label.as_deref(), Some("Red"));
-        assert_eq!(
-            info.datetime.as_deref(),
-            Some("2024-07-15T14:30:22.417+00:00")
-        );
+        assert_eq!(info.datetime.as_deref(), Some("2024-07-15T14:30:22.417"));
         assert_eq!(info.people, vec!["Paul"]);
         Ok(())
     }

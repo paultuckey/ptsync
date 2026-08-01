@@ -23,6 +23,18 @@
 //! for the pair - Google writes one sidecar json and attaches it to the still -
 //! and this module extends that to the archive: the still is the asset, and the
 //! clip rides along without a note of its own.
+//!
+//! It rides along in its *name* too. [`crate::sync_cmd::derived_for_clip`] gives
+//! the clip the still's resolved path and changes only the extension, so a pair
+//! is one name with three of them (`1430-22417.heic`, `.mov`, `.md`). Letting
+//! each half name itself pulled them apart: the still's EXIF is a local wall
+//! clock and the clip's QuickTime time is UTC, which on a 690-file iCloud export
+//! filed 11 of 32 live photos a day away from their own clip, and the still's
+//! sub-second EXIF then separated even the ones that had agreed. The `motion`
+//! key in the note stays the thing that records the pairing, because the shared
+//! name is a preference the archive cannot always honour - an unrelated file may
+//! already hold it - and because the clip's extension is not predictable from
+//! the still's.
 
 use crate::file_type::QuickFileType;
 use crate::path::{split_dir, split_ext};
