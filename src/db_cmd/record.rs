@@ -6,14 +6,24 @@ use super::schema::{DB_MEDIA_ITEM_INSERT, DB_MEDIA_PERSON_INSERT, DB_PERSON_INSE
 use crate::metadata::MediaFileInfo;
 use crate::metadata::reconcile::{
     best_guess_archived, best_guess_description, best_guess_favorite, best_guess_lat_long,
-    best_guess_rating, best_guess_taken_dt, best_guess_title,
+    best_guess_rating, best_guess_taken, best_guess_title,
 };
 use crate::util::{GEOHASH_PRECISION, geohash_encode, orientation};
 use turso::{Connection, params};
 
 pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
     let media_info_json = serde_json::to_string(&info)?;
-    let guessed_datetime = best_guess_taken_dt(info);
+    // One resolution, read two ways: the RFC 3339 spelling for the column, and
+    // the offset beside it so a reader can tell a recorded zone from the
+    // placeholder `+00:00` a bare camera reading is written with.
+    let taken = best_guess_taken(info);
+    let guessed_datetime = taken
+        .as_ref()
+        .map(crate::metadata::taken::Taken::to_rfc3339);
+    let guessed_utc_offset_s = taken
+        .as_ref()
+        .and_then(|t| t.offset)
+        .map(|o| i64::from(o.local_minus_utc()));
     let lat_long = best_guess_lat_long(info);
     let (latitude, longitude) = match lat_long {
         Some((lat, long)) => (Some(lat), Some(long)),
@@ -67,6 +77,7 @@ pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow
         quick_file_type: info.quick_file_type.to_string(),
         accurate_file_type: info.accurate_file_type.to_string(),
         guessed_datetime,
+        guessed_utc_offset_s,
         file_size: info.file_size as i64,
         latitude,
         longitude,
@@ -102,6 +113,7 @@ pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow
         item.accurate_file_type.as_str(),
         item.media_info.as_deref(),
         item.guessed_datetime.as_deref(),
+        item.guessed_utc_offset_s,
         item.modified_at,
         item.created_at,
         item.file_size,
@@ -171,6 +183,9 @@ struct DbMediaItem {
     accurate_file_type: String,
     // formatted as ISO 8601
     guessed_datetime: Option<String>,
+    // seconds east of UTC when a source recorded the zone; None means the offset
+    // on `guessed_datetime` is a placeholder rather than a reading
+    guessed_utc_offset_s: Option<i64>,
     modified_at: i64,
     created_at: i64,
     // file size in bytes

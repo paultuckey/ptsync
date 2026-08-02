@@ -93,10 +93,7 @@ impl Deduplicator {
         derived: &MediaFileDerivedInfo,
         output_container: &dyn FileSystem,
     ) -> anyhow::Result<DeDuplicationResult> {
-        let Some(desired_output_path) = &derived.desired_media_path else {
-            debug!("  No desired media path for file: {media_file:?}");
-            return Err(anyhow!("No desired media path for file: {media_file:?}"));
-        };
+        let desired_output_path = &derived.desired_media_path;
         let short_checksum = &media_file.hash_info.short_checksum;
         let long_checksum = &media_file.hash_info.long_checksum;
         let suffixes = [
@@ -192,8 +189,7 @@ mod tests {
         // Nothing exists at the desired path, so it is written as-is.
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/fresh-name".to_string()), "txt");
+        let derived = MediaFileDerivedInfo::new_for_test("duplicates/fresh-name", "txt");
         let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
         assert_eq!(
             res,
@@ -208,7 +204,7 @@ mod tests {
         // to the short-checksum suffix (no -1/-2 counter).
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
-        let derived = MediaFileDerivedInfo::new_for_test(Some("duplicates/one".to_string()), "txt");
+        let derived = MediaFileDerivedInfo::new_for_test("duplicates/one", "txt");
         let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
         assert_eq!(
             res,
@@ -223,8 +219,7 @@ mod tests {
         // content, so the long checksum is used.
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/short-clash".to_string()), "txt");
+        let derived = MediaFileDerivedInfo::new_for_test("duplicates/short-clash", "txt");
         let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
         assert_eq!(
             res,
@@ -239,8 +234,7 @@ mod tests {
         // content, so there is nowhere to write.
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/too-many".to_string()), "txt");
+        let derived = MediaFileDerivedInfo::new_for_test("duplicates/too-many", "txt");
         let res = Deduplicator::resolve_output_path(&mfi, &derived, &c);
         assert_eq!(res.ok(), None);
         Ok(())
@@ -257,7 +251,7 @@ mod tests {
             long_checksum: "6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f"
                 .to_string(),
         };
-        let derived = MediaFileDerivedInfo::new_for_test(Some("Canon_40D".to_string()), "jpg");
+        let derived = MediaFileDerivedInfo::new_for_test("Canon_40D", "jpg");
         let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
         assert_eq!(
             res,

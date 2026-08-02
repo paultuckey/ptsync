@@ -307,7 +307,7 @@ impl SupplementalInfoDateTime {
     /// A Unix timestamp and nothing else - Takeout exports no offset alongside
     /// it, which is precisely why a photo's local time cannot be recovered from
     /// the json alone. Callers wrap this in
-    /// [`crate::metadata::taken::TakenAt::Instant`] to keep that gap visible.
+    /// [`crate::metadata::taken::Taken::instant`] to keep that gap visible.
     pub(crate) fn timestamp_as_utc(&self) -> Option<DateTime<Utc>> {
         let ts = self.timestamp.as_ref()?;
         let ts_i64 = ts.parse::<i64>().ok()?;

@@ -1,6 +1,6 @@
 use crate::album::{Album, build_album_md, parse_album, split_album_notes};
 use crate::dedup::{DeDuplicationResult, Deduplicator};
-use crate::file_type::QuickFileType;
+use crate::file_type::{QuickFileType, file_ext_from_file_type};
 use crate::fs::{FileSystem, WritableFileSystem, open_input, open_output};
 use crate::inspect::inspect_media_files;
 use crate::live_photo::detect_live_photo_pairs;
@@ -95,7 +95,7 @@ pub(crate) fn main(
                     continue;
                 }
                 prog.inc();
-                let derived = media_file_derived_from_media_info(media)?;
+                let derived = media_file_derived_from_media_info(media);
                 write_and_record(
                     media,
                     &derived,
@@ -116,7 +116,7 @@ pub(crate) fn main(
                     still,
                     &checksum_by_original_path,
                     &final_path_by_checksum,
-                )?;
+                );
                 write_and_record(
                     media,
                     &derived,
@@ -255,23 +255,25 @@ pub(crate) fn derived_for_clip(
     still: &str,
     checksum_by_original_path: &HashMap<&str, &str>,
     final_path_by_checksum: &HashMap<String, String>,
-) -> anyhow::Result<MediaFileDerivedInfo> {
-    let mut derived = media_file_derived_from_media_info(clip)?;
+) -> MediaFileDerivedInfo {
     match checksum_by_original_path
         .get(still)
         .and_then(|checksum| final_path_by_checksum.get(*checksum))
     {
-        Some(still_path) => {
-            derived.desired_media_path = Some(strip_ext(still_path).to_string());
-        }
+        // The clip's own capture time is never consulted on this path, which is
+        // the point: it is the still's name the pair is kept together under.
+        Some(still_path) => MediaFileDerivedInfo {
+            desired_media_path: strip_ext(still_path).to_string(),
+            desired_media_extension: file_ext_from_file_type(&clip.accurate_file_type),
+        },
         None => {
             debug!(
                 "Motion clip {:?} keeps its own name: its still {still} is not in the archive",
                 clip.original_file_this_run
             );
+            media_file_derived_from_media_info(clip)
         }
     }
-    Ok(derived)
 }
 
 /// The still this media file is the motion clip of, if it is one.
@@ -738,11 +740,8 @@ mod tests {
             "IMG_1.HEIC",
             &checksum_by_original_path,
             &final_path_by_checksum,
-        )?;
-        assert_eq!(
-            derived.desired_media_path.as_deref(),
-            Some("2023/01/18/2105-38489")
         );
+        assert_eq!(derived.desired_media_path, "2023/01/18/2105-38489");
         assert_eq!(
             derived.desired_media_extension, "mov",
             "the extension stays the clip's own, read from its bytes"
@@ -759,11 +758,8 @@ mod tests {
             "IMG_1.HEIC",
             &checksum_by_original_path,
             &final_path_by_checksum,
-        )?;
-        assert_eq!(
-            derived.desired_media_path.as_deref(),
-            Some("2023/01/18/2105-38489-a1b2c3d")
         );
+        assert_eq!(derived.desired_media_path, "2023/01/18/2105-38489-a1b2c3d");
 
         // The still never made it into the archive. Naming the clip after it
         // would point at nothing, so the clip keeps its own name - here the
@@ -773,8 +769,8 @@ mod tests {
             "IMG_1.HEIC",
             &checksum_by_original_path,
             &HashMap::new(),
-        )?;
-        assert_eq!(derived.desired_media_path.as_deref(), Some("undated/tsc"));
+        );
+        assert_eq!(derived.desired_media_path, "undated/tsc");
         Ok(())
     }
 
@@ -1179,7 +1175,7 @@ mod tests {
         // First pass writes media + sidecars into the fake bucket.
         let out = FakeS3FileSystem::new();
         for media in deduper.sorted_media() {
-            let derived = media_file_derived_from_media_info(media)?;
+            let derived = media_file_derived_from_media_info(media);
             let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
             sync_markdown(false, media, &final_path, &[], None, &out)?;
         }
@@ -1198,7 +1194,7 @@ mod tests {
         // SkipWrite (via the fake's recorded checksum) and the sidecar is unchanged.
         let before = out.walk().len();
         for media in deduper.sorted_media() {
-            let derived = media_file_derived_from_media_info(media)?;
+            let derived = media_file_derived_from_media_info(media);
             let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
             sync_markdown(false, media, &final_path, &[], None, &out)?;
         }

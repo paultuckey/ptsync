@@ -9,7 +9,7 @@
 //! them back off the same file and this module merges the two.
 
 use super::isobmff::parse_mov_extras;
-use super::taken::TakenAt;
+use super::taken::Taken;
 use chrono::DateTime;
 use nom_exif::{MediaKind, MediaParser, MediaSource, TrackInfo, TrackInfoTag};
 use serde::Serialize;
@@ -77,38 +77,43 @@ impl PsTrackInfo {
     ///
     /// - `moov/meta`'s `com.apple.quicktime.creationdate`, which Apple devices
     ///   write with a real offset (`2019-02-12T15:27:12+08:00`). Both halves
-    ///   known, so [`TakenAt::Zoned`].
+    ///   known, so [`Taken::zoned`].
     /// - `mvhd`'s creation time, seconds since 1904 and nothing else. The
     ///   ISO-BMFF spec says that is UTC, and phones honour it - but cameras
     ///   predating GPS overwhelmingly wrote *local* time into it, and many still
     ///   do. That is why ExifTool leaves the value alone unless you ask for
     ///   `QuickTimeUTC`.
     ///
-    /// So `mvhd` is reported as a [`TakenAt::WallClock`]: a reading whose zone
-    /// nothing recorded. Calling it an `Instant` would be asserting UTC, which
-    /// would license a later pass to shift it - correct for an Android clip and
-    /// an hours-long error for a Canon. `WallClock` claims only what is true,
+    /// So `mvhd` is reported as a [`Taken::wall`]: a reading whose zone nothing
+    /// recorded. Calling it an instant would be asserting UTC, which would
+    /// license a later pass to shift it - correct for an Android clip and an
+    /// hours-long error for a Canon. A bare wall clock claims only what is true,
     /// that these digits are the best reading we have and no offset came with
     /// them, and it files exactly where the value files today.
+    ///
+    /// Either way this is the clip's contribution to
+    /// [`crate::metadata::reconcile::best_guess_taken`], both as a ranked source
+    /// and as the embedded reading that repairs a Takeout `photoTakenTime` - the
+    /// video counterpart of what EXIF does for a still.
     ///
     /// The Keys atom is read here rather than taken from `creation_time`
     /// because that field is whichever of the two `nom_exif` preferred, and by
     /// the time it is a string the two are indistinguishable - which is the
-    /// whole problem [`TakenAt`] exists to fix.
+    /// whole problem [`Taken`] exists to fix.
     ///
     /// It is parsed with `%+` rather than as RFC 3339 because Apple writes the
     /// offset without its colon - `2023-01-18T21:05:38+1300` - which the strict
     /// grammar rejects. `nom_exif` reads the same key the same lenient way.
-    pub(crate) fn taken_at(&self) -> Option<TakenAt> {
+    pub(crate) fn taken_at(&self) -> Option<Taken> {
         if let Some(raw) = self.tags.get(CREATION_DATE_KEY)
             && let Ok(dt) = DateTime::parse_from_str(raw, "%+")
         {
-            return Some(TakenAt::Zoned(dt));
+            return Some(Taken::zoned(dt));
         }
         // `creation_time` is already normalised by `nom_exif`, so RFC 3339 is
         // the only spelling that reaches here.
         let dt = DateTime::parse_from_rfc3339(self.creation_time.as_deref()?).ok()?;
-        Some(TakenAt::WallClock(dt.naive_local()))
+        Some(Taken::wall(dt.naive_local()))
     }
 }
 
@@ -300,7 +305,7 @@ mod tests {
             .ok_or_else(|| anyhow!("no track info"))?;
         assert_eq!(
             apple.taken_at(),
-            Some(TakenAt::Zoned(DateTime::parse_from_rfc3339(
+            Some(Taken::zoned(DateTime::parse_from_rfc3339(
                 "2023-01-18T21:05:38+13:00"
             )?))
         );

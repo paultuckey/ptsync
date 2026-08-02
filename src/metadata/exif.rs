@@ -1,4 +1,4 @@
-use super::taken::TakenAt;
+use super::taken::Taken;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use nom_exif::{ExifIter, ExifIterEntry, ExifTag, MediaKind, MediaParser, MediaSource};
 use serde::Serialize;
@@ -188,7 +188,7 @@ fn orientation_transform(raw: &str) -> (bool, i32) {
 /// (`2015:04:18 11:10:44`), and `GPSDateStamp` is a date with no time at all
 /// (`2015:04:17`).
 ///
-/// That fork is exactly [`TakenAt`]'s first two cases, and it is why this
+/// That fork is exactly [`Taken`]'s `wall`/`zoned` split, and it is why this
 /// returns one rather than a string: a bare reading normalised to `+00:00`
 /// cannot afterwards be told apart from a camera that really was set to UTC, and
 /// the two want opposite treatment when a later pass tries to place the photo.
@@ -196,25 +196,25 @@ fn orientation_transform(raw: &str) -> (bool, i32) {
 /// The classification here is purely a matter of *spelling* - what the string
 /// claims about itself. Which tag it came from is a separate question, and one
 /// only [`best_guess_taken_exif`] is in a position to answer.
-pub(crate) fn parse_exif_datetime(raw: &str) -> Option<TakenAt> {
+pub(crate) fn parse_exif_datetime(raw: &str) -> Option<Taken> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
     // Already carries an offset: keep the recorded instant exactly as it stands.
     if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-        return Some(TakenAt::Zoned(dt));
+        return Some(Taken::zoned(dt));
     }
     let normalised = dashed_date_separators(raw);
     for format in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
         if let Ok(naive) = NaiveDateTime::parse_from_str(&normalised, format) {
-            return Some(TakenAt::WallClock(naive));
+            return Some(Taken::wall(naive));
         }
     }
     // `GPSDateStamp` pins down a day and nothing finer; midnight is the only
     // time it justifies.
     if let Ok(date) = NaiveDate::parse_from_str(&normalised, "%Y-%m-%d") {
-        return Some(TakenAt::WallClock(date.and_time(NaiveTime::MIN)));
+        return Some(Taken::wall(date.and_time(NaiveTime::MIN)));
     }
     None
 }
@@ -257,7 +257,7 @@ fn dashed_date_separators(s: &str) -> String {
 /// off the GPS receiver, and GPS time is UTC by definition. It reads as a bare
 /// date like any other, so [`parse_exif_datetime`] cannot know that from the
 /// spelling and this function says so on its behalf.
-pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>) -> Option<TakenAt> {
+pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>) -> Option<Taken> {
     let exif = exif.as_ref()?;
     [
         (ExifTag::DateTimeOriginal, Some(ExifTag::SubSecTimeOriginal)),
@@ -270,7 +270,7 @@ pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>) -> Option<TakenAt
             .as_deref()
             .and_then(parse_exif_datetime)?;
         let dt = if date_tag == ExifTag::GPSDateStamp {
-            TakenAt::Instant(dt.instant())
+            dt.into_instant()
         } else {
             dt
         };
@@ -666,7 +666,7 @@ mod tests {
                 tags,
                 ..Default::default()
             }));
-            crate::output_path::get_desired_media_path("abc1234", &taken.map(|t| t.to_rfc3339()))
+            crate::output_path::get_desired_media_path("abc1234", taken.as_ref())
         };
 
         let names: Vec<String> = ["097", "186", "475", "575", "674", "774"]
@@ -720,7 +720,7 @@ mod tests {
         let reader = c.open("Canon_40D.jpg")?;
         let info = parse_exif_info(reader)?.ok_or_else(|| anyhow!("Failed to parse exif"))?;
         let taken = best_guess_taken_exif(&Some(info)).ok_or_else(|| anyhow!("no exif date"))?;
-        let path = crate::output_path::get_desired_media_path("abc1234", &Some(taken.to_rfc3339()));
+        let path = crate::output_path::get_desired_media_path("abc1234", Some(&taken));
         assert!(!path.starts_with("undated/"), "got {path}");
         Ok(())
     }

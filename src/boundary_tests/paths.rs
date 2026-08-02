@@ -5,36 +5,49 @@
 use super::{escapes_output, hostile_names, real_jpeg};
 use crate::file_type::find_quick_file_type;
 use crate::markdown::get_desired_markdown_path;
+use crate::metadata::taken::Taken;
 use crate::output_path::get_desired_media_path;
 use crate::test_util::setup_log;
 use crate::util::{ScanInfo, dir_part, name_part};
 use anyhow::Result;
+use chrono::{NaiveDate, NaiveDateTime};
 use std::path::{Path, PathBuf};
 
+/// The media path is built from a checksum (always hex) and a [`Taken`], whose
+/// only path-visible field is a `NaiveDateTime`. A datetime used to reach this
+/// as a *string*, so a value crafted to look like traversal was a real concern
+/// and this test fed it several; taking the parsed value instead means no such
+/// string exists to pass. What is left to check is that no date chrono can hold,
+/// the extremes of the calendar included, formats into anything but digits and
+/// separators.
 #[test]
 fn derived_media_paths_never_escape_output() {
     setup_log();
-    // Real short checksums are always hex, so the only attacker-influenced input
-    // to the media path is the datetime string. None of these - including ones
-    // crafted to look like traversal - may produce an escaping path.
     let checksum = "6bfdabd";
-    let datetimes: Vec<Option<String>> = vec![
-        None,
-        Some("2008-05-30T15:56:01Z".to_string()),
-        Some("../../../../etc/passwd".to_string()),
-        Some("/absolute/path".to_string()),
-        Some("not a date at all".to_string()),
-        Some("9999-99-99T99:99:99Z".to_string()),
-        Some("Ñoño 📸".to_string()),
-        Some(String::new()),
+    let dates = [
+        NaiveDate::from_ymd_opt(2008, 5, 30).and_then(|d| d.and_hms_opt(15, 56, 1)),
+        // Year 1, and a year past four digits: neither may produce a component
+        // that reads as a path segment of its own.
+        NaiveDate::from_ymd_opt(1, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0)),
+        NaiveDate::from_ymd_opt(262142, 12, 31).and_then(|d| d.and_hms_opt(23, 59, 59)),
+        // Before the epoch, where the year is negative and prints with a sign.
+        NaiveDate::from_ymd_opt(-4, 2, 29).and_then(|d| d.and_hms_opt(12, 0, 0)),
+        NaiveDateTime::MIN.into(),
+        NaiveDateTime::MAX.into(),
     ];
-    for dt in datetimes {
-        let path = get_desired_media_path(checksum, &dt);
+    for date in dates.into_iter().flatten() {
+        let taken = Taken::wall(date);
+        let path = get_desired_media_path(checksum, Some(&taken));
         assert!(
             !escapes_output(&path),
-            "media path escaped output for datetime {dt:?}: {path}"
+            "media path escaped output for {taken}: {path}"
         );
     }
+    // No date at all is the `undated/` case, and the checksum is all that names
+    // it.
+    let path = get_desired_media_path(checksum, None);
+    assert_eq!(path, "undated/6bfdabd");
+    assert!(!escapes_output(&path));
 }
 
 #[test]

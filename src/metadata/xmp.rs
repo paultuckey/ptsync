@@ -66,8 +66,8 @@ const MAX_XMP_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all(serialize = "camelCase"))]
 pub(crate) struct PsXmpInfo {
-    /// Capture time, spelled as [`crate::metadata::taken::TakenAt`] writes one
-    /// and read back with `TakenAt::parse` by
+    /// Capture time, spelled as [`crate::metadata::taken::Taken`] writes one
+    /// and read back with `Taken::parse` by
     /// [`crate::metadata::reconcile::best_guess_taken`].
     ///
     /// That means an offset appears here only when the sidecar carried one. A

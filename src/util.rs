@@ -124,7 +124,7 @@ pub(crate) fn name_part(file_path_s: &String) -> String {
 
 /// An epoch-millisecond count as the instant it is. Nothing about a Unix
 /// timestamp says what the clock on the wall read, which is why callers wrap
-/// this in [`crate::metadata::taken::TakenAt::Instant`].
+/// this in [`crate::metadata::taken::Taken::instant`].
 pub(crate) fn timestamp_to_utc(ts: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(ts)
 }

@@ -1,123 +1,179 @@
-//! A capture time, and how much its source said about the zone it was read in.
+//! A capture time, in the only terms the archive can file: digits on a clock.
 //!
-//! The archive's layout is a **wall clock**: `2024/07/15/1430-22417.jpg` means
-//! half past two in the afternoon, and there is no way to spell an instant in
-//! that name. So every date source has to be reduced to a wall clock before
-//! [`crate::output_path`] can file it - and the sources do not all have one to
-//! give.
+//! The layout is a **wall clock**: `2024/07/15/1430-22417.jpg` means half past
+//! two in the afternoon, and there is no way to spell an instant in that name.
+//! So the only question a date source has to answer is *what digits go in the
+//! path* - and the sources differ on whether they have any to give.
 //!
-//! Three states, and the archive treats them very differently:
+//! [`Taken`] is those digits, plus two notes about where they came from:
 //!
-//! - [`TakenAt::WallClock`] - the reading a camera's display showed, with no
-//!   offset recorded beside it. We know where to file it and not what instant it
-//!   was. Bare EXIF `DateTimeOriginal` is this, and it is the *common* case.
-//! - [`TakenAt::Zoned`] - a wall clock and the offset it was read in. Both known.
-//!   EXIF with an `OffsetTime` tag, an XMP date someone wrote with a zone, and
-//!   Apple's `com.apple.quicktime.creationdate`.
-//! - [`TakenAt::Instant`] - an epoch-valued reading with no local clock beside
-//!   it. We know what instant it was and not where to file it. Google's
-//!   `photoTakenTime` and a file's mtime are this.
+//! - `offset` - the zone the digits are expressed in, when a source recorded
+//!   one. Bare EXIF `DateTimeOriginal` and a video's `mvhd` date record none,
+//!   and that is the *common* case. Nothing in the output path reads this; it
+//!   exists so the note and the index can say what they actually know.
+//! - `certain` - whether the digits are the reading the photographer saw. An
+//!   epoch-valued source (Google's `photoTakenTime`, a file's mtime) knows the
+//!   instant and not the clock, so its digits are a UTC rendering standing in
+//!   for a wall clock nobody recorded.
 //!
 //! Before this type there was only an RFC 3339 string, and `+00:00` on the end
 //! of one meant either "read in UTC" or "no idea, and these digits are the wall
 //! clock" depending on which parser produced it. Those are opposite claims: the
 //! first says shift these digits to file them, the second says never touch them.
 //! Collapsing them is why a Takeout photo taken at a quarter to three in the
-//! afternoon at UTC+11 is filed under `0351`, in the previous day's directory.
+//! afternoon at UTC+11 was filed under `0351`, in the previous day's directory.
 //!
-//! This type does not fix that - an `Instant` still files under its UTC digits,
-//! because with no offset there is nothing better to do. What it fixes is that
-//! the three cases are now told apart, so a later pass that *learns* an offset
-//! has somewhere to put it: promoting an `Instant` to a `Zoned` is the whole of
-//! that repair, and every consumer picks it up for free.
+//! `certain` is what tells the two apart, and it is the whole of the repair:
+//! [`crate::metadata::reconcile`] looks for a source that has digits when the
+//! winner has none, and swaps them in. A reading that stays uncertain files
+//! under its UTC digits, because with nothing to corroborate it there is
+//! nothing better to do.
 
-use chrono::{DateTime, FixedOffset, NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, Offset, Timelike, Utc};
 use std::fmt;
 
 /// A capture time together with what its source knew about the zone. See the
-/// module docs for why the three cases cannot be flattened into one string.
+/// module docs for what each field is for.
+///
+/// Build one through [`Taken::wall`], [`Taken::zoned`] or [`Taken::instant`],
+/// which are the three shapes a source can arrive in and which keep `offset`
+/// and `certain` consistent with each other.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TakenAt {
-    /// A local reading with no offset recorded: the digits are the wall clock,
-    /// and the instant they name is unknown.
-    WallClock(NaiveDateTime),
-    /// A local reading and the offset it was taken in: both known.
-    Zoned(DateTime<FixedOffset>),
-    /// An instant with no local reading: the moment is known, the wall clock the
-    /// photographer saw is not.
-    Instant(DateTime<Utc>),
+pub(crate) struct Taken {
+    /// The digits the archive files under. Always present - this is the one
+    /// field [`crate::output_path`] reads.
+    pub(crate) local: NaiveDateTime,
+    /// The zone `local` is expressed in, when a source recorded one. `None` is a
+    /// camera that wrote a bare reading: the digits stand, the zone is unknown.
+    pub(crate) offset: Option<FixedOffset>,
+    /// Whether `local` is the reading the photographer saw, as opposed to UTC
+    /// digits standing in for one nobody recorded.
+    pub(crate) certain: bool,
 }
 
-impl TakenAt {
-    /// The moment this names, on the best terms available.
-    ///
-    /// A [`TakenAt::WallClock`] has no instant to give, and reading it as UTC is
-    /// the only answer that leaves its digits alone. That is an assumption, not
-    /// a fact, so this is for comparing two readings of the *same* shutter press
-    /// - where the assumption cancels - and not for filing.
-    pub(crate) fn instant(&self) -> DateTime<Utc> {
-        match self {
-            Self::WallClock(dt) => dt.and_utc(),
-            Self::Zoned(dt) => dt.to_utc(),
-            Self::Instant(dt) => *dt,
+impl Taken {
+    /// A local reading with no offset recorded: the digits are the wall clock,
+    /// and the instant they name is unknown. Bare EXIF, and a video's `mvhd`.
+    pub(crate) fn wall(local: NaiveDateTime) -> Self {
+        Self {
+            local,
+            offset: None,
+            certain: true,
         }
     }
 
-    /// Put `millis` onto the reading, keeping its kind and its offset. `None`
-    /// when the result would not be a valid time, which callers read as "leave
-    /// the whole second alone".
+    /// A local reading and the offset it was taken in: both known. EXIF with an
+    /// `OffsetTime` tag, an XMP date written with a zone, and Apple's
+    /// `com.apple.quicktime.creationdate`.
+    pub(crate) fn zoned(dt: DateTime<FixedOffset>) -> Self {
+        Self {
+            local: dt.naive_local(),
+            offset: Some(*dt.offset()),
+            certain: true,
+        }
+    }
+
+    /// An instant with no local reading beside it. The UTC digits are kept
+    /// because something has to go in the path, but `certain` is false to say
+    /// they are a stand-in. Google's `photoTakenTime`, and a file's mtime.
+    pub(crate) fn instant(dt: DateTime<Utc>) -> Self {
+        Self {
+            local: dt.naive_utc(),
+            offset: Some(Utc.fix()),
+            certain: false,
+        }
+    }
+
+    /// The same digits, reread as UTC rather than as somebody's wall clock.
+    ///
+    /// For `GPSDateStamp`, which spells itself like any other bare EXIF date but
+    /// comes off the GPS receiver, where time is UTC by definition.
+    pub(crate) fn into_instant(self) -> Self {
+        Self {
+            offset: Some(Utc.fix()),
+            certain: false,
+            ..self
+        }
+    }
+
+    /// The same reading with `offset` filled in, if it did not have one. A
+    /// stated offset always beats a derived one, so this never overwrites.
+    pub(crate) fn or_offset(self, offset: FixedOffset) -> Self {
+        Self {
+            offset: self.offset.or(Some(offset)),
+            ..self
+        }
+    }
+
+    /// Put `millis` onto the reading. `None` when the result would not be a
+    /// valid time, which callers read as "leave the whole second alone".
     pub(crate) fn with_millis(&self, millis: u32) -> Option<Self> {
         let nanos = millis.checked_mul(1_000_000)?;
-        Some(match self {
-            Self::WallClock(dt) => Self::WallClock(dt.with_nanosecond(nanos)?),
-            Self::Zoned(dt) => Self::Zoned(dt.with_nanosecond(nanos)?),
-            Self::Instant(dt) => Self::Instant(dt.with_nanosecond(nanos)?),
+        Some(Self {
+            local: self.local.with_nanosecond(nanos)?,
+            ..self.clone()
         })
     }
 
-    /// RFC 3339, the one spelling [`crate::output_path::get_desired_media_path`]
-    /// can parse and the form that reaches a note's frontmatter and the `db`
-    /// index.
+    /// Take `other`'s fraction of a second when this reading has none of its own.
     ///
-    /// A `WallClock` is written with a `+00:00` it does not really have. That is
-    /// a lie the archive has always told, and it is deliberate: the alternative
-    /// is a bare local datetime, which `output_path` would file under `undated/`
-    /// rather than reading the digits it was handed. Use [`TakenAt::to_string`]
-    /// where the distinction matters more than the parse.
-    pub(crate) fn to_rfc3339(&self) -> String {
-        match self {
-            Self::WallClock(dt) => dt.and_utc().to_rfc3339(),
-            Self::Zoned(dt) => dt.to_rfc3339(),
-            Self::Instant(dt) => dt.to_rfc3339(),
+    /// Ranking the sources and choosing the precision are separate questions,
+    /// and collapsing them gets one of the two wrong. `photoTakenTime` outranks
+    /// EXIF - it is editable in the Google Photos UI, so it can be a human
+    /// correction - but Takeout stores it as integer *seconds*. Let it win
+    /// outright and every photo in a Takeout lands on `...000`, including the
+    /// bursts, where the frames differ only in the fraction.
+    ///
+    /// A reading that already carries a fraction is left alone: whichever source
+    /// won the ranking outranks the other on precision for the same reason it
+    /// outranked it on the date.
+    pub(crate) fn with_fraction_from(self, other: &Self) -> Self {
+        let millis = other.local.and_utc().timestamp_subsec_millis();
+        if millis == 0 || self.local.nanosecond() != 0 {
+            return self;
         }
+        self.with_millis(millis).unwrap_or(self)
     }
 
-    /// Read back what [`TakenAt::to_string`] wrote, which is how a reading
+    /// RFC 3339: the form that reaches a note's frontmatter and the `db` index.
+    ///
+    /// A reading with no recorded offset is written with a `+00:00` it does not
+    /// really have, which is a lie the archive has always told. The `offset`
+    /// field beside it is what makes the lie detectable: `None` there means the
+    /// zone on the end of this string is a placeholder. Use the [`Display`]
+    /// impl where the distinction matters more than the parse.
+    ///
+    /// [`Display`]: std::fmt::Display
+    pub(crate) fn to_rfc3339(&self) -> String {
+        let offset = self.offset.unwrap_or_else(|| Utc.fix());
+        DateTime::<FixedOffset>::from_naive_utc_and_offset(self.local - offset, offset).to_rfc3339()
+    }
+
+    /// Read back what the [`Display`](std::fmt::Display) impl wrote, which is how a reading
     /// survives being parked in a `String` field on a parser's struct.
     ///
-    /// Only two of the three states round-trip: a string either carries an
-    /// offset or it does not, so this yields `Zoned` or `WallClock` and never
-    /// `Instant`. That is enough for the one caller that needs it - XMP, whose
-    /// dates are always local readings - and epoch-valued sources are wrapped as
-    /// `Instant` at the point they are converted, where the knowledge actually
-    /// is.
+    /// Only two of the three shapes round-trip: a string either carries an
+    /// offset or it does not, so this yields `zoned` or `wall` and never
+    /// `instant`. That is enough for the one caller that needs it - XMP, whose
+    /// dates are always local readings - and epoch-valued sources are wrapped at
+    /// the point they are converted, where the knowledge actually is.
     pub(crate) fn parse(s: &str) -> Option<Self> {
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-            return Some(Self::Zoned(dt));
+            return Some(Self::zoned(dt));
         }
         NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
             .ok()
-            .map(Self::WallClock)
+            .map(Self::wall)
     }
 }
 
-impl fmt::Display for TakenAt {
-    /// The honest spelling: a `WallClock` prints with no offset at all, because
-    /// it does not have one. `Zoned` and `Instant` print as RFC 3339.
+impl fmt::Display for Taken {
+    /// The honest spelling: the digits, and an offset only when one is known.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::WallClock(dt) => write!(f, "{}", dt.format("%Y-%m-%dT%H:%M:%S%.f")),
-            _ => f.write_str(&self.to_rfc3339()),
+        write!(f, "{}", self.local.format("%Y-%m-%dT%H:%M:%S%.f"))?;
+        match self.offset {
+            Some(offset) => write!(f, "{offset}"),
+            None => Ok(()),
         }
     }
 }
@@ -126,24 +182,25 @@ impl fmt::Display for TakenAt {
 mod tests {
     use super::*;
 
-    fn wall(s: &str) -> anyhow::Result<TakenAt> {
-        Ok(TakenAt::WallClock(NaiveDateTime::parse_from_str(
+    fn wall(s: &str) -> anyhow::Result<Taken> {
+        Ok(Taken::wall(NaiveDateTime::parse_from_str(
             s,
             "%Y-%m-%dT%H:%M:%S%.f",
         )?))
     }
 
-    fn zoned(s: &str) -> anyhow::Result<TakenAt> {
-        Ok(TakenAt::Zoned(DateTime::parse_from_rfc3339(s)?))
+    fn zoned(s: &str) -> anyhow::Result<Taken> {
+        Ok(Taken::zoned(DateTime::parse_from_rfc3339(s)?))
     }
 
     /// The two spellings, and the reason there are two: `to_rfc3339` is what the
-    /// archive can parse, `Display` is what the reading actually claims.
+    /// note and the index carry, `Display` is what the reading actually claims.
     #[test]
     fn test_wall_clock_admits_it_has_no_offset() -> anyhow::Result<()> {
         let w = wall("2014-12-25T14:51:26.674")?;
         assert_eq!(w.to_string(), "2014-12-25T14:51:26.674");
         assert_eq!(w.to_rfc3339(), "2014-12-25T14:51:26.674+00:00");
+        assert_eq!(w.offset, None, "the placeholder zone must not be recorded");
 
         // A zero fraction is printed by neither, so the common case stays short.
         let w = wall("2014-12-25T14:51:26")?;
@@ -158,6 +215,9 @@ mod tests {
         let z = zoned("2023-01-18T21:05:38+13:00")?;
         assert_eq!(z.to_string(), "2023-01-18T21:05:38+13:00");
         assert_eq!(z.to_rfc3339(), "2023-01-18T21:05:38+13:00");
+        // The digits are the local reading, not the UTC one: that is what the
+        // path is built from.
+        assert_eq!(z.local.format("%H%M").to_string(), "2105");
         Ok(())
     }
 
@@ -166,13 +226,14 @@ mod tests {
     #[test]
     fn test_wall_clock_and_utc_instant_are_not_the_same_reading() -> anyhow::Result<()> {
         let w = wall("2024-05-22T00:17:51")?;
-        let i = TakenAt::Instant(w.instant());
+        let i = Taken::instant(w.local.and_utc());
         assert_eq!(w.to_rfc3339(), i.to_rfc3339());
         assert_ne!(w, i);
+        assert!(w.certain && !i.certain);
         Ok(())
     }
 
-    /// `Display` and `parse` are inverses for the two states a string can hold.
+    /// `Display` and `parse` are inverses for the two shapes a string can hold.
     #[test]
     fn test_display_round_trips_through_parse() -> anyhow::Result<()> {
         for original in [
@@ -182,20 +243,20 @@ mod tests {
             zoned("2023-01-18T21:05:38.489-05:30")?,
         ] {
             assert_eq!(
-                TakenAt::parse(&original.to_string()),
+                Taken::parse(&original.to_string()),
                 Some(original.clone()),
                 "round-tripping {original}"
             );
         }
-        assert_eq!(TakenAt::parse("not a date"), None);
-        assert_eq!(TakenAt::parse(""), None);
+        assert_eq!(Taken::parse("not a date"), None);
+        assert_eq!(Taken::parse(""), None);
         Ok(())
     }
 
     /// The fraction lands on the reading without disturbing the offset, whatever
-    /// the kind.
+    /// the shape.
     #[test]
-    fn test_with_millis_keeps_the_kind_and_the_offset() -> anyhow::Result<()> {
+    fn test_with_millis_keeps_the_offset() -> anyhow::Result<()> {
         assert_eq!(
             wall("2014-12-25T14:51:26")?.with_millis(674),
             Some(wall("2014-12-25T14:51:26.674")?)
@@ -212,19 +273,56 @@ mod tests {
         Ok(())
     }
 
-    /// A `WallClock` read as UTC is the assumption `instant` documents; the
-    /// point of it is that it cancels when two readings of one shutter press are
-    /// compared, which is all it is used for.
+    /// A reading with no fraction takes one; a reading that has its own keeps it.
     #[test]
-    fn test_instant_reads_a_bare_wall_clock_as_utc() -> anyhow::Result<()> {
+    fn test_with_fraction_from() -> anyhow::Result<()> {
+        let fine = wall("2014-12-25T14:51:26.674")?;
         assert_eq!(
-            wall("2014-12-25T14:51:26")?.instant().to_rfc3339(),
-            "2014-12-25T14:51:26+00:00"
+            wall("2014-12-25T14:51:26")?.with_fraction_from(&fine),
+            wall("2014-12-25T14:51:26.674")?
         );
         assert_eq!(
-            zoned("2014-12-25T14:51:26+11:00")?.instant().to_rfc3339(),
-            "2014-12-25T03:51:26+00:00"
+            wall("2014-12-25T14:51:26.417")?.with_fraction_from(&fine),
+            wall("2014-12-25T14:51:26.417")?
         );
+        // Nothing to give: a whole-second donor is a no-op, not a truncation.
+        assert_eq!(
+            fine.clone()
+                .with_fraction_from(&wall("2014-12-25T14:51:26")?),
+            fine
+        );
+        Ok(())
+    }
+
+    /// An offset is filled in only where one is missing - a stated zone always
+    /// beats a derived one.
+    #[test]
+    fn test_or_offset_never_overwrites() -> anyhow::Result<()> {
+        let plus11 = FixedOffset::east_opt(11 * 3600).ok_or_else(|| anyhow::anyhow!("offset"))?;
+        assert_eq!(
+            wall("2014-12-25T14:51:26")?.or_offset(plus11),
+            zoned("2014-12-25T14:51:26+11:00")?
+        );
+        assert_eq!(
+            zoned("2014-12-25T14:51:26+13:00")?.or_offset(plus11),
+            zoned("2014-12-25T14:51:26+13:00")?
+        );
+        Ok(())
+    }
+
+    /// An instant's digits really are UTC, so it says so - unlike a bare wall
+    /// clock, whose `+00:00` is only a placeholder.
+    #[test]
+    fn test_instant_states_the_zone_its_digits_are_in() -> anyhow::Result<()> {
+        let i = Taken::instant(DateTime::parse_from_rfc3339("2014-12-25T03:51:26Z")?.to_utc());
+        assert_eq!(i.to_string(), "2014-12-25T03:51:26+00:00");
+        assert!(!i.certain, "the photographer's clock is still unknown");
+
+        // `into_instant` reinterprets digits already in hand, and makes the same
+        // claim about them.
+        let gps = wall("2015-04-17T00:00:00")?.into_instant();
+        assert_eq!(gps.to_string(), "2015-04-17T00:00:00+00:00");
+        assert!(!gps.certain);
         Ok(())
     }
 }

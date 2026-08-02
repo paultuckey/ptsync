@@ -20,6 +20,7 @@ erDiagram
         TEXT accurate_file_type
         TEXT media_info
         DATETIME guessed_datetime
+        INTEGER guessed_utc_offset_s
         DATETIME modified_at
         DATETIME created_at
         INTEGER file_size
