@@ -16,7 +16,18 @@ const TAPE_CHECK_DIR: &str = "target/demo_tape_check";
 const SNAPSHOT_PATH: &str = "tests/snapshots/sync.txt";
 const TAPE_PATH: &str = "docs/demo.tape";
 
-const DEMO_NOTE: &str = "photo-archive/2024/05/22/0017-51000.md";
+const DEMO_NOTE: &str = "photo-archive/2024/05/22/1217-51000.md";
+
+/// The zone both this snapshot and `docs/demo.tape` are recorded in.
+///
+/// The fixture's dates come from Takeout `photoTakenTime` sidecars, which record
+/// absolute instants; ptsync buckets those at the machine's own zone, so the same
+/// sync writes `2024/05/22/1217-51000.jpg` here and `2024/05/21/2017-51000.jpg`
+/// in New York. Without pinning, the committed snapshot would only match for
+/// whoever last regenerated it. Auckland is chosen because that is where the GIF
+/// was recorded — `demo.tape` exports the same value, so the two agree whoever
+/// re-records them.
+const SNAPSHOT_TZ: &str = "Pacific/Auckland";
 
 #[test]
 fn demo_tape_shows_a_note_ptsync_still_writes() -> Result<()> {
@@ -124,6 +135,7 @@ fn capture(cwd: &Path, argv: &[String]) -> Result<String> {
     let output = Command::new(program)
         .args(args)
         .current_dir(cwd)
+        .env("TZ", SNAPSHOT_TZ)
         .output()
         .with_context(|| format!("running {program}"))?;
     if !output.status.success() {

@@ -27,8 +27,13 @@ Set TypingSpeed 35ms
 # without the viewer seeing a path into target/. Then start from a clean archive:
 # ptsync is idempotent, so a second sync into an existing photo-archive would
 # output nothing and the demo would show no work.
+#
+# TZ is pinned to match SNAPSHOT_TZ in tests/sync_snapshot.rs. The fixture is
+# dated from Takeout sidecars, which record absolute instants, and ptsync files
+# instants against the machine's own clock — so without this the paths typed
+# below would be right only for a recorder in New Zealand.
 Hide
-Type 'export PATH="$PWD/target/debug:$PATH" && PS1="\[\e[32m\]$\[\e[0m\] "'
+Type 'export TZ="Pacific/Auckland" PATH="$PWD/target/debug:$PATH" && PS1="\[\e[32m\]$\[\e[0m\] "'
 Enter
 Type 'cd target/demo && rm -rf photo-archive && clear'
 Enter
@@ -52,6 +57,6 @@ Sleep 2500ms
 # 3. The payoff: a note ptsync wrote, with metadata you own in plain text. This
 #    is the photo that arrived twice, so it carries two original-paths and an
 #    album wikilink — the point ptsync is making.
-Type "cat photo-archive/2024/05/22/0017-51000.md"
+Type "cat photo-archive/2024/05/22/1217-51000.md"
 Enter
 Sleep 4s

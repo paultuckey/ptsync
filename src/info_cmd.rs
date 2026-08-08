@@ -3,11 +3,11 @@ use crate::file_type::QuickFileType;
 use crate::fs::{FileSystem, OsFileSystem};
 use crate::inspect::analyze_file;
 use crate::markdown::{assemble_markdown, mfm_from_media_file_info};
-use crate::util::{ScanInfo, scan_fs};
+use crate::util::{OutputTZ, ScanInfo, scan_fs};
 use std::fmt::Write;
 use tracing::{debug, warn};
 
-pub(crate) fn main(input: &String, root_s: &str) -> anyhow::Result<()> {
+pub(crate) fn main(input: &String, root_s: &str, tz: OutputTZ) -> anyhow::Result<()> {
     debug!("Inspecting: {input}");
     let root: Box<dyn FileSystem> = Box::new(OsFileSystem::new(root_s));
     let len = root.metadata(input).map(|m| m.len).unwrap_or(0);
@@ -18,7 +18,7 @@ pub(crate) fn main(input: &String, root_s: &str) -> anyhow::Result<()> {
             return Ok(());
         }
         QuickFileType::AlbumCsv | QuickFileType::AlbumJson => album(&si, root.as_ref())?,
-        QuickFileType::Media => media(&si, root.as_ref())?,
+        QuickFileType::Media => media(&si, root.as_ref(), tz)?,
     };
     print!("{output}");
     Ok(())
@@ -26,7 +26,7 @@ pub(crate) fn main(input: &String, root_s: &str) -> anyhow::Result<()> {
 
 /// Render the `info` report for a single media file. Returns an empty string
 /// when the file isn't a supported media type.
-pub(crate) fn media(si: &ScanInfo, root: &dyn FileSystem) -> anyhow::Result<String> {
+pub(crate) fn media(si: &ScanInfo, root: &dyn FileSystem, tz: OutputTZ) -> anyhow::Result<String> {
     let Some(media_file_info) = analyze_file(root, si)? else {
         debug!("Not a valid media file: {}", si.file_path);
         return Ok(String::new());
@@ -45,7 +45,7 @@ pub(crate) fn media(si: &ScanInfo, root: &dyn FileSystem) -> anyhow::Result<Stri
         media_file_info.hash_info.long_checksum
     )?;
 
-    let mfm = mfm_from_media_file_info(&media_file_info, &[]);
+    let mfm = mfm_from_media_file_info(&media_file_info, &[], tz);
     let s = assemble_markdown(&mfm, &None, "")?.into_string();
     writeln!(out, "Markdown:")?;
     writeln!(out, "{s}")?;
@@ -104,7 +104,7 @@ mod tests {
         crate::test_util::setup_log();
         let root = OsFileSystem::new("test");
         let si = ScanInfo::new("Canon_40D.jpg".to_string(), None, None, 0);
-        let out = media(&si, &root)?;
+        let out = media(&si, &root, crate::test_util::tz())?;
         assert!(out.contains("Hash info:"));
         assert!(out.contains("short checksum: 6bfdabd"));
         assert!(out.contains("Markdown:"));

@@ -39,7 +39,14 @@ async fn db_example_queries_are_valid() -> anyhow::Result<()> {
     // Build a database with the current schema from the test fixtures.
     let (_db, conn) = open_conn(":memory:").await?;
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-    run_db_scan(container, &conn, DbScanOpts::default(), "test").await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        "test",
+        crate::test_util::tz(),
+    )
+    .await?;
 
     let markdown = std::fs::read_to_string(DOC_PATH)?;
     let queries = extract_sql_blocks(&markdown);

@@ -6,7 +6,7 @@ use crate::inspect::inspect_media_files;
 use crate::markdown::sync_markdown;
 use crate::media::{MediaFileDerivedInfo, MediaFileInfo, media_file_derived_from_media_info};
 use crate::progress::Progress;
-use crate::util::{ScanInfo, scan_fs};
+use crate::util::{OutputTZ, ScanInfo, scan_fs};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ pub(crate) fn main(
     skip_markdown: bool,
     skip_media: bool,
     skip_albums: bool,
+    tz: OutputTZ,
 ) -> anyhow::Result<()> {
     let container = open_input(input)?;
 
@@ -71,7 +72,7 @@ pub(crate) fn main(
             let prog = Progress::new(media_to_write.len() as u64);
             for media in media_to_write {
                 prog.inc();
-                let derived = media_file_derived_from_media_info(media)?;
+                let derived = media_file_derived_from_media_info(media, tz)?;
                 let write_r = write_media(
                     media,
                     &derived,
@@ -92,6 +93,7 @@ pub(crate) fn main(
                                 &final_path,
                                 &album_names,
                                 output_container,
+                                tz,
                             );
                             if let Err(e) = sync_md_r {
                                 warn!("Error writing markdown file beside {final_path:?}: {e}");
@@ -242,6 +244,7 @@ mod tests {
     use super::*;
     use crate::fs::OsFileSystem;
     use crate::test_util::build_zip;
+    use crate::test_util::tz;
     use anyhow::anyhow;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -249,15 +252,32 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// Tiny Google Takeout. Every media file has a `.supplemental-metadata.json`
-    /// with a fixed `photoTakenTime`, so dates are derived in UTC and identical on every machine.
+    /// with a fixed `photoTakenTime`, so dates are derived from the sidecar rather
+    /// than from whatever mtime the checkout happens to have.
     const TAKEOUT_BASIC: &str = "test/takeout_basic";
+
+    /// Where the fixture's two media files land, minus the extension.
+    ///
+    /// A `photoTakenTime` is an absolute instant — Google's own `formatted` field
+    /// spells the first of these "22 May 2024, 00:17:51 UTC" — and ptsync buckets
+    /// instants in the output zone. Every test here runs at
+    /// [`crate::test_util::tz`]'s fixed `+12:00`, which is what lets these
+    /// be literals: the jpg's instant is a quarter past midnight in Greenwich and
+    /// a quarter past noon at +12:00, so a regression to rendering at UTC changes
+    /// the name these assert on rather than quietly agreeing with itself.
+    const FIXTURE_JPG_STEM: &str = "2024/05/22/1217-51000";
+    const FIXTURE_MP4_STEM: &str = "2023/11/02/2130-00000";
+
+    /// The instant behind [`FIXTURE_JPG_STEM`], for the assertions that care about
+    /// the reading rather than the path.
+    const FIXTURE_JPG_EPOCH: i64 = 1716337071;
 
     fn run_sync(input: &str) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
         crate::test_util::setup_log();
         let temp = tempfile::tempdir()?;
         let archive = temp.path().join("archive");
         let output = Some(archive.to_string_lossy().to_string());
-        main(false, input, &output, false, false, false)?;
+        main(false, input, &output, false, false, false, tz())?;
         Ok((temp, archive))
     }
 
@@ -321,11 +341,24 @@ mod tests {
     #[test]
     fn sync_dates_media_from_supplemental_metadata() -> anyhow::Result<()> {
         let (_temp, archive) = run_sync(TAKEOUT_BASIC)?;
-        assert!(archive.join("2024/05/22/0017-51000.jpg").exists());
-        assert!(archive.join("2023/11/02/0930-00000.mp4").exists());
+        assert!(archive.join(format!("{FIXTURE_JPG_STEM}.jpg")).exists());
+        assert!(archive.join(format!("{FIXTURE_MP4_STEM}.mp4")).exists());
         assert!(!archive.join("undated").exists());
-        let md = read_to_string(archive.join("2024/05/22/0017-51000.md"))?;
-        assert!(md.contains("datetime: \"2024-05-22T00:17:51+00:00\""));
+
+        // The sidecar records the same instant the fixture does. Its offset is
+        // this machine's, so the reading is compared as an instant rather than as
+        // a string — the two are only the same spelling on a UTC machine.
+        let md = read_to_string(archive.join(format!("{FIXTURE_JPG_STEM}.md")))?;
+        let recorded = md
+            .lines()
+            .find_map(|l| l.strip_prefix("datetime: "))
+            .ok_or_else(|| anyhow!("sidecar has no datetime line:\n{md}"))?
+            .trim_matches('"');
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(recorded)?.timestamp(),
+            FIXTURE_JPG_EPOCH,
+            "sidecar datetime {recorded:?} is not the instant the metadata recorded"
+        );
         Ok(())
     }
 
@@ -337,7 +370,7 @@ mod tests {
             .filter(|p| p.extension().is_some_and(|e| e == "jpg"))
             .collect();
         assert_eq!(jpgs.len(), 1);
-        let md = read_to_string(archive.join("2024/05/22/0017-51000.md"))?;
+        let md = read_to_string(archive.join(format!("{FIXTURE_JPG_STEM}.md")))?;
         assert!(md.contains(
             "checksum: 6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f"
         ));
@@ -349,10 +382,11 @@ mod tests {
     #[test]
     fn sync_writes_album_and_membership() -> anyhow::Result<()> {
         let (_temp, archive) = run_sync(TAKEOUT_BASIC)?;
+        let stem = FIXTURE_JPG_STEM;
         let album = read_to_string(archive.join("albums/Holiday.md"))?;
         assert!(album.contains("# Holiday Snaps"));
-        assert!(album.contains("](../2024/05/22/0017-51000.jpg)"));
-        let photo_md = read_to_string(archive.join("2024/05/22/0017-51000.md"))?;
+        assert!(album.contains(&format!("](../{stem}.jpg)")));
+        let photo_md = read_to_string(archive.join(format!("{stem}.md")))?;
         assert!(photo_md.contains("[[Holiday]]"));
         Ok(())
     }
@@ -366,17 +400,18 @@ mod tests {
         let input = TAKEOUT_BASIC.to_string();
 
         // First run populates the archive
-        main(false, &input, &output, false, false, false)?;
+        main(false, &input, &output, false, false, false, tz())?;
         let first = mtimes_under(&archive)?;
+        let stem = FIXTURE_JPG_STEM;
         assert!(
             first.contains_key("albums/Holiday.md")
-                && first.contains_key("2024/05/22/0017-51000.md")
-                && first.contains_key("2024/05/22/0017-51000.jpg"),
+                && first.contains_key(&format!("{stem}.md"))
+                && first.contains_key(&format!("{stem}.jpg")),
             "first run should have written media, sidecar and album files"
         );
 
         // Re-running over identical input must be a no-op in writes
-        main(false, &input, &output, false, false, false)?;
+        main(false, &input, &output, false, false, false, tz())?;
         let second = mtimes_under(&archive)?;
         assert_eq!(
             first, second,
@@ -406,6 +441,7 @@ mod tests {
             false,
             false,
             false,
+            tz(),
         )?;
 
         let after = output_tree(&input)?;
@@ -427,7 +463,9 @@ mod tests {
         let output = temp.path().join("output");
         fs::create_dir_all(&input)?;
 
-        // Two distinct photos at the same photoTakenTime, so both want 2023/11/14/2213-20000.
+        // Two distinct photos at the same photoTakenTime (1700000000, i.e.
+        // 2023-11-14T22:13:20Z), so both want the same name.
+        const SAME_INSTANT_STEM: &str = "2023/11/15/1013-20000";
         let base = fs::read("test/Canon_40D.jpg")?;
         for (name, marker) in [("a.jpg", "X"), ("b.jpg", "YY")] {
             let mut bytes = base.clone();
@@ -441,7 +479,7 @@ mod tests {
 
         let input_s = input.to_string_lossy().to_string();
         let output_s = Some(output.to_string_lossy().to_string());
-        main(false, &input_s, &output_s, false, false, false)?;
+        main(false, &input_s, &output_s, false, false, false, tz())?;
 
         // Both photos written, one keeps bare date name, the other is suffixed.
         let media: Vec<PathBuf> = files_under(&output)?
@@ -450,7 +488,7 @@ mod tests {
             .collect();
         assert_eq!(media.len(), 2, "both same-instant photos must be written");
         assert!(
-            output.join("2023/11/14/2213-20000.jpg").exists(),
+            output.join(format!("{SAME_INSTANT_STEM}.jpg")).exists(),
             "one photo should keep the bare date name"
         );
 
@@ -492,7 +530,7 @@ mod tests {
 
         // re-running over the same input rewrites nothing.
         let first = mtimes_under(&output)?;
-        main(false, &input_s, &output_s, false, false, false)?;
+        main(false, &input_s, &output_s, false, false, false, tz())?;
         let second = mtimes_under(&output)?;
         assert_eq!(
             first, second,
@@ -510,9 +548,10 @@ mod tests {
 
         let dir_tree = output_tree(&dir_archive)?;
         let zip_tree = output_tree(&zip_archive)?;
+        let stem = FIXTURE_JPG_STEM;
         assert!(
-            dir_tree.contains_key("2024/05/22/0017-51000.jpg")
-                && dir_tree.contains_key("2024/05/22/0017-51000.md")
+            dir_tree.contains_key(&format!("{stem}.jpg"))
+                && dir_tree.contains_key(&format!("{stem}.md"))
                 && dir_tree.contains_key("albums/Holiday.md")
         );
         assert_eq!(dir_tree, zip_tree);
@@ -550,18 +589,18 @@ mod tests {
         // First pass writes media + sidecars into the fake bucket.
         let out = FakeS3FileSystem::new();
         for media in deduper.sorted_media() {
-            let derived = media_file_derived_from_media_info(media)?;
+            let derived = media_file_derived_from_media_info(media, tz())?;
             let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
-            sync_markdown(false, media, &final_path, &[], &out)?;
+            sync_markdown(false, media, &final_path, &[], &out, tz())?;
         }
-        assert!(out.exists("2024/05/22/0017-51000.jpg"));
-        assert!(out.exists("2024/05/22/0017-51000.md"));
+        let stem = FIXTURE_JPG_STEM;
+        assert!(out.exists(&format!("{stem}.jpg")));
+        assert!(out.exists(&format!("{stem}.md")));
         // The fake surfaces the object's SHA-256 the way S3's native checksum
         // does - this is the value the Option A fast path compares against, so a
         // metadata-only HeadObject can answer "already here?" without a GET.
         assert_eq!(
-            out.recorded_checksum("2024/05/22/0017-51000.jpg")
-                .as_deref(),
+            out.recorded_checksum(&format!("{stem}.jpg")).as_deref(),
             Some("6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f")
         );
 
@@ -569,9 +608,9 @@ mod tests {
         // SkipWrite (via the fake's recorded checksum) and the sidecar is unchanged.
         let before = out.walk().len();
         for media in deduper.sorted_media() {
-            let derived = media_file_derived_from_media_info(media)?;
+            let derived = media_file_derived_from_media_info(media, tz())?;
             let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
-            sync_markdown(false, media, &final_path, &[], &out)?;
+            sync_markdown(false, media, &final_path, &[], &out, tz())?;
         }
         assert_eq!(out.walk().len(), before, "re-run must not add new objects");
         Ok(())

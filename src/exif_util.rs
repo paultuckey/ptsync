@@ -1,3 +1,4 @@
+use crate::util::OutputTZ;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use nom_exif::{EntryValue, ExifIter, ExifIterEntry, ExifTag, MediaKind, MediaParser, MediaSource};
 use serde::Serialize;
@@ -304,7 +305,7 @@ fn dashed_date_separators(s: &str) -> String {
 ///
 /// GPS is not in that table because it is a different shape: its reading is
 /// split date-and-time rather than seconds-and-fraction. See [`gps_datetime`].
-pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>) -> Option<String> {
+pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>, tz: OutputTZ) -> Option<String> {
     let exif = exif.as_ref()?;
     let from_camera_clock = [
         // 0x9003 / 0x9291
@@ -329,30 +330,49 @@ pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>) -> Option<String>
             .unwrap_or(dt);
         Some(dt.to_rfc3339())
     });
-    from_camera_clock.or_else(|| gps_datetime(exif))
+    from_camera_clock.or_else(|| gps_datetime(exif, tz))
 }
 
 /// The GPS receiver's reading of when the shutter fired, from the
 /// `GPSDateStamp` (`0x001d`) / `GPSTimeStamp` (`0x0007`) pair.
 ///
 /// These two are one reading split across two tags, and they differ from the
-/// camera's own clock in a way that matters: they are UTC by definition, so the
-/// `+00:00` this ends up carrying is a fact about the file rather than the usual
-/// assumption made for an offset-less reading.
+/// camera's own clock in a way that matters: they are UTC by definition, not by
+/// the assumption made for an offset-less reading. That makes a full reading a
+/// true instant, so it is converted to this machine's zone before it goes out —
+/// the same treatment every other instant gets, and for the same reason: the
+/// `yyyy/mm/dd` bucket is meant to be the photographer's wall clock, and UTC is
+/// not it. See [`crate::util::OutputTZ`].
 ///
 /// Taking the date alone and calling it midnight — which is what this did before
 /// the time tag was read — is the worst available answer, not a conservative
 /// one. Midnight UTC sits exactly on the day boundary, so every photographer
 /// west of UTC gets filed a day early, systematically. The time tag is right
 /// there in the same IFD.
-fn gps_datetime(exif: &PsExifInfo) -> Option<String> {
+///
+/// That failure is also why the date-only fallback is deliberately *not*
+/// converted. `GPSDateStamp` alone pins down a UTC day and nothing finer, and the
+/// local day it covers is that day for most of its span and the neighbouring one
+/// for the rest. Shifting an assumed midnight by the local offset does not
+/// recover the missing information; it just picks the less likely of the two days
+/// for everyone west of UTC — reintroducing, through the fix, the exact bug the
+/// paragraph above describes.
+fn gps_datetime(exif: &PsExifInfo, tz: OutputTZ) -> Option<String> {
     let date = field_value(exif, ExifTag::GPSDateStamp)?;
     let date = date.trim();
-    // A time that will not parse must not cost us the date it came with.
-    field_value(exif, ExifTag::GPSTimeStamp)
-        .and_then(|time| exif_datetime_parse(&format!("{date} {}", time.trim())))
-        .or_else(|| exif_datetime_parse(date))
-        .map(|dt| dt.to_rfc3339())
+    // A time that will not parse must not cost us the date it came with. An empty
+    // tag is one of those, and it needs excluding by hand rather than by letting
+    // the parse fail: `"2015-04-17 "` still parses — as a bare date — so it would
+    // otherwise reach the conversion below and be shifted as though a real time
+    // had been read, landing on midnight's neighbouring day.
+    let full_reading = field_value(exif, ExifTag::GPSTimeStamp)
+        .map(|time| time.trim().to_string())
+        .filter(|time| !time.is_empty())
+        .and_then(|time| exif_datetime_parse(&format!("{date} {time}")));
+    if let Some(dt) = full_reading {
+        return Some(tz.render(dt.to_utc()));
+    }
+    exif_datetime_parse(date).map(|dt| dt.to_rfc3339())
 }
 
 #[cfg(test)]
@@ -360,6 +380,7 @@ mod tests {
     use super::*;
     use crate::fs::FileSystem;
     use crate::fs::OsFileSystem;
+    use crate::test_util::tz;
     use nom_exif::URational;
 
     #[test]
@@ -537,7 +558,7 @@ mod tests {
             (ExifTag::ModifyDate, "2015:04:18 11:10:44"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2015-04-18T11:10:44+00:00")
         );
     }
@@ -582,7 +603,7 @@ mod tests {
             (ExifTag::SubSecTimeOriginal, "939"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2015-04-18T11:10:44.939+00:00")
         );
     }
@@ -597,7 +618,7 @@ mod tests {
             (ExifTag::SubSecTime, "939"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2015-04-18T11:10:44+00:00"),
             "SubSecTime must not refine DateTimeOriginal"
         );
@@ -609,7 +630,7 @@ mod tests {
             (ExifTag::SubSecTimeOriginal, "939"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2015-04-18T11:10:44.500+00:00")
         );
 
@@ -619,7 +640,7 @@ mod tests {
             (ExifTag::SubSecTime, "07"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2015-04-18T11:10:44.070+00:00")
         );
     }
@@ -633,7 +654,7 @@ mod tests {
             (ExifTag::SubSecTimeOriginal, "42"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2023-08-05T19:59:55.420+12:00")
         );
     }
@@ -649,7 +670,7 @@ mod tests {
             (ExifTag::ModifyDate, "2015:04:18 11:10:44"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2015-04-18T11:10:44+00:00")
         );
     }
@@ -666,8 +687,8 @@ mod tests {
             (ExifTag::SubSecTimeDigitized, "939"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
-            Some("2015-04-17T19:30:45+00:00")
+            best_guess_taken_exif(&exif, tz()).as_deref(),
+            Some("2015-04-18T07:30:45+12:00")
         );
     }
 
@@ -682,8 +703,8 @@ mod tests {
             (ExifTag::GPSTimeStamp, "19:30:45"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
-            Some("2015-04-17T19:30:45+00:00")
+            best_guess_taken_exif(&exif, tz()).as_deref(),
+            Some("2015-04-18T07:30:45+12:00")
         );
 
         // The seconds field is a rational, so it can carry a fraction.
@@ -692,8 +713,25 @@ mod tests {
             (ExifTag::GPSTimeStamp, "19:30:45.250"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
-            Some("2015-04-17T19:30:45.250+00:00")
+            best_guess_taken_exif(&exif, tz()).as_deref(),
+            Some("2015-04-18T07:30:45.250+12:00")
+        );
+    }
+
+    /// A full GPS reading is UTC by definition — a real instant — so it is
+    /// converted to the output zone on the way out, like every other instant. The
+    /// instant survives; only its spelling moves. 19:30 on the 17th in Greenwich
+    /// is 07:30 on the *18th* at +12:00, so a regression to rendering at UTC shows
+    /// up as a different day and not merely a different offset.
+    #[test]
+    fn test_gps_reading_is_converted_to_the_output_tz() {
+        let exif = exif_with(&[
+            (ExifTag::GPSDateStamp, "2015:04:17"),
+            (ExifTag::GPSTimeStamp, "19:30:45"),
+        ]);
+        assert_eq!(
+            best_guess_taken_exif(&exif, tz()).as_deref(),
+            Some("2015-04-18T07:30:45+12:00")
         );
     }
 
@@ -706,7 +744,7 @@ mod tests {
             (ExifTag::GPSTimeStamp, "19:30:45"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2008-07-31T10:38:11+00:00")
         );
     }
@@ -722,7 +760,7 @@ mod tests {
                 (ExifTag::GPSTimeStamp, time),
             ]);
             assert_eq!(
-                best_guess_taken_exif(&exif).as_deref(),
+                best_guess_taken_exif(&exif, tz()).as_deref(),
                 Some("2015-04-17T00:00:00+00:00"),
                 "with GPSTimeStamp {time:?}"
             );
@@ -731,7 +769,7 @@ mod tests {
         // And a date with no time tag at all is still a date.
         let exif = exif_with(&[(ExifTag::GPSDateStamp, "2015:04:17")]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2015-04-17T00:00:00+00:00")
         );
     }
@@ -808,11 +846,14 @@ mod tests {
             );
         }
 
-        let taken = best_guess_taken_exif(&Some(info));
-        assert_eq!(taken.as_deref(), Some("2015-04-17T19:30:45+00:00"));
+        let taken = best_guess_taken_exif(&Some(info), tz());
+        assert_eq!(taken.as_deref(), Some("2015-04-18T07:30:45+12:00"));
+
+        // ...and reaches a real dated path rather than `undated/`, bucketed on the
+        // converted reading: 19:30 on the 17th in Greenwich is the 18th at +12:00.
         assert_eq!(
             crate::media::get_desired_media_path("abc1234", &taken),
-            "2015/04/17/1930-45000"
+            "2015/04/18/0730-45000"
         );
         Ok(())
     }
@@ -827,7 +868,7 @@ mod tests {
             (ExifTag::ModifyDate, "2008:07:31 10:38:11"),
         ]);
         assert_eq!(
-            best_guess_taken_exif(&exif).as_deref(),
+            best_guess_taken_exif(&exif, tz()).as_deref(),
             Some("2008-05-30T15:56:01+00:00")
         );
     }
@@ -840,7 +881,7 @@ mod tests {
             (ExifTag::DateTimeOriginal, "2008:05:30 15:56:01"),
             (ExifTag::SubSecTimeOriginal, "07"),
         ]);
-        let taken = best_guess_taken_exif(&exif);
+        let taken = best_guess_taken_exif(&exif, tz());
         assert_eq!(
             crate::media::get_desired_media_path("abc1234", &taken),
             "2008/05/30/1556-01070"
@@ -856,7 +897,8 @@ mod tests {
         let c = OsFileSystem::new("test");
         let reader = c.open("Canon_40D.jpg")?;
         let info = parse_exif_info(reader)?.ok_or_else(|| anyhow!("Failed to parse exif"))?;
-        let taken = best_guess_taken_exif(&Some(info)).ok_or_else(|| anyhow!("no exif date"))?;
+        let taken =
+            best_guess_taken_exif(&Some(info), tz()).ok_or_else(|| anyhow!("no exif date"))?;
         let path = crate::media::get_desired_media_path("abc1234", &Some(taken));
         assert!(!path.starts_with("undated/"), "got {path}");
         Ok(())

@@ -5,7 +5,7 @@ use crate::file_type::{
 };
 use crate::supplemental_info::PsSupplementalInfo;
 use crate::track_util::{PsTrackInfo, parse_track_info};
-use crate::util::{HashInfo, ScanInfo};
+use crate::util::{HashInfo, OutputTZ, ScanInfo};
 use anyhow::anyhow;
 use chrono::{DateTime, Datelike, Timelike};
 use serde::Serialize;
@@ -82,9 +82,10 @@ pub(crate) fn media_file_info_from_readable<R: Read + Seek>(
 
 pub(crate) fn media_file_derived_from_media_info(
     media_info: &MediaFileInfo,
+    tz: OutputTZ,
 ) -> anyhow::Result<MediaFileDerivedInfo> {
     let ext = file_ext_from_file_type(&media_info.accurate_file_type);
-    let guessed_datetime = best_guess_taken_dt(media_info);
+    let guessed_datetime = best_guess_taken_dt(media_info, tz);
     let short_checksum = &media_info.hash_info.short_checksum;
     let desired_media_path_o = Some(get_desired_media_path(short_checksum, &guessed_datetime));
     let media_file_info = MediaFileDerivedInfo {
@@ -115,16 +116,29 @@ pub(crate) fn media_file_derived_from_media_info(
 /// one form, because [`get_desired_media_path`] parses it back and files anything
 /// it cannot read under `undated/` — a source that returns its own native
 /// spelling silently loses the date it just found.
-pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo) -> Option<String> {
+///
+/// The offset on that string decides the output directory, and the sources split
+/// into two kinds that reach the same spelling by opposite routes:
+///
+/// - **Wall-clock readings** (2, 3, 4, 6) are the numbers the photographer's own
+///   camera showed, with the zone unrecorded. `+00:00` is a placeholder that makes
+///   them parse; the digits are already right and must pass through unshifted.
+/// - **Instants** (1, 5, 8, 9) are true points in time. Rendering them at UTC and
+///   bucketing on those digits files them under the Greenwich wall clock, so they
+///   are converted to `zone` first — see [`crate::util::OutputTZ`].
+///
+/// Nothing downstream can tell the two apart once they are strings, which is why
+/// the conversion has to happen here at the source rather than at the bucketing.
+pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo, tz: OutputTZ) -> Option<String> {
     if let Some(dt) = info
         .supp_info
         .as_ref()
         .and_then(|si| si.photo_taken_time.as_ref())
-        .and_then(|si_dt| si_dt.timestamp_s_as_iso_8601())
+        .and_then(|si_dt| si_dt.timestamp_s_as_iso_8601(tz))
     {
         return Some(dt);
     }
-    let time_taken_from_exif = best_guess_taken_exif(&info.exif_info);
+    let time_taken_from_exif = best_guess_taken_exif(&info.exif_info, tz);
     if let Some(dt) = time_taken_from_exif {
         return Some(dt);
     }
@@ -141,18 +155,18 @@ pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo) -> Option<String> {
         .supp_info
         .as_ref()
         .and_then(|si| si.creation_time.as_ref())
-        .and_then(|si_dt| si_dt.timestamp_s_as_iso_8601())
+        .and_then(|si_dt| si_dt.timestamp_s_as_iso_8601(tz))
     {
         return Some(dt);
     }
     if let Some(dt) = info.modified {
-        let o = crate::util::timestamp_to_rfc3339(dt);
+        let o = tz.render_millis(dt);
         if let Some(dt) = o {
             return Some(dt);
         }
     }
     if let Some(dt) = info.created {
-        let o = crate::util::timestamp_to_rfc3339(dt);
+        let o = tz.render_millis(dt);
         if let Some(dt) = o {
             return Some(dt);
         }
@@ -269,33 +283,57 @@ impl MediaFileDerivedInfo {
 mod tests {
     use super::*;
     use crate::fs::{FileSystem, OsFileSystem};
+    use crate::test_util::tz;
 
     #[test]
     fn test_best_guess_taken_dt_timestamps() -> anyhow::Result<()> {
         use anyhow::anyhow;
         let mut info = MediaFileInfo::new_for_test();
-        // 1000000000000 ms = 2001-09-09T01:46:40Z
+        // 1000000000000 ms = 2001-09-09T01:46:40Z, which the output zone reads as
+        // a quarter to two in the afternoon.
         let ts = 1000000000000;
+        const AT_ZONE: &str = "2001-09-09T13:46:40+12:00";
 
         info.created = Some(ts);
         info.modified = None;
         let dt =
-            best_guess_taken_dt(&info).ok_or_else(|| anyhow!("Should have a date from created"))?;
-        assert_eq!(dt, "2001-09-09T01:46:40+00:00");
+            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from created"))?;
+        assert_eq!(dt, AT_ZONE);
 
         info.created = None;
         info.modified = Some(ts);
-        let dt = best_guess_taken_dt(&info)
-            .ok_or_else(|| anyhow!("Should have a date from modified"))?;
-        assert_eq!(dt, "2001-09-09T01:46:40+00:00");
+        let dt =
+            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from modified"))?;
+        assert_eq!(dt, AT_ZONE);
 
         // When both are present, modified wins over created (created is the very
         // last resort as it is unavailable in zips).
         info.modified = Some(ts);
         info.created = Some(1_600_000_000_000); // 2020-09-13T12:26:40Z
-        let dt = best_guess_taken_dt(&info)
-            .ok_or_else(|| anyhow!("Should have a date when both present"))?;
-        assert_eq!(dt, "2001-09-09T01:46:40+00:00");
+        let dt = best_guess_taken_dt(&info, tz())
+            .ok_or_else(|| anyhow!("no date when both present"))?;
+        assert_eq!(dt, AT_ZONE);
+        Ok(())
+    }
+
+    /// A filesystem stamp is an instant, and the archive is laid out on the
+    /// photographer's wall clock, so it is rendered in the output zone and bucketed
+    /// there. Rendered at UTC — which is what `DateTime::from_timestamp_millis`
+    /// gives unaided — this instant would be filed under the 9th at 01:46 instead.
+    #[test]
+    fn test_filesystem_time_is_bucketed_in_the_output_tz() -> anyhow::Result<()> {
+        use anyhow::anyhow;
+
+        let mut info = MediaFileInfo::new_for_test();
+        info.modified = Some(1_000_000_000_000);
+        let taken =
+            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from modified"))?;
+
+        assert_eq!(taken, "2001-09-09T13:46:40+12:00");
+        assert_eq!(
+            get_desired_media_path("abc1234", &Some(taken)),
+            "2001/09/09/1346-40000"
+        );
         Ok(())
     }
 
@@ -319,7 +357,7 @@ mod tests {
         let mut info = MediaFileInfo::new_for_test();
         info.track_info = Some(track("2024-04-18T11:24:26+00:00"));
         assert_eq!(
-            best_guess_taken_dt(&info).as_deref(),
+            best_guess_taken_dt(&info, tz()).as_deref(),
             Some("2024-04-18T11:24:26+00:00")
         );
 
@@ -327,7 +365,7 @@ mod tests {
         info.created = Some(1_000_000_000_000);
         info.modified = Some(1_000_000_000_000);
         assert_eq!(
-            best_guess_taken_dt(&info).as_deref(),
+            best_guess_taken_dt(&info, tz()).as_deref(),
             Some("2024-04-18T11:24:26+00:00")
         );
     }

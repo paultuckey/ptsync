@@ -4,12 +4,16 @@
 
 use super::schema::{DB_MEDIA_ITEM_INSERT, DB_MEDIA_PERSON_INSERT, DB_PERSON_INSERT};
 use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
-use crate::util::{GEOHASH_PRECISION, geohash_encode, orientation};
+use crate::util::{GEOHASH_PRECISION, OutputTZ, geohash_encode, orientation};
 use turso::{Connection, params};
 
-pub(super) async fn db_record(conn: &Connection, info: &MediaFileInfo) -> anyhow::Result<()> {
+pub(super) async fn db_record(
+    conn: &Connection,
+    info: &MediaFileInfo,
+    tz: OutputTZ,
+) -> anyhow::Result<()> {
     let media_info_json = serde_json::to_string(&info)?;
-    let guessed_datetime = best_guess_taken_dt(info);
+    let guessed_datetime = best_guess_taken_dt(info, tz);
     let lat_long = best_guess_lat_long(info);
     let (latitude, longitude) = match lat_long {
         Some((lat, long)) => (Some(lat), Some(long)),

@@ -1,4 +1,5 @@
 use crate::fs::FileSystem;
+use crate::util::OutputTZ;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use tracing::{debug, warn};
@@ -306,9 +307,14 @@ impl SupplementalInfoDateTime {
     /// predates 2001-09-09, when the timestamp is nine digits and the guess
     /// reads real seconds as milliseconds. Every scanned or imported photo older
     /// than that landed in January 1970.
-    pub(crate) fn timestamp_s_as_iso_8601(&self) -> Option<String> {
+    ///
+    /// The value is an absolute instant — Google's own `formatted` sibling field
+    /// spells it "22 May 2024, 00:17:51 UTC" — so it is rendered in `zone` rather
+    /// than UTC, or every archive outside Britain would be bucketed against a wall
+    /// clock nobody was reading. See [`OutputTZ`].
+    pub(crate) fn timestamp_s_as_iso_8601(&self, tz: OutputTZ) -> Option<String> {
         let seconds = self.timestamp.as_ref()?.trim().parse::<i64>().ok()?;
-        crate::util::timestamp_to_rfc3339(seconds.checked_mul(1000)?)
+        tz.render_millis(seconds.checked_mul(1000)?)
     }
 }
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -334,6 +340,7 @@ fn parse_supplemental_info<R: Read>(json_reader: R) -> Option<PsSupplementalInfo
 mod tests {
     use super::*;
     use crate::fs::OsFileSystem;
+    use crate::test_util::tz;
     use std::fs::File;
 
     /// Lay out `files` as empty files in a temp dir, then resolve the sidecar for
@@ -664,11 +671,13 @@ mod tests {
         let taken = r
             .photo_taken_time
             .ok_or_else(|| anyhow!("Missing photo_taken_time"))?;
+        // The `formatted` sibling above spells this instant in UTC; the reading
+        // comes out in the output zone, a quarter past noon rather than midnight.
         assert_eq!(
             taken
-                .timestamp_s_as_iso_8601()
+                .timestamp_s_as_iso_8601(tz())
                 .ok_or_else(|| anyhow!("Missing iso 8601"))?,
-            "2024-05-22T00:17:51+00:00"
+            "2024-05-22T12:17:51+12:00"
         );
         Ok(())
     }
@@ -683,27 +692,27 @@ mod tests {
                 timestamp: Some(ts.to_string()),
                 formatted: None,
             }
-            .timestamp_s_as_iso_8601()
+            .timestamp_s_as_iso_8601(tz())
         };
         // Ten digits, the common modern case.
         assert_eq!(
             at("1716337071").as_deref(),
-            Some("2024-05-22T00:17:51+00:00")
+            Some("2024-05-22T12:17:51+12:00")
         );
         // Nine digits: a scanned photo from 1990, not 1970.
         assert_eq!(
             at("631152000").as_deref(),
-            Some("1990-01-01T00:00:00+00:00")
+            Some("1990-01-01T12:00:00+12:00")
         );
         // Negative: a scan of something older than the epoch.
         assert_eq!(
             at("-31536000").as_deref(),
-            Some("1969-01-01T00:00:00+00:00")
+            Some("1969-01-01T12:00:00+12:00")
         );
         // Whitespace and junk.
         assert_eq!(
             at(" 631152000 ").as_deref(),
-            Some("1990-01-01T00:00:00+00:00")
+            Some("1990-01-01T12:00:00+12:00")
         );
         assert_eq!(at(""), None);
         assert_eq!(at("not a timestamp"), None);

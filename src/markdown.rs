@@ -1,6 +1,6 @@
 use crate::fs::WritableFileSystem;
 use crate::media::{MediaFileInfo, best_guess_taken_dt};
-use crate::util::name_part;
+use crate::util::{OutputTZ, name_part};
 use anyhow::anyhow;
 use std::io::{Cursor, Read};
 use tracing::{debug, warn};
@@ -10,8 +10,9 @@ use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 pub(crate) fn mfm_from_media_file_info(
     media_info: &MediaFileInfo,
     album_names: &[String],
+    tz: OutputTZ,
 ) -> PhotoSorterFrontMatter {
-    let guessed_datetime = best_guess_taken_dt(media_info);
+    let guessed_datetime = best_guess_taken_dt(media_info, tz);
     let (latitude, longitude) = best_guess_coords(media_info);
     PhotoSorterFrontMatter {
         path_original: media_info.original_path.clone(),
@@ -89,6 +90,7 @@ pub(crate) fn sync_markdown(
     resolved_media_path: &str,
     album_names: &[String],
     output_c: &dyn WritableFileSystem,
+    tz: OutputTZ,
 ) -> anyhow::Result<()> {
     // The sidecar is placed beside the *resolved* media file (the path
     // `write_media` actually wrote to), not the bare date path. Same-instant
@@ -97,7 +99,7 @@ pub(crate) fn sync_markdown(
     // path gives each its own note (`2213-20000-ccf63c8.md`) instead of having
     // them all clobber a single `2213-20000.md`.
     let output_path = get_desired_markdown_path(resolved_media_path)?;
-    let mfm = mfm_from_media_file_info(media_file, album_names);
+    let mfm = mfm_from_media_file_info(media_file, album_names, tz);
     // On first creation the body embeds the photo itself, so opening the note in
     // A markdown viewer shows the image. The body is preserved
     // verbatim on later runs, so user notes and this embed are never clobbered.
@@ -616,7 +618,7 @@ checksum: abcdefg
             longitude: Some(152.2605),
         };
         let m = mfi_with_supp(Some(geo), &["Tim Tam", "  ", "Nandor"]);
-        let mfm = mfm_from_media_file_info(&m, &["Holiday".to_string()]);
+        let mfm = mfm_from_media_file_info(&m, &["Holiday".to_string()], crate::test_util::tz());
         assert_eq!(mfm.people, vec!["[[Tim Tam]]", "[[Nandor]]"]);
         assert_eq!(mfm.albums, vec!["[[Holiday]]"]);
         assert_eq!(mfm.latitude, Some(-21.6303));
@@ -632,7 +634,7 @@ checksum: abcdefg
             longitude: Some(0.0),
         };
         let m = mfi_with_supp(Some(geo), &[]);
-        let mfm = mfm_from_media_file_info(&m, &[]);
+        let mfm = mfm_from_media_file_info(&m, &[], crate::test_util::tz());
         assert_eq!(mfm.latitude, None);
         assert_eq!(mfm.longitude, None);
     }

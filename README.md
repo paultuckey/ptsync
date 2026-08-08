@@ -168,6 +168,11 @@ part of an archive. See the full [CLI reference](docs/cli.md) for every option, 
 
 - **Dates** are read from EXIF metadata, supplemental JSON sidecars (common in Google
   Takeout), or the file's modification time as a fallback.
+- **Timezones.** The archive is laid out on the photographer's wall clock: a photo taken
+  at 10am is filed at 10am, wherever it was taken. A camera's own clock reading is used
+  as it stands. Sources that record an absolute instant instead - Takeout sidecars, GPS,
+  file timestamps - are converted to *the timezone of the machine running ptsync*, since
+  nothing in those files says where the shutter was. Set `TZ` env var if you need a particular one.
 - **File paths** follow `yyyy/mm/dd/hhmm-ssms.ext` - for example
   `2024/07/15/1430-22417.jpg` is 15 July 2024 at 14:30:22.417. If two *different* photos
   share the same instant, the second gets a checksum suffix

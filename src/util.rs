@@ -1,7 +1,7 @@
 use crate::file_type::{QuickFileType, find_quick_file_type};
 use crate::fs::FileSystem;
 use anyhow::Result;
-use chrono::DateTime;
+use chrono::{DateTime, FixedOffset, Local, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
@@ -122,8 +122,29 @@ pub(crate) fn name_part(file_path_s: &String) -> String {
     file_name_str.to_string_lossy().to_string()
 }
 
-pub(crate) fn timestamp_to_rfc3339(ts: i64) -> Option<String> {
-    DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum OutputTZ {
+    Machine,
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fixed(FixedOffset),
+}
+
+impl OutputTZ {
+    /// Render an absolute instant, as epoch milliseconds. `None` when the value is
+    /// out of the range chrono can represent, so an absurd timestamp becomes no
+    /// date at all rather than a plausible-looking wrong one.
+    pub(crate) fn render_millis(&self, ts_millis: i64) -> Option<String> {
+        Some(self.render(DateTime::from_timestamp_millis(ts_millis)?))
+    }
+
+    /// Render an instant that has already been parsed — a GPS reading, which is
+    /// UTC by definition rather than by assumption.
+    pub(crate) fn render(&self, instant: DateTime<Utc>) -> String {
+        match self {
+            OutputTZ::Machine => instant.with_timezone(&Local).to_rfc3339(),
+            OutputTZ::Fixed(offset) => instant.with_timezone(offset).to_rfc3339(),
+        }
+    }
 }
 
 /// Pair up a latitude/longitude only when both are present and not the `(0, 0)`
@@ -237,6 +258,46 @@ mod tests {
     use super::*;
     use crate::fs::{FileMetadata, OsFileSystem, ReadSeek, ZipFileSystem};
     use anyhow::anyhow;
+
+    /// An instant is rendered at the offset it is handed, and that offset decides
+    /// which `yyyy/mm/dd` directory the file lands in. Asserted against fixed
+    /// offsets rather than `Local`, so the expectations are the same everywhere —
+    /// reading `Local` here would only prove the machine agrees with itself, and
+    /// would pass on a UTC build agent no matter what the code did.
+    #[test]
+    fn test_instant_renders_at_the_offset_it_is_given() -> Result<()> {
+        use chrono::FixedOffset;
+        // 2024-05-22T00:17:51Z — the instant Google records for the test fixture.
+        let ts = 1_716_337_071_000;
+        let at = |hours: i32| -> Option<String> {
+            OutputTZ::Fixed(FixedOffset::east_opt(hours * 3600)?).render_millis(ts)
+        };
+
+        // Auckland reads that instant as lunchtime on the 22nd...
+        assert_eq!(at(12).as_deref(), Some("2024-05-22T12:17:51+12:00"));
+        // ...and New York as the evening of the 21st: a different directory, and
+        // the reason the archive layout depends on where it was built.
+        assert_eq!(at(-4).as_deref(), Some("2024-05-21T20:17:51-04:00"));
+        assert_eq!(at(0).as_deref(), Some("2024-05-22T00:17:51+00:00"));
+
+        // Whatever the offset, the instant underneath is untouched.
+        for hours in [-11, -4, 0, 12, 13] {
+            let rendered = at(hours).ok_or_else(|| anyhow!("no reading at {hours}h"))?;
+            assert_eq!(
+                chrono::DateTime::parse_from_rfc3339(&rendered)?.timestamp_millis(),
+                ts,
+                "rendering at {hours}h moved the instant"
+            );
+        }
+
+        // Out-of-range milliseconds are no date at all, not a wrapped one.
+        assert_eq!(
+            OutputTZ::Fixed(FixedOffset::east_opt(0).ok_or_else(|| anyhow!("bad offset"))?)
+                .render_millis(i64::MAX),
+            None
+        );
+        Ok(())
+    }
 
     /// A backend that reports a checksum from "metadata" but whose body read
     /// always fails. It proves `is_existing_file_same` decides from the recorded
