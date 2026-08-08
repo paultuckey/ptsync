@@ -34,9 +34,9 @@ app-independent archive you can back up anywhere, this is for you.
 - **Non-destructive & repeatable** - additive only, and idempotent: running it again
   produces no changes.
 
-Supported formats: images (JPG, PNG, HEIC, GIF) and video (MP4, M4V, MOV, AVI, MPG). Other
-file types are skipped. AVI and MPG carry no embedded capture time, so those files are dated
-from their sidecar metadata or file timestamps.
+Supported formats: images (JPG, PNG, HEIC, GIF) and video (MP4, M4V, MOV, AVI, MPG, WMV).
+Other file types are skipped. AVI, MPG and WMV carry no embedded capture time, so those
+files are dated from their sidecar metadata or file timestamps.
 
 > [!NOTE]
 > **Your originals are safe.** ptsync is *additive only*: it copies files **into** your
