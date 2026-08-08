@@ -22,7 +22,10 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 sha2 = "0.11.0"
 zip = "8.6.0"
 chrono = "0.4.45"
-file-format = "0.29.0"
+# `reader-asf` walks the ASF header objects. Without it every ASF-based file —
+# WMV, WMA, bare ASF — sniffs as the container alone, so a Windows Media video
+# is indistinguishable from a Windows Media audio track.
+file-format = { version = "0.29.0", features = ["reader-asf"] }
 yaml-rust2 = "0.11.0"
 regex = "1.13.1"
 strum_macros = "0.28.0"
