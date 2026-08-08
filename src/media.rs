@@ -97,14 +97,17 @@ pub(crate) fn media_file_derived_from_media_info(
 /// Best guess at the date the photo was taken from messy optional data, in the order of preference:
 /// 1. SupplementalInfo photo_taken_time
 /// 2. EXIF DateTimeOriginal
-/// 3. EXIF DateTime
-/// 4. EXIF GPSDateStamp - only accurate up to minute
-/// 5. Track creation_time - the embedded capture time for videos (already rfc3339)
-/// 6. SupplementalInfo creation_time
-/// 7. File modified time
+/// 3. EXIF CreateDate (DateTimeDigitized)
+/// 4. EXIF DateTime (ModifyDate) - the last time the file changed, so any edit
+///    pushes it past the capture; below the two capture tags for that reason
+/// 5. EXIF GPSDateStamp + GPSTimeStamp - the receiver's own reading, UTC by
+///    definition rather than by assumption; the day alone if the time is missing
+/// 6. Track creation_time - the embedded capture time for videos (already rfc3339)
+/// 7. SupplementalInfo creation_time
+/// 8. File modified time
 ///   - no timezone info, unreliable in zips, somewhat unreliable in directories due to file
 ///     copying / syncing not preserving, only use as second to last resort
-/// 8. File creation time
+/// 9. File creation time
 ///   - no timezone info, unavailable in zips, somewhat unreliable in directories due to file
 ///     copying / syncing not preserving, only use as a last resort
 ///
@@ -204,12 +207,14 @@ pub(crate) fn get_desired_media_path(
         match dt_r {
             Ok(dt) => {
                 date_dir = format!("{}/{:0>2}/{:0>2}", dt.year(), dt.month(), dt.day());
+                // A leap second reads as 1000-1999 sub-second milliseconds and
+                // would widen the fixed-width name by a digit; clamp it.
                 name = format!(
                     "{:0>2}{:0>2}-{:0>2}{:0>3}",
                     dt.hour(),
                     dt.minute(),
                     dt.second(),
-                    dt.timestamp_subsec_millis()
+                    dt.timestamp_subsec_millis().min(999)
                 );
             }
             Err(_) => {

@@ -298,17 +298,17 @@ pub(crate) struct SupplementalInfoDateTime {
 }
 
 impl SupplementalInfoDateTime {
+    /// Takeout writes this field as whole seconds since the epoch, always, so it
+    /// is read as seconds unconditionally.
+    ///
+    /// Guessing the unit from the digit count instead — ten digits means
+    /// seconds, anything else means milliseconds — looks harmless until a photo
+    /// predates 2001-09-09, when the timestamp is nine digits and the guess
+    /// reads real seconds as milliseconds. Every scanned or imported photo older
+    /// than that landed in January 1970.
     pub(crate) fn timestamp_s_as_iso_8601(&self) -> Option<String> {
-        if let Some(ts) = &self.timestamp
-            && let Ok(ts_i64) = ts.parse::<i64>()
-        {
-            if ts.len() == 10 {
-                // seconds to milliseconds
-                return crate::util::timestamp_to_rfc3339(ts_i64 * 1000);
-            }
-            return crate::util::timestamp_to_rfc3339(ts_i64);
-        }
-        None
+        let seconds = self.timestamp.as_ref()?.trim().parse::<i64>().ok()?;
+        crate::util::timestamp_to_rfc3339(seconds.checked_mul(1000)?)
     }
 }
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -671,5 +671,43 @@ mod tests {
             "2024-05-22T00:17:51+00:00"
         );
         Ok(())
+    }
+
+    /// Takeout timestamps are seconds, whatever their digit count. A photo from
+    /// before 2001-09-09 has a nine-digit one, and reading that as milliseconds
+    /// filed every older scan under January 1970.
+    #[test]
+    fn test_timestamp_read_as_seconds_at_every_width() {
+        let at = |ts: &str| {
+            SupplementalInfoDateTime {
+                timestamp: Some(ts.to_string()),
+                formatted: None,
+            }
+            .timestamp_s_as_iso_8601()
+        };
+        // Ten digits, the common modern case.
+        assert_eq!(
+            at("1716337071").as_deref(),
+            Some("2024-05-22T00:17:51+00:00")
+        );
+        // Nine digits: a scanned photo from 1990, not 1970.
+        assert_eq!(
+            at("631152000").as_deref(),
+            Some("1990-01-01T00:00:00+00:00")
+        );
+        // Negative: a scan of something older than the epoch.
+        assert_eq!(
+            at("-31536000").as_deref(),
+            Some("1969-01-01T00:00:00+00:00")
+        );
+        // Whitespace and junk.
+        assert_eq!(
+            at(" 631152000 ").as_deref(),
+            Some("1990-01-01T00:00:00+00:00")
+        );
+        assert_eq!(at(""), None);
+        assert_eq!(at("not a timestamp"), None);
+        // Absurd values overflow rather than wrap into a plausible-looking date.
+        assert_eq!(at("9223372036854775807"), None);
     }
 }
