@@ -6,6 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::str::FromStr;
 use tracing::{debug, warn};
 use unicode_normalization::UnicodeNormalization;
 
@@ -122,8 +123,8 @@ pub(crate) fn name_part(file_path_s: &String) -> String {
     file_name_str.to_string_lossy().to_string()
 }
 
-/// Name of the environment variable that overrides the machine's zone.
-pub(crate) const OUTPUT_TZ_ENV: &str = "PTSYNC_TZ";
+/// Name of the environment variable consulted when `--timezone` is not given.
+pub(crate) const TZ_ENV: &str = "TZ";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum OutputTZ {
@@ -132,31 +133,54 @@ pub(crate) enum OutputTZ {
 }
 
 impl OutputTZ {
-    /// The zone for this run: the fixed offset in [`OUTPUT_TZ_ENV`] if it is set,
-    /// otherwise the machine's own.
+    /// The zone for this run: `--timezone` if given, else a UTC offset in
+    /// [`TZ_ENV`], else the machine's own.
     ///
-    /// The override exists because `TZ` is a Unix convention. On Windows chrono's
+    /// A flag exists at all because `TZ` is a Unix convention. On Windows chrono's
     /// [`Local`] reads the zone from the Win32 API and never looks at `TZ`, so
-    /// there is otherwise no way to ask for a particular zone — which broke the
+    /// without one there is no way to ask for a particular zone — which broke the
     /// snapshot test on a Windows runner, where every date silently came out at
     /// UTC, and left Windows users with no knob at all.
-    ///
-    /// A malformed value is an error rather than a warning-and-carry-on. Falling
-    /// back to the machine's zone would put the whole archive in a different place
-    /// than asked for, and a typo in a CI environment would show up as a puzzling
-    /// diff rather than as the mistake it is.
-    pub(crate) fn from_env() -> Result<Self> {
-        match std::env::var(OUTPUT_TZ_ENV) {
-            Err(_) => Ok(OutputTZ::Machine),
-            Ok(raw) if raw.trim().is_empty() => Ok(OutputTZ::Machine),
-            Ok(raw) => Ok(OutputTZ::Fixed(parse_utc_offset(raw.trim()).ok_or_else(
-                || {
-                    anyhow::anyhow!(
-                        "{OUTPUT_TZ_ENV}={raw:?} is not a UTC offset. Expected forms like \
-                         \"+12:00\", \"-04:00\", \"+0545\" or \"UTC\"."
-                    )
-                },
-            )?)),
+    pub(crate) fn resolve(arg: Option<&str>) -> Result<Self> {
+        Self::resolve_with(arg, std::env::var(TZ_ENV).ok().as_deref())
+    }
+
+    /// The environment is passed in rather than read here so the precedence rules
+    /// can be tested without touching the real one: tests share a process, so a
+    /// test that set `TZ` would leak into whichever ran alongside it.
+    fn resolve_with(arg: Option<&str>, tz_env: Option<&str>) -> Result<Self> {
+        // A malformed flag is an error rather than a warning-and-carry-on. Falling
+        // back to the machine's zone would put the whole archive somewhere other
+        // than asked for, and a typo in a CI environment would show up as a
+        // puzzling diff rather than as the mistake it is.
+        //
+        // chrono does the parsing, so `±HH:MM` and `±HHMM` are the forms, and
+        // `UTC` is spelled `+00:00`. Two of its habits carry through: it reads an
+        // offset off the front and ignores the rest, so `+12:00junk` is twelve
+        // hours east, and only IANA names are ruled out for certain.
+        if let Some(raw) = arg.map(str::trim).filter(|raw| !raw.is_empty()) {
+            let offset = FixedOffset::from_str(raw).map_err(|_| {
+                anyhow::anyhow!(
+                    "argument {raw:?} is not a UTC offset. Expected forms like \
+                     \"+12:00\", \"-04:00\", \"+0545\" or \"+00:00\"."
+                )
+            })?;
+            return Ok(OutputTZ::Fixed(offset));
+        }
+        // `TZ` usually holds an IANA name (`Pacific/Auckland`) or a POSIX rule
+        // (`EST5EDT`), neither of which is an offset. That is not an error: on Unix
+        // [`Local`] resolves those itself, DST and all, so the machine zone already
+        // *is* what `TZ` asked for. Only Windows ignores it, and there an offset is
+        // the way to say it.
+        match tz_env.map(str::trim).filter(|raw| !raw.is_empty()) {
+            Some(raw) => match FixedOffset::from_str(raw) {
+                Ok(offset) => Ok(OutputTZ::Fixed(offset)),
+                Err(_) => {
+                    debug!("{TZ_ENV}={raw:?} is not a UTC offset, using the machine's zone");
+                    Ok(OutputTZ::Machine)
+                }
+            },
+            None => Ok(OutputTZ::Machine),
         }
     }
 
@@ -175,51 +199,6 @@ impl OutputTZ {
             OutputTZ::Fixed(offset) => instant.with_timezone(offset).to_rfc3339(),
         }
     }
-}
-
-/// Parse a UTC offset: `Z`/`UTC`, or a sign followed by hours and optional
-/// minutes in any of `+12`, `+1200`, `+12:00`.
-///
-/// Deliberately offsets only, not IANA zone names. A name like
-/// `Pacific/Auckland` would need a bundled tz database to resolve, and would
-/// promise DST handling this cannot deliver; an offset says exactly what it means
-/// on every platform, which is the point of having the override at all.
-fn parse_utc_offset(raw: &str) -> Option<FixedOffset> {
-    if raw.eq_ignore_ascii_case("z") || raw.eq_ignore_ascii_case("utc") {
-        return FixedOffset::east_opt(0);
-    }
-    let (sign, rest) = match raw.split_at_checked(1)? {
-        ("+", rest) => (1, rest),
-        ("-", rest) => (-1, rest),
-        _ => return None,
-    };
-    let (hours, minutes) = match rest.split_once(':') {
-        Some((h, m)) => (h, m),
-        // No colon: two digits are hours, four are hours and minutes.
-        None => match rest.len() {
-            2 => (rest, "0"),
-            4 => rest.split_at(2),
-            _ => return None,
-        },
-    };
-    // Both fields must be bare digits. Rust's integer parser accepts a leading
-    // sign, which without this check makes `++12:00` a valid `+12:00` and, worse,
-    // `+-12:00` a valid *minus* twelve — the sign silently flipping under a form
-    // that reads as though it were east.
-    if !is_ascii_digits(hours) || !is_ascii_digits(minutes) {
-        return None;
-    }
-    let hours: i32 = hours.parse().ok()?;
-    let minutes: i32 = minutes.parse().ok()?;
-    if minutes >= 60 {
-        return None;
-    }
-    // `east_opt` rejects anything beyond a whole day, which covers absurd hours.
-    FixedOffset::east_opt(sign * (hours.checked_mul(3600)? + minutes * 60))
-}
-
-fn is_ascii_digits(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Pair up a latitude/longitude only when both are present and not the `(0, 0)`
@@ -334,54 +313,56 @@ mod tests {
     use crate::fs::{FileMetadata, OsFileSystem, ReadSeek, ZipFileSystem};
     use anyhow::anyhow;
 
-    /// The `PTSYNC_TZ` override is what pins the zone for the snapshot test on
-    /// every platform, so a hole in this parser would take the archive layout with
-    /// it. Exercised through the parser directly rather than through
-    /// [`OutputTZ::from_env`]: tests share one process, so reading the real
-    /// environment would make the result depend on the developer's shell — the
-    /// very thing the fixed test zone exists to avoid — and writing it would leak
-    /// into whichever test ran alongside.
+    /// Which of `--timezone` and `TZ` wins, what a value neither of them can use
+    /// does, and the spellings the README and `--help` promise. Driven through
+    /// [`OutputTZ::resolve_with`] rather than [`OutputTZ::resolve`]: tests share
+    /// one process, so reading the real environment would make the result depend
+    /// on the developer's shell — the very thing the fixed test zone exists to
+    /// avoid — and writing it would leak into whichever test ran alongside.
     #[test]
-    fn test_output_tz_override_parses_offsets() -> Result<()> {
-        let east = |secs: i32| FixedOffset::east_opt(secs);
+    fn test_output_tz_prefers_the_flag_over_the_environment() -> Result<()> {
+        let fixed = |secs: i32| -> Result<OutputTZ> {
+            Ok(OutputTZ::Fixed(
+                FixedOffset::east_opt(secs).ok_or_else(|| anyhow!("bad offset"))?,
+            ))
+        };
+        let hours = |h: i32| fixed(h * 3600);
+        let resolve = OutputTZ::resolve_with;
 
-        // The spellings a person might reasonably write, including the half-hour
-        // and three-quarter-hour zones that make "just parse the hours" wrong.
-        assert_eq!(parse_utc_offset("+12:00"), east(12 * 3600));
-        assert_eq!(parse_utc_offset("+1200"), east(12 * 3600));
-        assert_eq!(parse_utc_offset("+12"), east(12 * 3600));
-        assert_eq!(parse_utc_offset("-04:00"), east(-4 * 3600));
-        assert_eq!(parse_utc_offset("+05:45"), east(5 * 3600 + 45 * 60));
-        assert_eq!(parse_utc_offset("+0545"), east(5 * 3600 + 45 * 60));
-        assert_eq!(parse_utc_offset("-03:30"), east(-(3 * 3600 + 30 * 60)));
-        assert_eq!(parse_utc_offset("Z"), east(0));
-        assert_eq!(parse_utc_offset("utc"), east(0));
-        // A colon settles where the hours end, so an unpadded hour is unambiguous
-        // and accepted. Without one the width is the only signal, and `+1` is not
-        // enough to go on.
-        assert_eq!(parse_utc_offset("+1:00"), east(3600));
-        assert_eq!(parse_utc_offset("+1"), None);
+        // Both documented forms, including the three-quarter-hour zone that makes
+        // "just read the hours" wrong.
+        assert_eq!(resolve(Some("+12:00"), None)?, hours(12)?);
+        assert_eq!(resolve(Some("-04:00"), None)?, hours(-4)?);
+        assert_eq!(resolve(Some("+0545"), None)?, fixed(5 * 3600 + 45 * 60)?);
+        assert_eq!(resolve(Some("+00:00"), None)?, hours(0)?);
+        assert_eq!(resolve(None, Some("+12:00"))?, hours(12)?);
+        // The flag is the more specific instruction, so it wins outright — it is
+        // not merely a default for an unset `TZ`.
+        assert_eq!(resolve(Some("-04:00"), Some("+12:00"))?, hours(-4)?);
 
-        // Anything else is rejected rather than half-read. An IANA name is the
-        // likely mistake, and reading `+12` out of `Pacific/Auckland` — or zero out
-        // of gibberish — would silently file the whole archive somewhere else.
-        for bad in [
-            "Pacific/Auckland",
-            "NZST",
-            "12:00",
-            "+",
-            "",
-            "+12:60",
-            "+99:00",
-            "+12:0a",
-            "++12:00",
-            // The one that would matter: a stray sign must not flip the direction
-            // under a form that still reads as east.
-            "+-12:00",
-            "- 04:00",
-        ] {
-            assert_eq!(parse_utc_offset(bad), None, "{bad:?} should not parse");
-        }
+        // Nothing to go on, so the machine's own zone.
+        assert_eq!(resolve(None, None)?, OutputTZ::Machine);
+        assert_eq!(resolve(Some("  "), Some(""))?, OutputTZ::Machine);
+        // A `TZ` this cannot parse is the normal case on Unix, where `Local`
+        // resolves the name itself — the machine zone already is what was asked
+        // for, so it must not be an error.
+        assert_eq!(resolve(None, Some("Pacific/Auckland"))?, OutputTZ::Machine);
+        assert_eq!(resolve(None, Some("EST5EDT"))?, OutputTZ::Machine);
+        // ...and an unparseable `TZ` must not shadow a good flag.
+        assert_eq!(resolve(Some("+12:00"), Some("EST5EDT"))?, hours(12)?);
+
+        // The flag is a direct instruction, so a name it cannot read stops the run
+        // rather than quietly filing the archive somewhere else.
+        assert!(resolve(Some("Pacific/Auckland"), None).is_err());
+        // `UTC` is one of those names: chrono takes offsets, so zero is `+00:00`.
+        assert!(resolve(Some("UTC"), None).is_err());
+        assert!(resolve(Some("Z"), None).is_err());
+
+        // chrono's own warts, inherited deliberately rather than papered over: it
+        // reads an offset off the front and ignores whatever follows, and it wants
+        // both fields padded.
+        assert_eq!(resolve(Some("+12:00junk"), None)?, hours(12)?);
+        assert!(resolve(Some("+12"), None).is_err());
         Ok(())
     }
 

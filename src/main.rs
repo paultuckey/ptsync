@@ -37,6 +37,18 @@ pub(crate) const COMMAND_NAME: &str = "ptsync";
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Turn debugging information on
+    #[arg(short, long)]
+    debug: bool,
+
+    /// UTC offset to use when localizing UTC dates - `+12:00`, `-04:00`, `+0545` or `+00:00`
+    /// (else `TZ` env var, else the machine's zone)
+    // `allow_hyphen_values` because half the world's offsets start with one, and
+    // `-z -04:00` is how a person writes it; without it clap reads the value as
+    // another flag and rejects it.
+    #[arg(short = 'z', long, global = true, allow_hyphen_values = true)]
+    timezone: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -74,10 +86,6 @@ impl S3Opts {
 enum Commands {
     /// Show info for an individual photo or video
     Info {
-        /// Turn debugging information on
-        #[arg(short, long)]
-        debug: bool,
-
         /// The takeout or iCloud zip/directory
         #[arg(short, long)]
         root: String,
@@ -88,10 +96,6 @@ enum Commands {
     },
     /// Scan files in an archive or directory and collect meta info into a sqlite database
     Db {
-        /// Turn debugging information on
-        #[arg(short, long)]
-        debug: bool,
-
         /// The takeout or iCloud zip/directory
         #[arg(short, long)]
         input: String,
@@ -119,10 +123,6 @@ enum Commands {
     },
     /// Sync files in an archive or directory into a standardised directory structure
     Sync {
-        /// Turn debugging information on
-        #[arg(short, long)]
-        debug: bool,
-
         /// If set, don't do anything, just print what would be done.
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -164,13 +164,11 @@ fn main() {
 
 fn go() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    enable_debug(cli.debug);
+    let tz = OutputTZ::resolve(cli.timezone.as_deref())?;
     match cli.command {
-        Commands::Info { debug, root, input } => {
-            enable_debug(debug);
-            info_cmd::main(&input, &root, OutputTZ::from_env()?)?
-        }
+        Commands::Info { root, input } => info_cmd::main(&input, &root, tz)?,
         Commands::Db {
-            debug,
             input,
             output,
             clear,
@@ -178,7 +176,6 @@ fn go() -> anyhow::Result<()> {
             skip_albums,
             s3,
         } => {
-            enable_debug(debug);
             s3_fs::set_s3_config(s3.to_config());
             db_cmd::main(
                 &input,
@@ -188,11 +185,10 @@ fn go() -> anyhow::Result<()> {
                     skip_media,
                     skip_albums,
                 },
-                OutputTZ::from_env()?,
+                tz,
             )?
         }
         Commands::Sync {
-            debug,
             dry_run,
             skip_markdown,
             input,
@@ -201,7 +197,6 @@ fn go() -> anyhow::Result<()> {
             skip_albums,
             s3,
         } => {
-            enable_debug(debug);
             enable_dry_run(dry_run);
             s3_fs::set_s3_config(s3.to_config());
             sync_cmd::main(
@@ -211,7 +206,7 @@ fn go() -> anyhow::Result<()> {
                 skip_markdown,
                 skip_media,
                 skip_albums,
-                OutputTZ::from_env()?,
+                tz,
             )?;
         }
     }
