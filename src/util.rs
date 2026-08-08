@@ -1,7 +1,7 @@
 use crate::file_type::{QuickFileType, find_quick_file_type};
 use crate::fs::FileSystem;
 use anyhow::Result;
-use chrono::DateTime;
+use chrono::{DateTime, FixedOffset, Local, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
@@ -122,8 +122,104 @@ pub(crate) fn name_part(file_path_s: &String) -> String {
     file_name_str.to_string_lossy().to_string()
 }
 
-pub(crate) fn timestamp_to_rfc3339(ts: i64) -> Option<String> {
-    DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())
+/// Name of the environment variable that overrides the machine's zone.
+pub(crate) const OUTPUT_TZ_ENV: &str = "PTSYNC_TZ";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum OutputTZ {
+    Machine,
+    Fixed(FixedOffset),
+}
+
+impl OutputTZ {
+    /// The zone for this run: the fixed offset in [`OUTPUT_TZ_ENV`] if it is set,
+    /// otherwise the machine's own.
+    ///
+    /// The override exists because `TZ` is a Unix convention. On Windows chrono's
+    /// [`Local`] reads the zone from the Win32 API and never looks at `TZ`, so
+    /// there is otherwise no way to ask for a particular zone — which broke the
+    /// snapshot test on a Windows runner, where every date silently came out at
+    /// UTC, and left Windows users with no knob at all.
+    ///
+    /// A malformed value is an error rather than a warning-and-carry-on. Falling
+    /// back to the machine's zone would put the whole archive in a different place
+    /// than asked for, and a typo in a CI environment would show up as a puzzling
+    /// diff rather than as the mistake it is.
+    pub(crate) fn from_env() -> Result<Self> {
+        match std::env::var(OUTPUT_TZ_ENV) {
+            Err(_) => Ok(OutputTZ::Machine),
+            Ok(raw) if raw.trim().is_empty() => Ok(OutputTZ::Machine),
+            Ok(raw) => Ok(OutputTZ::Fixed(parse_utc_offset(raw.trim()).ok_or_else(
+                || {
+                    anyhow::anyhow!(
+                        "{OUTPUT_TZ_ENV}={raw:?} is not a UTC offset. Expected forms like \
+                         \"+12:00\", \"-04:00\", \"+0545\" or \"UTC\"."
+                    )
+                },
+            )?)),
+        }
+    }
+
+    /// Render an absolute instant, as epoch milliseconds. `None` when the value is
+    /// out of the range chrono can represent, so an absurd timestamp becomes no
+    /// date at all rather than a plausible-looking wrong one.
+    pub(crate) fn render_millis(&self, ts_millis: i64) -> Option<String> {
+        Some(self.render(DateTime::from_timestamp_millis(ts_millis)?))
+    }
+
+    /// Render an instant that has already been parsed — a GPS reading, which is
+    /// UTC by definition rather than by assumption.
+    pub(crate) fn render(&self, instant: DateTime<Utc>) -> String {
+        match self {
+            OutputTZ::Machine => instant.with_timezone(&Local).to_rfc3339(),
+            OutputTZ::Fixed(offset) => instant.with_timezone(offset).to_rfc3339(),
+        }
+    }
+}
+
+/// Parse a UTC offset: `Z`/`UTC`, or a sign followed by hours and optional
+/// minutes in any of `+12`, `+1200`, `+12:00`.
+///
+/// Deliberately offsets only, not IANA zone names. A name like
+/// `Pacific/Auckland` would need a bundled tz database to resolve, and would
+/// promise DST handling this cannot deliver; an offset says exactly what it means
+/// on every platform, which is the point of having the override at all.
+fn parse_utc_offset(raw: &str) -> Option<FixedOffset> {
+    if raw.eq_ignore_ascii_case("z") || raw.eq_ignore_ascii_case("utc") {
+        return FixedOffset::east_opt(0);
+    }
+    let (sign, rest) = match raw.split_at_checked(1)? {
+        ("+", rest) => (1, rest),
+        ("-", rest) => (-1, rest),
+        _ => return None,
+    };
+    let (hours, minutes) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        // No colon: two digits are hours, four are hours and minutes.
+        None => match rest.len() {
+            2 => (rest, "0"),
+            4 => rest.split_at(2),
+            _ => return None,
+        },
+    };
+    // Both fields must be bare digits. Rust's integer parser accepts a leading
+    // sign, which without this check makes `++12:00` a valid `+12:00` and, worse,
+    // `+-12:00` a valid *minus* twelve — the sign silently flipping under a form
+    // that reads as though it were east.
+    if !is_ascii_digits(hours) || !is_ascii_digits(minutes) {
+        return None;
+    }
+    let hours: i32 = hours.parse().ok()?;
+    let minutes: i32 = minutes.parse().ok()?;
+    if minutes >= 60 {
+        return None;
+    }
+    // `east_opt` rejects anything beyond a whole day, which covers absurd hours.
+    FixedOffset::east_opt(sign * (hours.checked_mul(3600)? + minutes * 60))
+}
+
+fn is_ascii_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Pair up a latitude/longitude only when both are present and not the `(0, 0)`
@@ -237,6 +333,97 @@ mod tests {
     use super::*;
     use crate::fs::{FileMetadata, OsFileSystem, ReadSeek, ZipFileSystem};
     use anyhow::anyhow;
+
+    /// The `PTSYNC_TZ` override is what pins the zone for the snapshot test on
+    /// every platform, so a hole in this parser would take the archive layout with
+    /// it. Exercised through the parser directly rather than through
+    /// [`OutputTZ::from_env`]: tests share one process, so reading the real
+    /// environment would make the result depend on the developer's shell — the
+    /// very thing the fixed test zone exists to avoid — and writing it would leak
+    /// into whichever test ran alongside.
+    #[test]
+    fn test_output_tz_override_parses_offsets() -> Result<()> {
+        let east = |secs: i32| FixedOffset::east_opt(secs);
+
+        // The spellings a person might reasonably write, including the half-hour
+        // and three-quarter-hour zones that make "just parse the hours" wrong.
+        assert_eq!(parse_utc_offset("+12:00"), east(12 * 3600));
+        assert_eq!(parse_utc_offset("+1200"), east(12 * 3600));
+        assert_eq!(parse_utc_offset("+12"), east(12 * 3600));
+        assert_eq!(parse_utc_offset("-04:00"), east(-4 * 3600));
+        assert_eq!(parse_utc_offset("+05:45"), east(5 * 3600 + 45 * 60));
+        assert_eq!(parse_utc_offset("+0545"), east(5 * 3600 + 45 * 60));
+        assert_eq!(parse_utc_offset("-03:30"), east(-(3 * 3600 + 30 * 60)));
+        assert_eq!(parse_utc_offset("Z"), east(0));
+        assert_eq!(parse_utc_offset("utc"), east(0));
+        // A colon settles where the hours end, so an unpadded hour is unambiguous
+        // and accepted. Without one the width is the only signal, and `+1` is not
+        // enough to go on.
+        assert_eq!(parse_utc_offset("+1:00"), east(3600));
+        assert_eq!(parse_utc_offset("+1"), None);
+
+        // Anything else is rejected rather than half-read. An IANA name is the
+        // likely mistake, and reading `+12` out of `Pacific/Auckland` — or zero out
+        // of gibberish — would silently file the whole archive somewhere else.
+        for bad in [
+            "Pacific/Auckland",
+            "NZST",
+            "12:00",
+            "+",
+            "",
+            "+12:60",
+            "+99:00",
+            "+12:0a",
+            "++12:00",
+            // The one that would matter: a stray sign must not flip the direction
+            // under a form that still reads as east.
+            "+-12:00",
+            "- 04:00",
+        ] {
+            assert_eq!(parse_utc_offset(bad), None, "{bad:?} should not parse");
+        }
+        Ok(())
+    }
+
+    /// An instant is rendered at the offset it is handed, and that offset decides
+    /// which `yyyy/mm/dd` directory the file lands in. Asserted against fixed
+    /// offsets rather than `Local`, so the expectations are the same everywhere —
+    /// reading `Local` here would only prove the machine agrees with itself, and
+    /// would pass on a UTC build agent no matter what the code did.
+    #[test]
+    fn test_instant_renders_at_the_offset_it_is_given() -> Result<()> {
+        use chrono::FixedOffset;
+        // 2024-05-22T00:17:51Z — the instant Google records for the test fixture.
+        let ts = 1_716_337_071_000;
+        let at = |hours: i32| -> Option<String> {
+            OutputTZ::Fixed(FixedOffset::east_opt(hours * 3600)?).render_millis(ts)
+        };
+
+        // Auckland reads that instant as lunchtime on the 22nd...
+        assert_eq!(at(12).as_deref(), Some("2024-05-22T12:17:51+12:00"));
+        // ...and New York as the evening of the 21st: a different directory, and
+        // the reason the archive layout depends on where it was built.
+        assert_eq!(at(-4).as_deref(), Some("2024-05-21T20:17:51-04:00"));
+        assert_eq!(at(0).as_deref(), Some("2024-05-22T00:17:51+00:00"));
+
+        // Whatever the offset, the instant underneath is untouched.
+        for hours in [-11, -4, 0, 12, 13] {
+            let rendered = at(hours).ok_or_else(|| anyhow!("no reading at {hours}h"))?;
+            assert_eq!(
+                chrono::DateTime::parse_from_rfc3339(&rendered)?.timestamp_millis(),
+                ts,
+                "rendering at {hours}h moved the instant"
+            );
+        }
+
+        // Out-of-range milliseconds are no date at all, not a wrapped one.
+        assert_eq!(
+            OutputTZ::Fixed(FixedOffset::east_opt(0).ok_or_else(|| anyhow!("bad offset"))?)
+                .render_millis(i64::MAX),
+            None
+        );
+        Ok(())
+    }
 
     /// A backend that reports a checksum from "metadata" but whose body read
     /// always fails. It proves `is_existing_file_same` decides from the recorded

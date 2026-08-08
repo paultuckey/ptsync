@@ -55,8 +55,8 @@ ORDER BY items DESC;
 Uses the best-guess date derived from metadata.
 
 ```sqlite
-SELECT strftime('%Y', guessed_datetime) AS year,
-       COUNT(*)                         AS items
+SELECT substr(guessed_datetime, 1, 4) AS year,
+       COUNT(*)                       AS items
 FROM media_item
 WHERE guessed_datetime IS NOT NULL
 GROUP BY year

@@ -22,6 +22,7 @@ mod test_util;
 mod track_util;
 mod util;
 
+use crate::util::OutputTZ;
 use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;
 use tracing::{Level, debug, error, info};
@@ -166,7 +167,7 @@ fn go() -> anyhow::Result<()> {
     match cli.command {
         Commands::Info { debug, root, input } => {
             enable_debug(debug);
-            info_cmd::main(&input, &root)?
+            info_cmd::main(&input, &root, OutputTZ::from_env()?)?
         }
         Commands::Db {
             debug,
@@ -187,6 +188,7 @@ fn go() -> anyhow::Result<()> {
                     skip_media,
                     skip_albums,
                 },
+                OutputTZ::from_env()?,
             )?
         }
         Commands::Sync {
@@ -209,6 +211,7 @@ fn go() -> anyhow::Result<()> {
                 skip_markdown,
                 skip_media,
                 skip_albums,
+                OutputTZ::from_env()?,
             )?;
         }
     }

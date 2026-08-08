@@ -181,10 +181,17 @@ UPDATE_DOCS=1 cargo test
 `docs/demo.gif` (shown at the top of the README) is recorded by [VHS](https://github.com/charmbracelet/vhs) from the
 script in `docs/demo.tape`.
 
+One-time install; pulls in ttyd and ffmpeg.
+
 ```shell
-brew install vhs                    # one-time; pulls in ttyd and ffmpeg
-cargo test --test sync_snapshot     # builds target/demo/ with the fixture zip
-vhs docs/demo.tape                  # re-records docs/demo.gif
+brew install vhs                    # 
+```
+
+Builds `target/demo/` with the fixture zip and re-records `docs/demo.gif`.
+
+```shell
+cargo test --test sync_snapshot
+vhs docs/demo.tape
 ```
 
 `tests/sync_snapshot.rs` runs the same sync and diffs the console

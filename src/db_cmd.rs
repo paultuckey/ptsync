@@ -17,7 +17,7 @@ use crate::file_type::QuickFileType;
 use crate::fs::{FileSystem, open_input};
 use crate::inspect::inspect_media_files;
 use crate::progress::Progress;
-use crate::util::{ScanInfo, media_item_id_for, scan_fs};
+use crate::util::{OutputTZ, ScanInfo, media_item_id_for, scan_fs};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -52,7 +52,12 @@ pub(crate) struct DbScanOpts {
     pub(crate) skip_albums: bool,
 }
 
-pub(crate) fn main(input: &String, output: &str, opts: DbScanOpts) -> anyhow::Result<()> {
+pub(crate) fn main(
+    input: &String,
+    output: &str,
+    opts: DbScanOpts,
+    tz: OutputTZ,
+) -> anyhow::Result<()> {
     debug!("Inspecting: {input}");
     let container = open_input(input)?;
 
@@ -64,7 +69,7 @@ pub(crate) fn main(input: &String, output: &str, opts: DbScanOpts) -> anyhow::Re
     // released here, on a plain blocking thread, after `block_on` returns.
     let result = rt.block_on(async {
         let (_db, conn) = open_conn(output).await?;
-        run_db_scan(container.clone(), &conn, opts, input).await
+        run_db_scan(container.clone(), &conn, opts, input, tz).await
     });
     drop(container);
     result
@@ -75,6 +80,7 @@ async fn run_db_scan(
     conn: &Connection,
     opts: DbScanOpts,
     run_input: &str,
+    tz: OutputTZ,
 ) -> anyhow::Result<()> {
     db_prepare(conn, opts.clear).await?;
 
@@ -134,7 +140,7 @@ async fn run_db_scan(
         let mut batch_count = 0;
         let mut inspected = inspect_media_files(container.clone(), media_si_files, prog.clone());
         for info in inspected.by_ref() {
-            db_record(conn, &info).await?;
+            db_record(conn, &info, tz).await?;
             batch_count += 1;
             if batch_count >= DB_BATCH_SIZE {
                 conn.execute("COMMIT", ()).await?;

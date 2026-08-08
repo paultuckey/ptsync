@@ -24,7 +24,14 @@ async fn test_db_scan() -> anyhow::Result<()> {
     crate::test_util::setup_log();
     let (_db, conn) = open_conn(":memory:").await?;
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-    run_db_scan(container, &conn, DbScanOpts::default(), "test").await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        "test",
+        crate::test_util::tz(),
+    )
+    .await?;
 
     let mut rows = conn
         .query(
@@ -135,7 +142,14 @@ async fn test_db_scan_classifies_paths() -> anyhow::Result<()> {
     crate::test_util::setup_log();
     let (_db, conn) = open_conn(":memory:").await?;
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-    run_db_scan(container, &conn, DbScanOpts::default(), "test").await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        "test",
+        crate::test_util::tz(),
+    )
+    .await?;
 
     // Every scanned file is recorded, matched or not.
     let file_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM classified_file", ())
@@ -176,7 +190,14 @@ async fn test_db_scan_zip() -> anyhow::Result<()> {
     let container: Arc<dyn FileSystem> =
         Arc::new(ZipFileSystem::new(zip_path.to_string_lossy().as_ref())?);
 
-    run_db_scan(container, &conn, DbScanOpts::default(), "test").await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        "test",
+        crate::test_util::tz(),
+    )
+    .await?;
 
     let mut rows = conn
         .query(
@@ -226,7 +247,14 @@ async fn test_db_scan_with_album() -> anyhow::Result<()> {
     let (_db, conn) = open_conn(":memory:").await?;
     let test_dir_str = test_dir.to_string_lossy();
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        &test_dir_str,
+        crate::test_util::tz(),
+    )
+    .await?;
 
     // The album id is the stable hash of the album path.
     let row = one_row(&conn, "SELECT album_id, title, album_path FROM album", ()).await?;
@@ -279,7 +307,14 @@ async fn test_db_scan_records_people_and_location() -> anyhow::Result<()> {
     let (_db, conn) = open_conn(":memory:").await?;
     let test_dir_str = test_dir.to_string_lossy();
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        &test_dir_str,
+        crate::test_util::tz(),
+    )
+    .await?;
 
     // Location promoted into columns.
     let row = one_row(
@@ -386,13 +421,21 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
         &conn,
         DbScanOpts::default(),
         &test_dir_str,
+        crate::test_util::tz(),
     )
     .await?;
     let id_first = media_item_id_of(&conn, "Canon_40D.jpg").await?;
 
     // Second run without --clear resumes the same input: already-recorded
     // media is skipped and the additive tables stay deduped.
-    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        &test_dir_str,
+        crate::test_util::tz(),
+    )
+    .await?;
 
     // Additive tables hold exactly one of each despite the re-scan.
     let album_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM album", ())
@@ -458,6 +501,7 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
             ..Default::default()
         },
         &test_dir_str,
+        crate::test_util::tz(),
     )
     .await?;
     let run_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM run", ())
@@ -497,7 +541,14 @@ async fn test_db_scan_resumes_and_adds_new_files() -> anyhow::Result<()> {
 
     // First run records the single file present.
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        &test_dir_str,
+        crate::test_util::tz(),
+    )
+    .await?;
     let count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
         .await?
         .get(0)?;
@@ -508,7 +559,14 @@ async fn test_db_scan_resumes_and_adds_new_files() -> anyhow::Result<()> {
     // already-recorded file is skipped rather than duplicated.
     fs::copy("test/Hello.mp4", test_dir.join("Hello.mp4"))?;
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        &test_dir_str,
+        crate::test_util::tz(),
+    )
+    .await?;
 
     let count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
         .await?
@@ -549,7 +607,14 @@ async fn test_db_scan_reinspects_changed_file() -> anyhow::Result<()> {
     let test_dir_str = test_dir.to_string_lossy();
 
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        &test_dir_str,
+        crate::test_util::tz(),
+    )
+    .await?;
     let hash_before: String = one_row(
         &conn,
         "SELECT long_hash FROM media_item WHERE media_path = 'photo.jpg'",
@@ -572,7 +637,14 @@ async fn test_db_scan_reinspects_changed_file() -> anyhow::Result<()> {
     drop(f);
 
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+    run_db_scan(
+        container,
+        &conn,
+        DbScanOpts::default(),
+        &test_dir_str,
+        crate::test_util::tz(),
+    )
+    .await?;
 
     // Still one row for that path, but its recorded content is refreshed.
     let count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
@@ -641,6 +713,7 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
                 ..Default::default()
             },
             &test_dir_str,
+            crate::test_util::tz(),
         )
         .await?;
 
@@ -667,6 +740,7 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
                 ..Default::default()
             },
             &test_dir_str,
+            crate::test_util::tz(),
         )
         .await?;
 
@@ -678,7 +752,14 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
             "no links without media_item rows"
         );
 
-        run_db_scan(container, &conn, DbScanOpts::default(), &test_dir_str).await?;
+        run_db_scan(
+            container,
+            &conn,
+            DbScanOpts::default(),
+            &test_dir_str,
+            crate::test_util::tz(),
+        )
+        .await?;
 
         assert_eq!(
             count_of(&conn, "media_item").await?,
@@ -705,6 +786,7 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
                 ..Default::default()
             },
             &test_dir_str,
+            crate::test_util::tz(),
         )
         .await?;
 
