@@ -9,7 +9,7 @@
 Merge Google Takeout and iCloud photo exports into one deduplicated, date-organized archive of
 ordinary files and Markdown notes
 
-Usage: ptsync <COMMAND>
+Usage: ptsync [OPTIONS] <COMMAND>
 
 Commands:
   info  Show info for an individual photo or video
@@ -18,8 +18,11 @@ Commands:
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
+  -d, --debug                Turn debugging information on
+  -z, --timezone <TIMEZONE>  UTC offset to use when localizing UTC dates - `+12:00`, `-04:00`,
+                             `+0545` or `+00:00` (else `TZ` env var, else the machine's zone)
+  -h, --help                 Print help
+  -V, --version              Print version
 ```
 
 ## ptsync info
@@ -30,10 +33,11 @@ Show info for an individual photo or video
 Usage: ptsync info [OPTIONS] --root <ROOT> --input <INPUT>
 
 Options:
-  -d, --debug          Turn debugging information on
-  -r, --root <ROOT>    The takeout or iCloud zip/directory
-  -i, --input <INPUT>  Photo, video or album to view info for
-  -h, --help           Print help
+  -r, --root <ROOT>          The takeout or iCloud zip/directory
+  -i, --input <INPUT>        Photo, video or album to view info for
+  -z, --timezone <TIMEZONE>  UTC offset to use when localizing UTC dates - `+12:00`, `-04:00`,
+                             `+0545` or `+00:00` (else `TZ` env var, else the machine's zone)
+  -h, --help                 Print help
 ```
 
 ## ptsync db
@@ -44,12 +48,13 @@ Scan files in an archive or directory and collect meta info into a sqlite databa
 Usage: ptsync db [OPTIONS] --input <INPUT>
 
 Options:
-  -d, --debug
-          Turn debugging information on
   -i, --input <INPUT>
           The takeout or iCloud zip/directory
   -o, --output <OUTPUT>
           Path to the sqlite database file to write [default: db.sqlite]
+  -z, --timezone <TIMEZONE>
+          UTC offset to use when localizing UTC dates - `+12:00`, `-04:00`, `+0545` or `+00:00`
+          (else `TZ` env var, else the machine's zone)
       --clear <CLEAR>
           Clear existing rows before scanning; also rebuilds the database if its schema is out of
           date [default: false] [possible values: true, false]
@@ -76,12 +81,13 @@ Sync files in an archive or directory into a standardised directory structure
 Usage: ptsync sync [OPTIONS] --input <INPUT>
 
 Options:
-  -d, --debug
-          Turn debugging information on
   -n, --dry-run
           If set, don't do anything, just print what would be done
       --input <INPUT>
           Google Takeout or iCloud input directory or zip file
+  -z, --timezone <TIMEZONE>
+          UTC offset to use when localizing UTC dates - `+12:00`, `-04:00`, `+0545` or `+00:00`
+          (else `TZ` env var, else the machine's zone)
   -o, --output <OUTPUT>
           Directory to sync photos and videos into
       --skip-markdown
