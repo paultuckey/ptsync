@@ -16,6 +16,7 @@ target/
 .idea/
 output/
 input/
+expiremental/
 db.sqlite
 db.sqlite-journal
 db.sqlite-wal
