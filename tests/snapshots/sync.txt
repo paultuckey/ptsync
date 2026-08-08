@@ -8,5 +8,5 @@
  INFO Inspecting 3 photo and video files
  INFO Outputting 2 photo and video files
  INFO Output "2024/05/22/1217-51000.jpg"
- INFO Output "2023/11/02/2230-00000.mp4"
+ INFO Output "2023/11/02/2130-00000.mp4"
  INFO Outputting 1 albums

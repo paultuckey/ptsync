@@ -164,11 +164,10 @@ fn main() {
 
 fn go() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let zone = OutputTZ::Machine;
     match cli.command {
         Commands::Info { debug, root, input } => {
             enable_debug(debug);
-            info_cmd::main(&input, &root, zone)?
+            info_cmd::main(&input, &root, OutputTZ::from_env()?)?
         }
         Commands::Db {
             debug,
@@ -189,7 +188,7 @@ fn go() -> anyhow::Result<()> {
                     skip_media,
                     skip_albums,
                 },
-                zone,
+                OutputTZ::from_env()?,
             )?
         }
         Commands::Sync {
@@ -212,7 +211,7 @@ fn go() -> anyhow::Result<()> {
                 skip_markdown,
                 skip_media,
                 skip_albums,
-                zone,
+                OutputTZ::from_env()?,
             )?;
         }
     }

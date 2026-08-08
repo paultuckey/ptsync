@@ -18,16 +18,24 @@ const TAPE_PATH: &str = "docs/demo.tape";
 
 const DEMO_NOTE: &str = "photo-archive/2024/05/22/1217-51000.md";
 
-/// The zone both this snapshot and `docs/demo.tape` are recorded in.
+/// The zone both this snapshot and `docs/demo.tape` are recorded in, as a value
+/// for ptsync's own `PTSYNC_TZ`.
 ///
 /// The fixture's dates come from Takeout `photoTakenTime` sidecars, which record
-/// absolute instants; ptsync buckets those at the machine's own zone, so the same
-/// sync writes `2024/05/22/1217-51000.jpg` here and `2024/05/21/2017-51000.jpg`
-/// in New York. Without pinning, the committed snapshot would only match for
-/// whoever last regenerated it. Auckland is chosen because that is where the GIF
-/// was recorded — `demo.tape` exports the same value, so the two agree whoever
-/// re-records them.
-const SNAPSHOT_TZ: &str = "Pacific/Auckland";
+/// absolute instants; ptsync buckets those in the output zone, so the same sync
+/// writes `2024/05/22/1217-51000.jpg` at `+12:00` and
+/// `2024/05/21/2017-51000.jpg` at `-04:00`. Without pinning, the committed
+/// snapshot would only match for whoever last regenerated it.
+///
+/// This deliberately sets ptsync's own variable and not `TZ`. `TZ` is a Unix
+/// convention: on Windows chrono reads the zone from the Win32 API and ignores
+/// it, so a `TZ`-pinned run there silently produced UTC dates and failed this
+/// test on the CI runner while passing on Linux.
+///
+/// A fixed offset rather than `Pacific/Auckland` — matching
+/// `test_util::test_zone`, which the unit tests use — so that the committed
+/// values cannot move when a tz database update revises a historical DST rule.
+const SNAPSHOT_TZ: &str = "+12:00";
 
 #[test]
 fn demo_tape_shows_a_note_ptsync_still_writes() -> Result<()> {
@@ -135,7 +143,7 @@ fn capture(cwd: &Path, argv: &[String]) -> Result<String> {
     let output = Command::new(program)
         .args(args)
         .current_dir(cwd)
-        .env("TZ", SNAPSHOT_TZ)
+        .env("PTSYNC_TZ", SNAPSHOT_TZ)
         .output()
         .with_context(|| format!("running {program}"))?;
     if !output.status.success() {

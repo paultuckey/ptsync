@@ -190,7 +190,7 @@ brew install vhs                    #
 Builds `target/demo/` with the fixture zip and re-records `docs/demo.gif`.
 
 ```shell
-cargo test --test sync_snapshot 
+cargo test --test sync_snapshot
 vhs docs/demo.tape
 ```
 

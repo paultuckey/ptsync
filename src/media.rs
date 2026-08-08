@@ -296,8 +296,7 @@ mod tests {
 
         info.created = Some(ts);
         info.modified = None;
-        let dt =
-            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from created"))?;
+        let dt = best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from created"))?;
         assert_eq!(dt, AT_ZONE);
 
         info.created = None;
@@ -310,8 +309,8 @@ mod tests {
         // last resort as it is unavailable in zips).
         info.modified = Some(ts);
         info.created = Some(1_600_000_000_000); // 2020-09-13T12:26:40Z
-        let dt = best_guess_taken_dt(&info, tz())
-            .ok_or_else(|| anyhow!("no date when both present"))?;
+        let dt =
+            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date when both present"))?;
         assert_eq!(dt, AT_ZONE);
         Ok(())
     }
