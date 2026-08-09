@@ -445,64 +445,41 @@ checksum: abcdefg
         Ok(())
     }
 
+    /// Anything that is not a well-formed delimited block is body, returned
+    /// untouched — a sidecar whose frontmatter cannot be read must not have it
+    /// silently swallowed. Every case is stated in both line endings.
     #[test]
-    fn parse_with_missing_beginning_line() {
-        assert_split("", "", "");
-    }
+    fn test_split_frontmatter_cases() {
+        // input, frontmatter, body
+        let cases: [(&str, &str, &str); 7] = [
+            ("", "", ""),
+            // No closing delimiter.
+            ("---\n", "", "---\n"),
+            // Delimited, but nothing between the delimiters.
+            ("---\n---\n", "", "---\n---\n"),
+            ("---\ndate: 2000-01-01\n---\n", "date: 2000-01-01", "\n"),
+            (
+                "---\ntitle: dummy_title---\ndummy_body",
+                "title: dummy_title",
+                "dummy_body",
+            ),
+            // Leading blank lines before the opening delimiter.
+            (
+                "\n\n\n---\ntitle: dummy_title---\ndummy_body",
+                "title: dummy_title",
+                "dummy_body",
+            ),
+            ("\n\n\ndummy_body", "", "\n\n\ndummy_body"),
+        ];
 
-    #[test]
-    fn parse_with_missing_ending_line() {
-        assert_split("---\n", "", "---\n");
-        assert_split("---\r\n", "", "---\r\n");
-    }
-
-    #[test]
-    fn parse_with_empty_frontmatter() {
-        assert_split("---\n---\n", "", "---\n---\n");
-        assert_split("---\r\n---\r\n", "", "---\r\n---\r\n");
-    }
-
-    #[test]
-    fn parse_with_missing_known_field() {
-        assert_split("---\ndate: 2000-01-01\n---\n", "date: 2000-01-01", "\n");
-        assert_split(
-            "---\r\ndate: 2000-01-01\r\n---\r\n",
-            "date: 2000-01-01",
-            "\r\n",
-        );
-    }
-
-    #[test]
-    fn parse_with_valid_frontmatter() {
-        assert_split(
-            "---\ntitle: dummy_title---\ndummy_body",
-            "title: dummy_title",
-            "dummy_body",
-        );
-        assert_split(
-            "---\r\ntitle: dummy_title---\r\ndummy_body",
-            "title: dummy_title",
-            "dummy_body",
-        );
-    }
-
-    #[test]
-    fn parse_with_extra_whitespace() {
-        assert_split(
-            "\n\n\n---\ntitle: dummy_title---\ndummy_body",
-            "title: dummy_title",
-            "dummy_body",
-        );
-        assert_split(
-            "\r\n\r\n\r\n---\r\ntitle: dummy_title---\r\ndummy_body",
-            "title: dummy_title",
-            "dummy_body",
-        );
-    }
-
-    #[test]
-    fn parse_md_only_with_no_frontmatter() {
-        assert_split("\n\n\ndummy_body", "", "\n\n\ndummy_body");
+        for (text, expected_fm, expected_md) in cases {
+            assert_split(text, expected_fm, expected_md);
+            assert_split(
+                &text.replace('\n', "\r\n"),
+                expected_fm,
+                &expected_md.replace('\n', "\r\n"),
+            );
+        }
     }
 
     #[test]

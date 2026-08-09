@@ -164,60 +164,39 @@ mod tests {
         m
     }
 
+    /// The candidate ladder, walked against the `test/duplicates` fixtures. A
+    /// name already taken by *different* content escalates to the short checksum
+    /// (`tsc` for a test record), then the long one (`tlc`), then gives up —
+    /// there is deliberately no `-1`/`-2` counter, so a name is reproducible from
+    /// the file's content alone.
     #[test]
-    fn test_resolve_no_collision_uses_bare_name() -> anyhow::Result<()> {
+    fn test_resolve_output_path_candidate_ladder() -> anyhow::Result<()> {
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/fresh-name".to_string()), "txt");
-        let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
-        assert_eq!(
-            res,
-            DeDuplicationResult::WritePath("duplicates/fresh-name.txt".to_string())
-        );
-        Ok(())
-    }
 
-    #[test]
-    fn test_resolve_base_collision_uses_short_checksum() -> anyhow::Result<()> {
-        // `duplicates/one.txt` exists with different content, so this goes
-        // straight to the short-checksum suffix — no -1/-2 counter.
-        let c = OsFileSystem::new("test");
-        let mfi = MediaFileInfo::new_for_test();
-        let derived = MediaFileDerivedInfo::new_for_test(Some("duplicates/one".to_string()), "txt");
-        let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
-        assert_eq!(
-            res,
-            DeDuplicationResult::WritePath("duplicates/one-tsc.txt".to_string())
-        );
-        Ok(())
-    }
+        // desired stem, resolved name — None when every candidate is taken
+        let cases: [(&str, Option<&str>); 4] = [
+            ("duplicates/fresh-name", Some("duplicates/fresh-name.txt")),
+            ("duplicates/one", Some("duplicates/one-tsc.txt")),
+            (
+                "duplicates/short-clash",
+                Some("duplicates/short-clash-tlc.txt"),
+            ),
+            ("duplicates/too-many", None),
+        ];
 
-    #[test]
-    fn test_resolve_short_checksum_collision_falls_back_to_long() -> anyhow::Result<()> {
-        // Both `short-clash.txt` and `short-clash-tsc.txt` exist with different
-        // content.
-        let c = OsFileSystem::new("test");
-        let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/short-clash".to_string()), "txt");
-        let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
-        assert_eq!(
-            res,
-            DeDuplicationResult::WritePath("duplicates/short-clash-tlc.txt".to_string())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_resolve_all_candidates_taken_errors() -> anyhow::Result<()> {
-        // All three candidate names exist with different content.
-        let c = OsFileSystem::new("test");
-        let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/too-many".to_string()), "txt");
-        let res = Deduplicator::resolve_output_path(&mfi, &derived, &c);
-        assert_eq!(res.ok(), None);
+        for (stem, expected) in cases {
+            let derived = MediaFileDerivedInfo::new_for_test(Some(stem.to_string()), "txt");
+            let res = Deduplicator::resolve_output_path(&mfi, &derived, &c);
+            match expected {
+                Some(path) => assert_eq!(
+                    res.ok(),
+                    Some(DeDuplicationResult::WritePath(path.to_string())),
+                    "resolving {stem}"
+                ),
+                None => assert_eq!(res.ok(), None, "resolving {stem}"),
+            }
+        }
         Ok(())
     }
 

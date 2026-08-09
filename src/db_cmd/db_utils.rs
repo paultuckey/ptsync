@@ -26,7 +26,6 @@ pub(super) async fn query_one(
 pub(crate) mod test_support {
     use super::query_one;
     use anyhow::anyhow;
-    use std::path::Path;
     use turso::{Connection, IntoParams, Row};
 
     /// Errors when the query returns no row at all.
@@ -38,35 +37,5 @@ pub(crate) mod test_support {
         query_one(conn, sql, params)
             .await?
             .ok_or_else(|| anyhow!("query returned no rows: {sql}"))
-    }
-
-    /// Zip the `test/` directory flat, base names only, to exercise the
-    /// zip-container scan path.
-    pub(crate) fn create_zip_of_test_dir(output_path: &Path) -> anyhow::Result<()> {
-        use std::fs;
-        use zip::ZipWriter;
-        use zip::write::FileOptions;
-
-        let file = fs::File::create(output_path)?;
-        let mut zip = ZipWriter::new(file);
-        let options = FileOptions::<()>::default();
-
-        let root = Path::new("test");
-        for entry in fs::read_dir(root)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
-                let name = path
-                    .file_name()
-                    .ok_or_else(|| anyhow!("No file name"))?
-                    .to_str()
-                    .ok_or_else(|| anyhow!("Invalid UTF-8"))?;
-                zip.start_file(name, options)?;
-                let mut f = fs::File::open(&path)?;
-                std::io::copy(&mut f, &mut zip)?;
-            }
-        }
-        zip.finish()?;
-        Ok(())
     }
 }

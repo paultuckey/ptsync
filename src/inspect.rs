@@ -178,11 +178,8 @@ mod tests {
         crate::test_util::setup_log();
 
         // Isolated input dir so the skipped count is deterministic.
-        let test_dir = std::path::Path::new("target/test_inspect_skipped");
-        if test_dir.exists() {
-            fs::remove_dir_all(test_dir)?;
-        }
-        fs::create_dir_all(test_dir)?;
+        let test_dir = tempfile::tempdir()?;
+        let test_dir = test_dir.path();
         fs::copy("test/Canon_40D.jpg", test_dir.join("good.jpg"))?;
         // A .jpg extension over plain text: classifies as media, but is not a
         // valid image.
@@ -208,8 +205,6 @@ mod tests {
             1,
             "the invalid media file is counted as could-not-process"
         );
-
-        fs::remove_dir_all(test_dir)?;
         Ok(())
     }
 }

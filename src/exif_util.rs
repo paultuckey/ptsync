@@ -484,16 +484,145 @@ mod tests {
         })
     }
 
+    /// Every tag set [`best_guess_taken_exif`] has to resolve, and the reading it
+    /// must produce. The order under test is DateTimeOriginal, CreateDate,
+    /// ModifyDate, then the GPS pair — each date paired with its own sub-second
+    /// tag, and each unusable one falling through rather than being returned.
     #[test]
-    fn test_best_guess_falls_through_unparseable_tag() {
-        let exif = exif_with(&[
-            (ExifTag::DateTimeOriginal, "0000:00:00 00:00:00"),
-            (ExifTag::ModifyDate, "2015:04:18 11:10:44"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T11:10:44+00:00")
+    fn test_best_guess_taken_exif_cases() {
+        const DTO: ExifTag = ExifTag::DateTimeOriginal;
+        const CREATE: ExifTag = ExifTag::CreateDate;
+        const MODIFY: ExifTag = ExifTag::ModifyDate;
+        const SUB_ORIGINAL: ExifTag = ExifTag::SubSecTimeOriginal;
+        const SUB_DIGITIZED: ExifTag = ExifTag::SubSecTimeDigitized;
+        const SUB_MODIFY: ExifTag = ExifTag::SubSecTime;
+        const GPS_DATE: ExifTag = ExifTag::GPSDateStamp;
+        const GPS_TIME: ExifTag = ExifTag::GPSTimeStamp;
+
+        // what the row pins down, the tags, the reading they must produce
+        type TakenCase = (
+            &'static str,
+            Vec<(ExifTag, &'static str)>,
+            Option<&'static str>,
         );
+
+        let cases: Vec<TakenCase> = vec![
+            (
+                "an unparseable date falls through to the next tag",
+                vec![
+                    (DTO, "0000:00:00 00:00:00"),
+                    (MODIFY, "2015:04:18 11:10:44"),
+                ],
+                Some("2015-04-18T11:10:44+00:00"),
+            ),
+            (
+                "CreateDate is preferred over ModifyDate",
+                vec![
+                    (CREATE, "2008:05:30 15:56:01"),
+                    (MODIFY, "2008:07:31 10:38:11"),
+                ],
+                Some("2008-05-30T15:56:01+00:00"),
+            ),
+            (
+                "SubSecTimeOriginal refines DateTimeOriginal",
+                vec![(DTO, "2015:04:18 11:10:44"), (SUB_ORIGINAL, "939")],
+                Some("2015-04-18T11:10:44.939+00:00"),
+            ),
+            // Crossing the pairs would stamp one reading's fraction onto
+            // another's seconds.
+            (
+                "SubSecTime belongs to ModifyDate, not DateTimeOriginal",
+                vec![(DTO, "2015:04:18 11:10:44"), (SUB_MODIFY, "939")],
+                Some("2015-04-18T11:10:44+00:00"),
+            ),
+            (
+                "SubSecTimeDigitized pairs with CreateDate",
+                vec![
+                    (CREATE, "2015:04:18 11:10:44"),
+                    (SUB_DIGITIZED, "5"),
+                    (SUB_ORIGINAL, "939"),
+                ],
+                Some("2015-04-18T11:10:44.500+00:00"),
+            ),
+            (
+                "SubSecTime pairs with ModifyDate",
+                vec![(MODIFY, "2015:04:18 11:10:44"), (SUB_MODIFY, "07")],
+                Some("2015-04-18T11:10:44.070+00:00"),
+            ),
+            (
+                "the sub-second tag says nothing about the zone",
+                vec![(DTO, "2023-08-05T19:59:55+12:00"), (SUB_ORIGINAL, "42")],
+                Some("2023-08-05T19:59:55.420+12:00"),
+            ),
+            (
+                "a sub-second tag does not rescue or follow a rejected date",
+                vec![
+                    (DTO, "0000:00:00 00:00:00"),
+                    (SUB_ORIGINAL, "939"),
+                    (MODIFY, "2015:04:18 11:10:44"),
+                ],
+                Some("2015-04-18T11:10:44+00:00"),
+            ),
+            // Reading only GPSDateStamp buckets every GPS-dated file at midnight
+            // UTC — exactly the day boundary. 19:30 on the 17th in Greenwich is
+            // 07:30 on the *18th* at +12:00, so a regression to rendering at UTC
+            // shows up as a different day, not merely a different offset.
+            (
+                "the GPS date and time are one reading, in the output zone",
+                vec![(GPS_DATE, "2015:04:17"), (GPS_TIME, "19:30:45")],
+                Some("2015-04-18T07:30:45+12:00"),
+            ),
+            (
+                "the GPS seconds field is a rational, so it can carry a fraction",
+                vec![(GPS_DATE, "2015:04:17"), (GPS_TIME, "19:30:45.250")],
+                Some("2015-04-18T07:30:45.250+12:00"),
+            ),
+            (
+                "the GPS reading has no sub-second tag of its own",
+                vec![
+                    (GPS_DATE, "2015:04:17"),
+                    (GPS_TIME, "19:30:45"),
+                    (SUB_ORIGINAL, "939"),
+                    (SUB_MODIFY, "939"),
+                    (SUB_DIGITIZED, "939"),
+                ],
+                Some("2015-04-18T07:30:45+12:00"),
+            ),
+            (
+                "the camera clock outranks GPS",
+                vec![
+                    (MODIFY, "2008:07:31 10:38:11"),
+                    (GPS_DATE, "2015:04:17"),
+                    (GPS_TIME, "19:30:45"),
+                ],
+                Some("2008-07-31T10:38:11+00:00"),
+            ),
+            // Midnight is worse than the real time but far better than no date,
+            // which would drop the file through to its mtime.
+            (
+                "an absent GPS time falls back to the date alone",
+                vec![(GPS_DATE, "2015:04:17")],
+                Some("2015-04-17T00:00:00+00:00"),
+            ),
+        ];
+
+        for (label, tags, expected) in cases {
+            assert_eq!(
+                best_guess_taken_exif(&exif_with(&tags), tz()).as_deref(),
+                expected,
+                "{label}"
+            );
+        }
+
+        // Same fallback, for every spelling of a GPS time that cannot be read.
+        for time in ["", "   ", "not a time", "URationalArray[19/1 (19.0000)]"] {
+            let exif = exif_with(&[(GPS_DATE, "2015:04:17"), (GPS_TIME, time)]);
+            assert_eq!(
+                best_guess_taken_exif(&exif, tz()).as_deref(),
+                Some("2015-04-17T00:00:00+00:00"),
+                "with GPSTimeStamp {time:?}"
+            );
+        }
     }
 
     #[test]
@@ -520,155 +649,6 @@ mod tests {
         ] {
             assert_eq!(sub_sec_millis(raw), expected, "reading {raw:?}");
         }
-    }
-
-    #[test]
-    fn test_best_guess_applies_sub_second_tag() {
-        let exif = exif_with(&[
-            (ExifTag::DateTimeOriginal, "2015:04:18 11:10:44"),
-            (ExifTag::SubSecTimeOriginal, "939"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T11:10:44.939+00:00")
-        );
-    }
-
-    /// Crossing the pairs would stamp one reading's fraction onto another's
-    /// seconds.
-    #[test]
-    fn test_sub_second_tags_pair_with_their_own_date() {
-        // SubSecTime belongs to ModifyDate, not to DateTimeOriginal.
-        let exif = exif_with(&[
-            (ExifTag::DateTimeOriginal, "2015:04:18 11:10:44"),
-            (ExifTag::SubSecTime, "939"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T11:10:44+00:00"),
-            "SubSecTime must not refine DateTimeOriginal"
-        );
-
-        let exif = exif_with(&[
-            (ExifTag::CreateDate, "2015:04:18 11:10:44"),
-            (ExifTag::SubSecTimeDigitized, "5"),
-            (ExifTag::SubSecTimeOriginal, "939"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T11:10:44.500+00:00")
-        );
-
-        let exif = exif_with(&[
-            (ExifTag::ModifyDate, "2015:04:18 11:10:44"),
-            (ExifTag::SubSecTime, "07"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T11:10:44.070+00:00")
-        );
-    }
-
-    /// The sub-second tag says nothing about the zone.
-    #[test]
-    fn test_sub_second_keeps_recorded_offset() {
-        let exif = exif_with(&[
-            (ExifTag::DateTimeOriginal, "2023-08-05T19:59:55+12:00"),
-            (ExifTag::SubSecTimeOriginal, "42"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2023-08-05T19:59:55.420+12:00")
-        );
-    }
-
-    #[test]
-    fn test_sub_second_does_not_rescue_or_follow_a_rejected_date() {
-        let exif = exif_with(&[
-            (ExifTag::DateTimeOriginal, "0000:00:00 00:00:00"),
-            (ExifTag::SubSecTimeOriginal, "939"),
-            (ExifTag::ModifyDate, "2015:04:18 11:10:44"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T11:10:44+00:00")
-        );
-    }
-
-    /// The GPS reading has no sub-second tag of its own.
-    #[test]
-    fn test_gps_date_stamp_takes_no_sub_second() {
-        let exif = exif_with(&[
-            (ExifTag::GPSDateStamp, "2015:04:17"),
-            (ExifTag::GPSTimeStamp, "19:30:45"),
-            (ExifTag::SubSecTimeOriginal, "939"),
-            (ExifTag::SubSecTime, "939"),
-            (ExifTag::SubSecTimeDigitized, "939"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T07:30:45+12:00")
-        );
-    }
-
-    /// Reading only `GPSDateStamp` buckets every GPS-dated file at midnight UTC
-    /// — exactly the day boundary, so photographers west of UTC file a day early.
-    #[test]
-    fn test_gps_date_and_time_are_read_as_one_reading() {
-        let exif = exif_with(&[
-            (ExifTag::GPSDateStamp, "2015:04:17"),
-            (ExifTag::GPSTimeStamp, "19:30:45"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T07:30:45+12:00")
-        );
-
-        // The seconds field is a rational, so it can carry a fraction.
-        let exif = exif_with(&[
-            (ExifTag::GPSDateStamp, "2015:04:17"),
-            (ExifTag::GPSTimeStamp, "19:30:45.250"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T07:30:45.250+12:00")
-        );
-    }
-
-    #[test]
-    fn test_camera_clock_outranks_gps() {
-        let exif = exif_with(&[
-            (ExifTag::ModifyDate, "2008:07:31 10:38:11"),
-            (ExifTag::GPSDateStamp, "2015:04:17"),
-            (ExifTag::GPSTimeStamp, "19:30:45"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2008-07-31T10:38:11+00:00")
-        );
-    }
-
-    /// Midnight is worse than the real time but far better than no date, which
-    /// would drop the file through to its mtime.
-    #[test]
-    fn test_unusable_gps_time_falls_back_to_the_date() {
-        for time in ["", "   ", "not a time", "URationalArray[19/1 (19.0000)]"] {
-            let exif = exif_with(&[
-                (ExifTag::GPSDateStamp, "2015:04:17"),
-                (ExifTag::GPSTimeStamp, time),
-            ]);
-            assert_eq!(
-                best_guess_taken_exif(&exif, tz()).as_deref(),
-                Some("2015-04-17T00:00:00+00:00"),
-                "with GPSTimeStamp {time:?}"
-            );
-        }
-
-        let exif = exif_with(&[(ExifTag::GPSDateStamp, "2015:04:17")]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-17T00:00:00+00:00")
-        );
     }
 
     #[test]
@@ -748,18 +728,6 @@ mod tests {
             "2015/04/18/0730-45000"
         );
         Ok(())
-    }
-
-    #[test]
-    fn test_create_date_preferred_over_modify_date() {
-        let exif = exif_with(&[
-            (ExifTag::CreateDate, "2008:05:30 15:56:01"),
-            (ExifTag::ModifyDate, "2008:07:31 10:38:11"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2008-05-30T15:56:01+00:00")
-        );
     }
 
     /// The written filename is the only place a user sees the sub-second reading.

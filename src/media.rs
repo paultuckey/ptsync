@@ -256,51 +256,36 @@ mod tests {
     use crate::fs::{FileSystem, OsFileSystem};
     use crate::test_util::tz;
 
+    /// Rendered at UTC — what `DateTime::from_timestamp_millis` gives unaided —
+    /// this instant would be filed under the 9th at 01:46 instead, so the
+    /// bucketed path is asserted alongside the reading.
     #[test]
-    fn test_best_guess_taken_dt_timestamps() -> anyhow::Result<()> {
+    fn test_filesystem_times_are_read_in_the_output_tz() -> anyhow::Result<()> {
         use anyhow::anyhow;
-        let mut info = MediaFileInfo::new_for_test();
         // 1000000000000 ms = 2001-09-09T01:46:40Z, which the output zone reads as
         // a quarter to two in the afternoon.
-        let ts = 1000000000000;
+        let ts = 1_000_000_000_000;
         const AT_ZONE: &str = "2001-09-09T13:46:40+12:00";
 
-        info.created = Some(ts);
-        info.modified = None;
-        let dt = best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from created"))?;
-        assert_eq!(dt, AT_ZONE);
+        // created, modified — modified wins, since zips carry no creation time
+        let cases: [(Option<i64>, Option<i64>); 3] = [
+            (Some(ts), None),
+            (None, Some(ts)),
+            (Some(1_600_000_000_000), Some(ts)), // created is 2020-09-13T12:26:40Z
+        ];
 
-        info.created = None;
-        info.modified = Some(ts);
-        let dt =
-            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from modified"))?;
-        assert_eq!(dt, AT_ZONE);
-
-        // Modified wins over created, which is unavailable in zips.
-        info.modified = Some(ts);
-        info.created = Some(1_600_000_000_000); // 2020-09-13T12:26:40Z
-        let dt =
-            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date when both present"))?;
-        assert_eq!(dt, AT_ZONE);
-        Ok(())
-    }
-
-    /// Rendered at UTC — what `DateTime::from_timestamp_millis` gives unaided —
-    /// this instant would be filed under the 9th at 01:46 instead.
-    #[test]
-    fn test_filesystem_time_is_bucketed_in_the_output_tz() -> anyhow::Result<()> {
-        use anyhow::anyhow;
-
-        let mut info = MediaFileInfo::new_for_test();
-        info.modified = Some(1_000_000_000_000);
-        let taken =
-            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from modified"))?;
-
-        assert_eq!(taken, "2001-09-09T13:46:40+12:00");
-        assert_eq!(
-            get_desired_media_path("abc1234", &Some(taken)),
-            "2001/09/09/1346-40000"
-        );
+        for (created, modified) in cases {
+            let mut info = MediaFileInfo::new_for_test();
+            info.created = created;
+            info.modified = modified;
+            let taken = best_guess_taken_dt(&info, tz())
+                .ok_or_else(|| anyhow!("no date from {created:?}/{modified:?}"))?;
+            assert_eq!(taken, AT_ZONE, "created {created:?}, modified {modified:?}");
+            assert_eq!(
+                get_desired_media_path("abc1234", &Some(taken)),
+                "2001/09/09/1346-40000"
+            );
+        }
         Ok(())
     }
 
