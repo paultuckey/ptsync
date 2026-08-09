@@ -73,6 +73,9 @@ cargo clippy --tests
 cargo test
 ```
 
+See [docs/coverage.md](docs/coverage.md) for measuring which lines the tests
+reach.
+
 ```shell
 cargo update
 ```
