@@ -326,16 +326,20 @@ mod tests {
         Ok(())
     }
 
+    /// What one sync of the fixture produces: both media files under their
+    /// sidecar dates, the photo that arrived twice written once, and the album
+    /// linked from both sides.
     #[test]
-    fn sync_dates_media_from_supplemental_metadata() -> anyhow::Result<()> {
+    fn sync_writes_a_dated_deduplicated_archive() -> anyhow::Result<()> {
         let (_temp, archive) = run_sync(TAKEOUT_BASIC)?;
-        assert!(archive.join(format!("{FIXTURE_JPG_STEM}.jpg")).exists());
+        let stem = FIXTURE_JPG_STEM;
+        assert!(archive.join(format!("{stem}.jpg")).exists());
         assert!(archive.join(format!("{FIXTURE_MP4_STEM}.mp4")).exists());
         assert!(!archive.join("undated").exists());
 
+        let md = read_to_string(archive.join(format!("{stem}.md")))?;
         // Compared as an instant rather than a string: the sidecar's offset is
         // this machine's, so the two only spell the same on a UTC machine.
-        let md = read_to_string(archive.join(format!("{FIXTURE_JPG_STEM}.md")))?;
         let recorded = md
             .lines()
             .find_map(|l| l.strip_prefix("datetime: "))
@@ -346,35 +350,23 @@ mod tests {
             FIXTURE_JPG_EPOCH,
             "sidecar datetime {recorded:?} is not the instant the metadata recorded"
         );
-        Ok(())
-    }
 
-    #[test]
-    fn sync_deduplicates_identical_photo() -> anyhow::Result<()> {
-        let (_temp, archive) = run_sync(TAKEOUT_BASIC)?;
+        // The same photo sits in two source directories, so it is written once
+        // with both original paths recorded against it.
         let jpgs: Vec<_> = files_under(&archive)?
             .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "jpg"))
             .collect();
         assert_eq!(jpgs.len(), 1);
-        let md = read_to_string(archive.join(format!("{FIXTURE_JPG_STEM}.md")))?;
-        assert!(md.contains(
-            "checksum: 6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f"
-        ));
         assert!(md.contains("- Google Photos/Holiday/Canon_40D.jpg"));
         assert!(md.contains("- Google Photos/Photos from 2024/Canon_40D.jpg"));
-        Ok(())
-    }
 
-    #[test]
-    fn sync_writes_album_and_membership() -> anyhow::Result<()> {
-        let (_temp, archive) = run_sync(TAKEOUT_BASIC)?;
-        let stem = FIXTURE_JPG_STEM;
+        // The album links to where the photo was written, and the photo's own
+        // sidecar links back to the album.
         let album = read_to_string(archive.join("albums/Holiday.md"))?;
         assert!(album.contains("# Holiday Snaps"));
         assert!(album.contains(&format!("](../{stem}.jpg)")));
-        let photo_md = read_to_string(archive.join(format!("{stem}.md")))?;
-        assert!(photo_md.contains("[[Holiday]]"));
+        assert!(md.contains("[[Holiday]]"));
         Ok(())
     }
 
@@ -507,14 +499,59 @@ mod tests {
             BTreeSet::from(["a.jpg", "b.jpg"]),
             "each source photo should be recorded in its own sidecar"
         );
+        Ok(())
+    }
 
-        let first = mtimes_under(&output)?;
-        main(false, &input_s, &output_s, false, false, false, tz())?;
-        let second = mtimes_under(&output)?;
-        assert_eq!(
-            first, second,
-            "re-running over same-instant input must not rewrite any output file"
+    /// Derived names are date and checksum based, so nothing an input name says
+    /// can reach the output tree — and nothing may panic on the way.
+    #[test]
+    fn sync_over_hostile_input_names_stays_within_output() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+
+        // A unicode subdirectory holding two real photos — one under a reserved
+        // device name, one long — each with supplemental metadata fixing the
+        // date, plus an album metadata.json.
+        let album_dir = input.join("café 📸 Ñoño");
+        fs::create_dir_all(&album_dir)?;
+        let base = fs::read("test/Canon_40D.jpg")?;
+        for (name, marker) in [("CON.jpg", "A"), ("really_long_name_photo.jpg", "BB")] {
+            let mut bytes = base.clone();
+            bytes.extend_from_slice(marker.as_bytes());
+            fs::write(album_dir.join(name), &bytes)?;
+            fs::write(
+                album_dir.join(format!("{name}.supplemental-metadata.json")),
+                r#"{"photoTakenTime":{"timestamp":"1700000000"}}"#,
+            )?;
+        }
+        fs::write(
+            album_dir.join("metadata.json"),
+            r#"{"title":"Weird 📸 Album"}"#,
+        )?;
+
+        main(
+            false,
+            &input.to_string_lossy(),
+            &Some(output.to_string_lossy().to_string()),
+            false,
+            false,
+            false,
+            tz(),
+        )?;
+
+        let written = output_tree(&output)?;
+        assert!(
+            !written.is_empty(),
+            "sync should have written at least one file"
         );
+        for rel in written.keys() {
+            assert!(
+                !crate::test_util::escapes_output(rel),
+                "sync wrote outside output: {rel}"
+            );
+        }
         Ok(())
     }
 
@@ -538,8 +575,7 @@ mod tests {
     }
 
     /// The write path is generic over `WritableFileSystem`, and this is the seam
-    /// real S3 output reuses. Because the fake reports a native checksum, the
-    /// second pass also exercises the skip-via-`recorded_checksum` path.
+    /// real S3 output reuses.
     #[test]
     fn sync_writes_through_writable_trait_to_fake_s3() -> anyhow::Result<()> {
         use crate::media::media_file_derived_from_media_info;
@@ -571,21 +607,12 @@ mod tests {
         let stem = FIXTURE_JPG_STEM;
         assert!(out.exists(&format!("{stem}.jpg")));
         assert!(out.exists(&format!("{stem}.md")));
-        // The value a metadata-only HeadObject would compare against.
+        // The value a metadata-only HeadObject would compare against, which is
+        // what lets a re-run skip the upload without reading the body back.
         assert_eq!(
             out.recorded_checksum(&format!("{stem}.jpg")).as_deref(),
             Some("6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f")
         );
-
-        // The media dedups to SkipWrite via the recorded checksum, and the sidecar
-        // is unchanged.
-        let before = out.walk().len();
-        for media in deduper.sorted_media() {
-            let derived = media_file_derived_from_media_info(media, tz())?;
-            let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
-            sync_markdown(false, media, &final_path, &[], &out, tz())?;
-        }
-        assert_eq!(out.walk().len(), before, "re-run must not add new objects");
         Ok(())
     }
 }

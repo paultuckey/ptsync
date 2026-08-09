@@ -50,7 +50,7 @@ The source code is located in `src/`:
 -   **`album.rs`**: Logic for parsing album metadata (from CSV or JSON) and generating album Markdown files.
 -   **`markdown.rs`**: Utilities for reading/writing Markdown files and managing YAML frontmatter.
 -   **`util.rs`**: General utilities, including the `PsContainer` trait which abstracts file system access (supporting both directories and zip files).
--   **`test_util.rs`**: Helper functions for testing, primarily logging setup.
+-   **`test_util.rs`**: Helper functions for testing — logging setup, the fixed output timezone every date assertion is written against, and the fixtures shared by more than one module's tests.
 
 ## Key Concepts
 

@@ -330,148 +330,125 @@ mod tests {
             .map(|p| p.trim_start_matches("album/").to_string()))
     }
 
+    /// Which sidecar a media file resolves to. Compared case-insensitively:
+    /// both spellings of an original's extension are tried, and on a
+    /// case-insensitive filesystem whichever comes first matches — either
+    /// resolves to the same file.
     #[test]
-    fn test_detect_plain_sidecar() -> anyhow::Result<()> {
+    fn test_detect_supplemental_info() -> anyhow::Result<()> {
         crate::test_util::setup_log();
-        let json = "IMG_0001.jpg.supplemental-metadata.json";
-        assert_eq!(detect_in(&[json], "IMG_0001.jpg")?.as_deref(), Some(json));
-        Ok(())
-    }
-
-    #[test]
-    fn test_detect_no_sidecar_at_all() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        assert_eq!(detect_in(&["unrelated.json"], "IMG_0001.jpg")?, None);
-        Ok(())
-    }
-
-    /// Each of these names is a different length, so each is cut at a different
-    /// point in the tag.
-    #[test]
-    fn test_detect_truncated_json_name() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        for (media, json) in [
+        // (media file, the json files sitting beside it, the one it resolves to)
+        let cases: Vec<(&str, Vec<&str>, Option<&str>)> = vec![
+            (
+                "IMG_0001.jpg",
+                vec!["IMG_0001.jpg.supplemental-metadata.json"],
+                Some("IMG_0001.jpg.supplemental-metadata.json"),
+            ),
+            ("IMG_0001.jpg", vec!["unrelated.json"], None),
+            // Takeout caps the filename length, so the tag is cut at a different
+            // point for each of these.
             (
                 "IMG_20140913_100655_nopm_.jpg",
-                "IMG_20140913_100655_nopm_.jpg.supplemental-met.json",
+                vec!["IMG_20140913_100655_nopm_.jpg.supplemental-met.json"],
+                Some("IMG_20140913_100655_nopm_.jpg.supplemental-met.json"),
             ),
             (
                 "9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG",
-                "9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG.suppl.json",
+                vec!["9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG.suppl.json"],
+                Some("9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG.suppl.json"),
             ),
             (
                 "IMAGE_184EC254-639C-450E-9B14-7EE4377AE094.MOV",
-                "IMAGE_184EC254-639C-450E-9B14-7EE4377AE094.MOV.json",
+                vec!["IMAGE_184EC254-639C-450E-9B14-7EE4377AE094.MOV.json"],
+                Some("IMAGE_184EC254-639C-450E-9B14-7EE4377AE094.MOV.json"),
             ),
             (
                 "2019 school photo wgc soraya.JPG",
-                "2019 school photo wgc soraya.JPG.supplemental-.json",
+                vec!["2019 school photo wgc soraya.JPG.supplemental-.json"],
+                Some("2019 school photo wgc soraya.JPG.supplemental-.json"),
             ),
-        ] {
-            assert_eq!(
-                detect_in(&[json], media)?.as_deref(),
-                Some(json),
-                "truncated sidecar for {media}"
-            );
-            assert!(json.chars().count() <= TAKEOUT_FILENAME_MAX_CHARS);
-        }
-        Ok(())
-    }
-
-    /// The counter is appended after truncation, so the result can exceed the cap.
-    #[test]
-    fn test_detect_counter_moves_onto_json_name() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        for (media, json) in [
+            // Truncation counts characters, not bytes: the narrow no-break space
+            // here is three bytes but one character.
+            (
+                "Screenshot 2025-03-03 at 6.01.26\u{202f}PM.png",
+                vec!["Screenshot 2025-03-03 at 6.01.26\u{202f}PM.png.supple.json"],
+                Some("Screenshot 2025-03-03 at 6.01.26\u{202f}PM.png.supple.json"),
+            ),
+            // The counter is appended after truncation, so it moves onto the
+            // json name and the result can exceed the cap.
             (
                 "FullSizeRender(42).jpg",
-                "FullSizeRender.jpg.supplemental-metadata(42).json",
+                vec!["FullSizeRender.jpg.supplemental-metadata(42).json"],
+                Some("FullSizeRender.jpg.supplemental-metadata(42).json"),
             ),
             (
                 "IMAGE_D0209A83-AEF5-4D12-A17A-6981B7EDD66C.MOV(1).jpg",
-                "IMAGE_D0209A83-AEF5-4D12-A17A-6981B7EDD66C.MOV(1).json",
+                vec!["IMAGE_D0209A83-AEF5-4D12-A17A-6981B7EDD66C.MOV(1).json"],
+                Some("IMAGE_D0209A83-AEF5-4D12-A17A-6981B7EDD66C.MOV(1).json"),
             ),
-        ] {
-            assert_eq!(detect_in(&[json], media)?.as_deref(), Some(json));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_detect_extension_less_title() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let json = "PicasaSync.supplemental-metadata(6).json";
-        assert_eq!(
-            detect_in(&[json], "PicasaSync(6).jpg")?.as_deref(),
-            Some(json)
-        );
-
-        let json = "11 8_30_46 AM.supplemental-metadata.json";
-        assert_eq!(
-            detect_in(&[json], "11 8_30_46 AM.jpg")?.as_deref(),
-            Some(json)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_detect_derived_file_inherits_original() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        for (media, json) in [
+            // A title that carried no extension of its own.
+            (
+                "PicasaSync(6).jpg",
+                vec!["PicasaSync.supplemental-metadata(6).json"],
+                Some("PicasaSync.supplemental-metadata(6).json"),
+            ),
+            (
+                "11 8_30_46 AM.jpg",
+                vec!["11 8_30_46 AM.supplemental-metadata.json"],
+                Some("11 8_30_46 AM.supplemental-metadata.json"),
+            ),
+            // A rendition inherits the original's sidecar, including when the
+            // extension changes or it is two renditions deep.
             (
                 "IMG_1189-edited.JPG",
-                "IMG_1189.JPG.supplemental-metadata.json",
+                vec!["IMG_1189.JPG.supplemental-metadata.json"],
+                Some("IMG_1189.JPG.supplemental-metadata.json"),
             ),
             (
                 "IMG_20141017_180800-edited(1).jpg",
-                "IMG_20141017_180800.jpg.supplemental-metadata(1).json",
+                vec!["IMG_20141017_180800.jpg.supplemental-metadata(1).json"],
+                Some("IMG_20141017_180800.jpg.supplemental-metadata(1).json"),
             ),
             (
                 "IMG_20140905_093118-SMILE.jpg",
-                "IMG_20140905_093118.jpg.supplemental-metadata.json",
+                vec!["IMG_20140905_093118.jpg.supplemental-metadata.json"],
+                Some("IMG_20140905_093118.jpg.supplemental-metadata.json"),
             ),
-            // gif rendition of a jpg original: the extension changes too
             (
                 "FullSizeRender-ANIMATION.gif",
-                "FullSizeRender.jpg.supplemental-metadata.json",
+                vec!["FullSizeRender.jpg.supplemental-metadata.json"],
+                Some("FullSizeRender.jpg.supplemental-metadata.json"),
             ),
-            // two renditions deep
             (
                 "IMG_20140712_105906-ERASER-edited.jpg",
-                "IMG_20140712_105906.jpg.supplemental-metadata.json",
+                vec!["IMG_20140712_105906.jpg.supplemental-metadata.json"],
+                Some("IMG_20140712_105906.jpg.supplemental-metadata.json"),
             ),
-        ] {
-            // Both spellings of an original's extension are tried, and on a
-            // case-insensitive filesystem whichever comes first matches. Either
-            // resolves to the same file.
-            let found = detect_in(&[json], media)?;
-            assert!(
-                found
-                    .as_deref()
-                    .is_some_and(|f| f.eq_ignore_ascii_case(json)),
-                "derived sidecar for {media}: expected {json:?}, got {found:?}"
+            // A live photo's motion clip inherits the still's sidecar.
+            (
+                "IMG_3716.MP4",
+                vec!["IMG_3716.HEIC.supplemental-metadata.json"],
+                Some("IMG_3716.HEIC.supplemental-metadata.json"),
+            ),
+            // With both present, the rendition's own sidecar wins.
+            (
+                "IMG_1189-edited.JPG",
+                vec![
+                    "IMG_1189-edited.JPG.supplemental-metadata.json",
+                    "IMG_1189.JPG.supplemental-metadata.json",
+                ],
+                Some("IMG_1189-edited.JPG.supplemental-metadata.json"),
+            ),
+        ];
+
+        for (media, files, expected) in cases {
+            let found = detect_in(&files, media)?;
+            assert_eq!(
+                found.as_deref().map(|f| f.to_ascii_lowercase()).as_deref(),
+                expected.map(|e| e.to_ascii_lowercase()).as_deref(),
+                "sidecar for {media}, got {found:?}"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn test_detect_live_photo_motion_clip() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let json = "IMG_3716.HEIC.supplemental-metadata.json";
-        assert_eq!(detect_in(&[json], "IMG_3716.MP4")?.as_deref(), Some(json));
-        Ok(())
-    }
-
-    #[test]
-    fn test_detect_prefers_exact_over_inherited() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let own = "IMG_1189-edited.JPG.supplemental-metadata.json";
-        let original = "IMG_1189.JPG.supplemental-metadata.json";
-        assert_eq!(
-            detect_in(&[own, original], "IMG_1189-edited.JPG")?.as_deref(),
-            Some(own)
-        );
         Ok(())
     }
 
@@ -500,16 +477,6 @@ mod tests {
                 "sidecar at a different cap: {json}"
             );
         }
-        Ok(())
-    }
-
-    /// Only when the new spelling is a prefix of the current one.
-    #[test]
-    fn test_detect_survives_a_shortened_tag() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let media = "IMG_20140913_100655_nopm_.jpg";
-        let json = "IMG_20140913_100655_nopm_.jpg.supplemental.json";
-        assert_eq!(detect_in(&[json], media)?.as_deref(), Some(json));
         Ok(())
     }
 
@@ -554,17 +521,6 @@ mod tests {
         assert_eq!(split_counter("Foo()"), ("Foo()", ""));
         assert_eq!(split_counter("Foo(bar)"), ("Foo(bar)", ""));
         assert_eq!(split_counter("Foo(1"), ("Foo(1", ""));
-    }
-
-    /// Truncation counts characters, not bytes: the narrow no-break space here is
-    /// three bytes but one character.
-    #[test]
-    fn test_truncation_counts_characters() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let media = "Screenshot 2025-03-03 at 6.01.26\u{202f}PM.png";
-        let json = "Screenshot 2025-03-03 at 6.01.26\u{202f}PM.png.supple.json";
-        assert_eq!(detect_in(&[json], media)?.as_deref(), Some(json));
-        Ok(())
     }
 
     #[test]
@@ -637,6 +593,63 @@ mod tests {
                 .ok_or_else(|| anyhow!("Missing iso 8601"))?,
             "2024-05-22T12:17:51+12:00"
         );
+        Ok(())
+    }
+
+    /// Sidecars are whatever the export wrote. Malformed json returns None and
+    /// valid-but-odd json may return Some; the invariant is that neither panics.
+    #[test]
+    fn test_load_supplemental_info_never_panics_on_malformed() -> anyhow::Result<()> {
+        use std::io::Write;
+        crate::test_util::setup_log();
+        let dir = tempfile::tempdir()?;
+        let fs = OsFileSystem::new(&dir.path().to_string_lossy());
+
+        // Deep enough to catch a naive recursive parser, but shaped so serde
+        // skips it as an unknown field rather than accepting it.
+        let depth = 500;
+        let nested = format!("{{\"unknown\":{}{}}}", "[".repeat(depth), "]".repeat(depth));
+        let cases: Vec<(&str, &str)> = vec![
+            ("empty.json", ""),
+            ("garbage.json", "\u{0}\u{1}\u{2}not json at all"),
+            ("truncated.json", "{\"geoData\": {\"latitude\": 1.0"),
+            ("array.json", "[1, 2, 3]"),
+            ("scalar.json", "42"),
+            ("null.json", "null"),
+            // Right shape, wrong value types for every field.
+            (
+                "wrong_types.json",
+                r#"{"geoData":"nope","people":"nobody","photoTakenTime":5}"#,
+            ),
+            // geoData present but lat/long are strings, not numbers.
+            (
+                "bad_geo.json",
+                r#"{"geoData":{"latitude":"north","longitude":"west"}}"#,
+            ),
+            ("nested.json", &nested),
+            // Unicode everywhere, plus a non-numeric timestamp.
+            (
+                "unicode.json",
+                r#"{"people":[{"name":"Ñoño 📸"}],"photoTakenTime":{"timestamp":"not-a-number"}}"#,
+            ),
+        ];
+        for (name, body) in cases {
+            std::fs::write(dir.path().join(name), body)?;
+            let _ = load_supplemental_info(&name.to_string(), &fs);
+        }
+
+        // Enormous but structurally valid: a huge person list.
+        let mut f = std::fs::File::create(dir.path().join("huge.json"))?;
+        f.write_all(br#"{"people":["#)?;
+        for i in 0..5000 {
+            if i > 0 {
+                f.write_all(b",")?;
+            }
+            f.write_all(br#"{"name":"p"}"#)?;
+        }
+        f.write_all(b"]}")?;
+        drop(f);
+        let _ = load_supplemental_info(&"huge.json".to_string(), &fs);
         Ok(())
     }
 

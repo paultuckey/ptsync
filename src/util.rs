@@ -457,6 +457,8 @@ mod tests {
         assert_eq!(orientation(Some(0), Some(480)), None);
     }
 
+    /// One person named two ways in two exports must land on one id, so names
+    /// are folded and normalised before hashing.
     #[test]
     fn test_person_id_stable_and_case_insensitive() {
         let a = person_id_for("Tim Tam");
@@ -464,10 +466,7 @@ mod tests {
         assert_eq!(a, person_id_for("tim tam"));
         assert_eq!(a, person_id_for("  TIM TAM  "));
         assert_ne!(a, person_id_for("Ada Lovelace"));
-    }
 
-    #[test]
-    fn test_person_id_non_ascii_and_normalization() {
         // Case folds in non-Latin scripts too.
         assert_eq!(person_id_for("Привет"), person_id_for("привет"));
         assert_eq!(person_id_for("ΑΘΗΝΑ"), person_id_for("αθηνα"));
@@ -491,6 +490,19 @@ mod tests {
             assert_ne!(id_for("a/IMG.jpg"), id_for("b/IMG.jpg"));
             // Paths are case-sensitive, unlike people.
             assert_ne!(a, id_for("google photos/holiday/img_0001.jpg"));
+        }
+    }
+
+    /// Input names come from whatever an export wrote, so the path helpers must
+    /// return something for all of them rather than panic. `ScanInfo::new` runs
+    /// `find_quick_file_type` over each one on the way through.
+    #[test]
+    fn test_path_helpers_survive_hostile_filenames() {
+        crate::test_util::setup_log();
+        for name in crate::test_util::hostile_names() {
+            let _ = name_part(&name);
+            let _ = dir_part(&name);
+            let _ = ScanInfo::new(name.clone(), None, None, 0);
         }
     }
 

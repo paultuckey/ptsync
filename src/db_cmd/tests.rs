@@ -8,6 +8,7 @@ use super::*;
 use crate::fs::{OsFileSystem, ZipFileSystem};
 use crate::util::GEOHASH_PRECISION;
 use std::fs;
+use std::path::PathBuf;
 
 async fn media_item_id_of(conn: &Connection, media_path: &str) -> anyhow::Result<String> {
     let row = one_row(
@@ -19,19 +20,48 @@ async fn media_item_id_of(conn: &Connection, media_path: &str) -> anyhow::Result
     Ok(row.get::<String>(0)?)
 }
 
+async fn count_of(conn: &Connection, table: &str) -> anyhow::Result<i64> {
+    Ok(one_row(conn, &format!("SELECT COUNT(*) FROM {table}"), ())
+        .await?
+        .get(0)?)
+}
+
+async fn scan(container: Arc<dyn FileSystem>, conn: &Connection, root: &str) -> anyhow::Result<()> {
+    scan_with(container, conn, root, DbScanOpts::default()).await
+}
+
+async fn scan_with(
+    container: Arc<dyn FileSystem>,
+    conn: &Connection,
+    root: &str,
+    opts: DbScanOpts,
+) -> anyhow::Result<()> {
+    run_db_scan(container, conn, opts, root, crate::test_util::tz()).await
+}
+
+/// A fresh directory under `target/` holding a media file and an album CSV that
+/// lists it, so a full scan populates `media_item`, `album` and `album_file`.
+fn album_fixture(name: &str) -> anyhow::Result<PathBuf> {
+    use std::io::Write;
+    let dir = Path::new("target").join(name);
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    fs::create_dir_all(&dir)?;
+    fs::copy("test/Canon_40D.jpg", dir.join("Canon_40D.jpg"))?;
+    let mut file = fs::File::create(dir.join("album.csv"))?;
+    writeln!(file, "Images")?;
+    writeln!(file, "Canon_40D.jpg")?;
+    Ok(dir)
+}
+
+/// What one scan of the `test/` fixtures records: the media rows and their
+/// promoted columns, plus the classification of every file it walked.
 #[tokio::test]
 async fn test_db_scan() -> anyhow::Result<()> {
     crate::test_util::setup_log();
     let (_db, conn) = open_conn(":memory:").await?;
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-    run_db_scan(
-        container,
-        &conn,
-        DbScanOpts::default(),
-        "test",
-        crate::test_util::tz(),
-    )
-    .await?;
+    scan(Arc::new(OsFileSystem::new("test")), &conn, "test").await?;
 
     let mut rows = conn
         .query(
@@ -43,120 +73,56 @@ async fn test_db_scan() -> anyhow::Result<()> {
     while let Some(row) = rows.next().await? {
         results.push((row.get::<String>(0)?, row.get::<String>(1)?));
     }
+    for path in ["Canon_40D.jpg", "Hello.mp4"] {
+        assert!(
+            results
+                .iter()
+                .any(|(p, ftype)| p == path && ftype == "Media"),
+            "{path} should be recorded as media"
+        );
+    }
 
-    assert!(
-        results
-            .iter()
-            .any(|(path, ftype)| path == "Canon_40D.jpg" && ftype == "Media")
-    );
-    assert!(
-        results
-            .iter()
-            .any(|(path, ftype)| path == "Hello.mp4" && ftype == "Media")
-    );
-
-    // Video dimensions, duration and orientation come from track metadata.
+    // Video dimensions, duration and orientation come from track metadata; a
+    // photo has no duration. `kind` tags each item as photo or video, and
+    // display_mirrored/display_rotate are never NULL — Canon_40D.jpg is EXIF
+    // orientation 1, and a video has no EXIF orientation at all.
     let row = one_row(
         &conn,
-        "SELECT width, height, duration_ms, orientation FROM media_item WHERE media_path = ?1",
+        "SELECT width, height, duration_ms, orientation, kind, display_mirrored, display_rotate,
+                guessed_datetime
+         FROM media_item WHERE media_path = ?1",
         ["Hello.mp4"],
     )
     .await?;
-    let w: Option<i64> = row.get(0)?;
-    let h: Option<i64> = row.get(1)?;
-    let dur: Option<i64> = row.get(2)?;
-    let orient: Option<String> = row.get(3)?;
-    assert_eq!(w, Some(854));
-    assert_eq!(h, Some(480));
-    assert_eq!(dur, Some(5000));
-    assert_eq!(orient.as_deref(), Some("landscape"));
-
-    let photo_dur: Option<i64> = one_row(
-        &conn,
-        "SELECT duration_ms FROM media_item WHERE media_path = ?1",
-        ["Canon_40D.jpg"],
-    )
-    .await?
-    .get(0)?;
-    assert_eq!(photo_dur, None, "photos have no duration");
-
-    // `kind` tags each item as photo ('p') or video ('v').
-    let video_kind: String = one_row(
-        &conn,
-        "SELECT kind FROM media_item WHERE media_path = ?1",
-        ["Hello.mp4"],
-    )
-    .await?
-    .get(0)?;
-    assert_eq!(video_kind, "v");
-    let photo_kind: String = one_row(
-        &conn,
-        "SELECT kind FROM media_item WHERE media_path = ?1",
-        ["Canon_40D.jpg"],
-    )
-    .await?
-    .get(0)?;
-    assert_eq!(photo_kind, "p");
-
-    // display_mirrored/display_rotate are never NULL. Canon_40D.jpg is
-    // orientation 1, the no-op transform.
-    let row = one_row(
-        &conn,
-        "SELECT display_mirrored, display_rotate FROM media_item WHERE media_path = ?1",
-        ["Canon_40D.jpg"],
-    )
-    .await?;
-    let photo_display: (bool, i64) = (row.get(0)?, row.get(1)?);
-    assert_eq!(photo_display, (false, 0));
-    // Videos have no EXIF orientation, so they default to no transform.
-    let row = one_row(
-        &conn,
-        "SELECT display_mirrored, display_rotate FROM media_item WHERE media_path = ?1",
-        ["Hello.mp4"],
-    )
-    .await?;
-    let video_display: (bool, i64) = (row.get(0)?, row.get(1)?);
-    assert_eq!(
-        video_display,
-        (false, 0),
-        "no EXIF defaults to no transform"
-    );
-
+    assert_eq!(row.get::<Option<i64>>(0)?, Some(854));
+    assert_eq!(row.get::<Option<i64>>(1)?, Some(480));
+    assert_eq!(row.get::<Option<i64>>(2)?, Some(5000));
+    assert_eq!(row.get::<Option<String>>(3)?.as_deref(), Some("landscape"));
+    assert_eq!(row.get::<String>(4)?, "v");
+    assert_eq!((row.get::<bool>(5)?, row.get::<i64>(6)?), (false, 0));
     // With no supplemental or EXIF date, the video falls back to its embedded
     // track creation time rather than the file timestamps.
-    let guessed: Option<String> = one_row(
-        &conn,
-        "SELECT guessed_datetime FROM media_item WHERE media_path = ?1",
-        ["Hello.mp4"],
-    )
-    .await?
-    .get(0)?;
-    assert_eq!(guessed.as_deref(), Some("2024-04-18T11:24:26+00:00"));
+    assert_eq!(
+        row.get::<Option<String>>(7)?.as_deref(),
+        Some("2024-04-18T11:24:26+00:00")
+    );
 
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_db_scan_classifies_paths() -> anyhow::Result<()> {
-    crate::test_util::setup_log();
-    let (_db, conn) = open_conn(":memory:").await?;
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-    run_db_scan(
-        container,
+    let row = one_row(
         &conn,
-        DbScanOpts::default(),
-        "test",
-        crate::test_util::tz(),
+        "SELECT duration_ms, kind, display_mirrored, display_rotate
+         FROM media_item WHERE media_path = ?1",
+        ["Canon_40D.jpg"],
     )
     .await?;
+    assert_eq!(row.get::<Option<i64>>(0)?, None, "photos have no duration");
+    assert_eq!(row.get::<String>(1)?, "p");
+    assert_eq!((row.get::<bool>(2)?, row.get::<i64>(3)?), (false, 0));
 
-    // Every scanned file is recorded, matched or not.
-    let file_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM classified_file", ())
-        .await?
-        .get(0)?;
-    assert!(file_count > 0, "expected classified_file rows");
-
-    // A csv is classified as an iCloud album csv.
+    // Every scanned file is recorded in classified_file, matched or not.
+    assert!(
+        count_of(&conn, "classified_file").await? > 0,
+        "expected classified_file rows"
+    );
     let known: Option<String> = one_row(
         &conn,
         "SELECT known_file_type FROM classified_file WHERE file_path = ?1",
@@ -165,7 +131,6 @@ async fn test_db_scan_classifies_paths() -> anyhow::Result<()> {
     .await?
     .get(0)?;
     assert_eq!(known.as_deref(), Some("IcpAlbumCsv"));
-
     // Canon_40D.jpg matches no known pattern, so it is stored unmatched.
     let unmatched: Option<String> = one_row(
         &conn,
@@ -188,81 +153,48 @@ async fn test_db_scan_zip() -> anyhow::Result<()> {
     let (_db, conn) = open_conn(":memory:").await?;
     let container: Arc<dyn FileSystem> =
         Arc::new(ZipFileSystem::new(zip_path.to_string_lossy().as_ref())?);
-
-    run_db_scan(
-        container,
-        &conn,
-        DbScanOpts::default(),
-        "test",
-        crate::test_util::tz(),
-    )
-    .await?;
+    scan(container, &conn, "test").await?;
 
     let mut rows = conn
-        .query(
-            "SELECT media_path, quick_file_type FROM media_item ORDER BY media_path",
-            (),
-        )
+        .query("SELECT media_path FROM media_item ORDER BY media_path", ())
         .await?;
-    let mut results: Vec<(String, String)> = Vec::new();
+    let mut paths: Vec<String> = Vec::new();
     while let Some(row) = rows.next().await? {
-        results.push((row.get::<String>(0)?, row.get::<String>(1)?));
+        paths.push(row.get::<String>(0)?);
     }
-
-    assert!(
-        results
-            .iter()
-            .any(|(path, ftype)| path == "Canon_40D.jpg" && ftype == "Media")
-    );
-    assert!(
-        results
-            .iter()
-            .any(|(path, ftype)| path == "Hello.mp4" && ftype == "Media")
-    );
+    for path in ["Canon_40D.jpg", "Hello.mp4"] {
+        assert!(
+            paths.iter().any(|p| p == path),
+            "{path} should be recorded from the zip"
+        );
+    }
 
     let _ = fs::remove_file(zip_path);
     Ok(())
 }
 
 #[tokio::test]
-async fn test_db_scan_with_album() -> anyhow::Result<()> {
-    use std::io::Write;
+async fn test_db_scan_records_albums() -> anyhow::Result<()> {
     crate::test_util::setup_log();
-    let test_dir = Path::new("target/test_db_album");
-    if test_dir.exists() {
-        fs::remove_dir_all(test_dir)?;
-    }
-    fs::create_dir_all(test_dir)?;
-
-    let src_file = Path::new("test/Canon_40D.jpg");
-    let dest_file = test_dir.join("Canon_40D.jpg");
-    fs::copy(src_file, &dest_file)?;
-
-    let album_path = test_dir.join("album.csv");
-    let mut file = fs::File::create(&album_path)?;
-    writeln!(file, "Images")?;
-    writeln!(file, "Canon_40D.jpg")?;
+    let test_dir = album_fixture("test_db_album")?;
+    let test_dir_str = test_dir.to_string_lossy();
 
     let (_db, conn) = open_conn(":memory:").await?;
-    let test_dir_str = test_dir.to_string_lossy();
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(
-        container,
+    scan(
+        Arc::new(OsFileSystem::new(&test_dir_str)),
         &conn,
-        DbScanOpts::default(),
         &test_dir_str,
-        crate::test_util::tz(),
     )
     .await?;
 
     // The album id is the stable hash of the album path.
     let row = one_row(&conn, "SELECT album_id, title, album_path FROM album", ()).await?;
-    let album_id: String = row.get(0)?;
-    let title: String = row.get(1)?;
-    let path: String = row.get(2)?;
-    assert_eq!(title, "album");
-    assert_eq!(path, "album.csv");
-    assert_eq!(album_id, crate::util::album_id_for("album.csv"));
+    assert_eq!(row.get::<String>(1)?, "album");
+    assert_eq!(row.get::<String>(2)?, "album.csv");
+    assert_eq!(
+        row.get::<String>(0)?,
+        crate::util::album_id_for("album.csv")
+    );
 
     // Membership is stored by media_item_id and joins back to the item's path.
     let row = one_row(
@@ -272,8 +204,7 @@ async fn test_db_scan_with_album() -> anyhow::Result<()> {
         (),
     )
     .await?;
-    let path: String = row.get(0)?;
-    assert_eq!(path, "Canon_40D.jpg");
+    assert_eq!(row.get::<String>(0)?, "Canon_40D.jpg");
 
     fs::remove_dir_all(test_dir)?;
     Ok(())
@@ -303,20 +234,19 @@ async fn test_db_scan_records_people_and_location() -> anyhow::Result<()> {
 
     let (_db, conn) = open_conn(":memory:").await?;
     let test_dir_str = test_dir.to_string_lossy();
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(
-        container,
+    scan(
+        Arc::new(OsFileSystem::new(&test_dir_str)),
         &conn,
-        DbScanOpts::default(),
         &test_dir_str,
-        crate::test_util::tz(),
     )
     .await?;
 
-    // Location promoted into columns.
+    // Location promoted into columns, and also stored as a geohash for
+    // prefix-based clustering. EXIF camera and dimension details likewise.
     let row = one_row(
         &conn,
-        "SELECT latitude, longitude FROM media_item WHERE media_path = ?1",
+        "SELECT latitude, longitude, geohash, camera_make, camera_model, width, height
+         FROM media_item WHERE media_path = ?1",
         ["Canon_40D.jpg"],
     )
     .await?;
@@ -324,36 +254,17 @@ async fn test_db_scan_records_people_and_location() -> anyhow::Result<()> {
     let long: Option<f64> = row.get(1)?;
     assert_eq!(lat.map(|v| format!("{v:.4}")).as_deref(), Some("-21.6303"));
     assert_eq!(long.map(|v| format!("{v:.4}")).as_deref(), Some("152.2605"));
-
-    // Location also stored as a geohash for prefix-based clustering.
-    let geohash: Option<String> = one_row(
-        &conn,
-        "SELECT geohash FROM media_item WHERE media_path = ?1",
-        ["Canon_40D.jpg"],
-    )
-    .await?
-    .get(0)?;
     assert_eq!(
-        geohash.as_deref(),
+        row.get::<Option<String>>(2)?.as_deref(),
         Some(crate::util::geohash_encode(-21.6303194, 152.2605444, GEOHASH_PRECISION).as_str())
     );
-
-    // EXIF camera and dimension details promoted into columns.
-    let row = one_row(
-        &conn,
-        "SELECT camera_make, camera_model, width, height
-         FROM media_item WHERE media_path = ?1",
-        ["Canon_40D.jpg"],
-    )
-    .await?;
-    let make: Option<String> = row.get(0)?;
-    let model: Option<String> = row.get(1)?;
-    let width: Option<i64> = row.get(2)?;
-    let height: Option<i64> = row.get(3)?;
-    assert_eq!(make.as_deref(), Some("Canon"));
-    assert_eq!(model.as_deref(), Some("Canon EOS 40D"));
-    assert!(width.is_some_and(|w| w > 0), "width recorded");
-    assert!(height.is_some_and(|h| h > 0), "height recorded");
+    assert_eq!(row.get::<Option<String>>(3)?.as_deref(), Some("Canon"));
+    assert_eq!(
+        row.get::<Option<String>>(4)?.as_deref(),
+        Some("Canon EOS 40D")
+    );
+    assert!(row.get::<Option<i64>>(5)?.is_some_and(|w| w > 0));
+    assert!(row.get::<Option<i64>>(6)?.is_some_and(|h| h > 0));
 
     // People normalized into a `person` table (stable ids) linked via
     // media_person; joinable back to the media item.
@@ -372,7 +283,7 @@ async fn test_db_scan_records_people_and_location() -> anyhow::Result<()> {
     }
     assert_eq!(names, vec!["Ada Lovelace", "Tim Tam"]);
 
-    // The person id is the stable content hash of the lowercased name.
+    // The ids stored are the stable content hashes, so a rescan reproduces them.
     let tim_id: String = one_row(
         &conn,
         "SELECT person_id FROM person WHERE name = ?1",
@@ -380,84 +291,54 @@ async fn test_db_scan_records_people_and_location() -> anyhow::Result<()> {
     )
     .await?
     .get(0)?;
-    assert_eq!(tim_id, crate::util::person_id_for("TIM TAM"));
-
-    // media_item_id is the stable hash of the media path.
-    let mid = media_item_id_of(&conn, "Canon_40D.jpg").await?;
-    assert_eq!(mid, crate::util::media_item_id_for("Canon_40D.jpg"));
+    assert_eq!(tim_id, crate::util::person_id_for("Tim Tam"));
+    assert_eq!(
+        media_item_id_of(&conn, "Canon_40D.jpg").await?,
+        crate::util::media_item_id_for("Canon_40D.jpg")
+    );
 
     fs::remove_dir_all(test_dir)?;
     Ok(())
 }
 
+/// Resume as incremental indexing: a second run over the same input skips what
+/// is already recorded and takes in only what has since appeared, and `--clear`
+/// starts over.
 #[tokio::test]
-async fn test_db_scan_rerun() -> anyhow::Result<()> {
-    use std::io::Write;
+async fn test_db_scan_resume_and_clear() -> anyhow::Result<()> {
     crate::test_util::setup_log();
-    let test_dir = Path::new("target/test_db_album_rerun");
-    if test_dir.exists() {
-        fs::remove_dir_all(test_dir)?;
-    }
-    fs::create_dir_all(test_dir)?;
-
-    // A media file plus an album CSV referencing it, so the first scan
-    // populates both album and album_file.
-    fs::copy("test/Canon_40D.jpg", test_dir.join("Canon_40D.jpg"))?;
-    let album_path = test_dir.join("album.csv");
-    let mut file = fs::File::create(&album_path)?;
-    writeln!(file, "Images")?;
-    writeln!(file, "Canon_40D.jpg")?;
+    let test_dir = album_fixture("test_db_resume")?;
+    let test_dir_str = test_dir.to_string_lossy();
+    let fs_at = || -> Arc<dyn FileSystem> { Arc::new(OsFileSystem::new(&test_dir_str)) };
 
     let (_db, conn) = open_conn(":memory:").await?;
-    let test_dir_str = test_dir.to_string_lossy();
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-
-    // First run populates album (1 row) and album_file (1 row).
-    run_db_scan(
-        container.clone(),
-        &conn,
-        DbScanOpts::default(),
-        &test_dir_str,
-        crate::test_util::tz(),
-    )
-    .await?;
+    scan(fs_at(), &conn, &test_dir_str).await?;
     let id_first = media_item_id_of(&conn, "Canon_40D.jpg").await?;
 
-    // Second run without --clear resumes the same input: already-recorded
-    // media is skipped and the additive tables stay deduped.
-    run_db_scan(
-        container,
-        &conn,
-        DbScanOpts::default(),
-        &test_dir_str,
-        crate::test_util::tz(),
-    )
-    .await?;
-
-    let album_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM album", ())
-        .await?
-        .get(0)?;
-    assert_eq!(album_count, 1, "album deduped across runs");
-    let album_file_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM album_file", ())
-        .await?
-        .get(0)?;
-    assert_eq!(album_file_count, 1, "album_file deduped across runs");
-    let media_item_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
-        .await?
-        .get(0)?;
-    assert_eq!(media_item_count, 1, "media_item deduped across runs");
-
-    // The media_item id is reproducible: a rescan yields the same stable id.
+    // Second run without --clear resumes the same input: already-recorded media
+    // is skipped and the additive tables stay deduped.
+    scan(fs_at(), &conn, &test_dir_str).await?;
+    assert_eq!(count_of(&conn, "album").await?, 1, "album deduped");
+    assert_eq!(
+        count_of(&conn, "album_file").await?,
+        1,
+        "album_file deduped"
+    );
+    assert_eq!(
+        count_of(&conn, "media_item").await?,
+        1,
+        "media_item deduped"
+    );
     assert_eq!(
         id_first,
         media_item_id_of(&conn, "Canon_40D.jpg").await?,
         "media_item_id stable across runs"
     );
-
-    let run_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM run", ())
-        .await?
-        .get(0)?;
-    assert_eq!(run_count, 1, "re-running the same input reuses its run row");
+    assert_eq!(
+        count_of(&conn, "run").await?,
+        1,
+        "re-running the same input reuses its run row"
+    );
     let classified_runs: i64 = one_row(
         &conn,
         "SELECT COUNT(DISTINCT run_id) FROM classified_file",
@@ -481,24 +362,38 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
         "classified_file refreshed in place on resume"
     );
 
+    // A new file appears: it is picked up, and the recorded one is left alone.
+    fs::copy("test/Hello.mp4", test_dir.join("Hello.mp4"))?;
+    scan(fs_at(), &conn, &test_dir_str).await?;
+    assert_eq!(
+        count_of(&conn, "media_item").await?,
+        2,
+        "the new file is added and the old one kept"
+    );
+    assert_eq!(
+        id_first,
+        media_item_id_of(&conn, "Canon_40D.jpg").await?,
+        "the already-recorded file keeps its id"
+    );
+    assert_eq!(count_of(&conn, "run").await?, 1, "the same input resumes");
+
     // --clear wipes everything, including the run-scoped tables, and rebuilds
     // from scratch without a "FOREIGN KEY constraint failed" on the deletes.
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(
-        container,
+    scan_with(
+        fs_at(),
         &conn,
+        &test_dir_str,
         DbScanOpts {
             clear: true,
             ..Default::default()
         },
-        &test_dir_str,
-        crate::test_util::tz(),
     )
     .await?;
-    let run_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM run", ())
-        .await?
-        .get(0)?;
-    assert_eq!(run_count, 1, "clear resets the run log to just this run");
+    assert_eq!(
+        count_of(&conn, "run").await?,
+        1,
+        "clear resets the run log to just this run"
+    );
     let classified_runs: i64 = one_row(
         &conn,
         "SELECT COUNT(DISTINCT run_id) FROM classified_file",
@@ -515,72 +410,8 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resume as incremental indexing: a second run takes in only the files that
-/// have since appeared.
-#[tokio::test]
-async fn test_db_scan_resumes_and_adds_new_files() -> anyhow::Result<()> {
-    crate::test_util::setup_log();
-    let test_dir = Path::new("target/test_db_resume_incremental");
-    if test_dir.exists() {
-        fs::remove_dir_all(test_dir)?;
-    }
-    fs::create_dir_all(test_dir)?;
-    fs::copy("test/Canon_40D.jpg", test_dir.join("Canon_40D.jpg"))?;
-
-    let (_db, conn) = open_conn(":memory:").await?;
-    let test_dir_str = test_dir.to_string_lossy();
-
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(
-        container,
-        &conn,
-        DbScanOpts::default(),
-        &test_dir_str,
-        crate::test_util::tz(),
-    )
-    .await?;
-    let count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
-        .await?
-        .get(0)?;
-    assert_eq!(count, 1, "first run records the initial file");
-    let first_id = media_item_id_of(&conn, "Canon_40D.jpg").await?;
-
-    // A new file appears: it is picked up, and the recorded one is skipped
-    // rather than duplicated.
-    fs::copy("test/Hello.mp4", test_dir.join("Hello.mp4"))?;
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(
-        container,
-        &conn,
-        DbScanOpts::default(),
-        &test_dir_str,
-        crate::test_util::tz(),
-    )
-    .await?;
-
-    let count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
-        .await?
-        .get(0)?;
-    assert_eq!(
-        count, 2,
-        "second run adds the new file and keeps the old one"
-    );
-    assert_eq!(
-        first_id,
-        media_item_id_of(&conn, "Canon_40D.jpg").await?,
-        "the already-recorded file keeps its id"
-    );
-    let run_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM run", ())
-        .await?
-        .get(0)?;
-    assert_eq!(run_count, 1, "the same input resumes its one run");
-
-    fs::remove_dir_all(test_dir)?;
-    Ok(())
-}
-
-/// The resume skip is guarded by size: a file changed in place (same path,
-/// new bytes) is re-inspected and its row replaced, not left stale.
+/// The resume skip is guarded by size: a file changed in place (same path, new
+/// bytes) is re-inspected and its row replaced, not left stale.
 #[tokio::test]
 async fn test_db_scan_reinspects_changed_file() -> anyhow::Result<()> {
     use std::io::Write;
@@ -595,30 +426,19 @@ async fn test_db_scan_reinspects_changed_file() -> anyhow::Result<()> {
 
     let (_db, conn) = open_conn(":memory:").await?;
     let test_dir_str = test_dir.to_string_lossy();
+    let fs_at = || -> Arc<dyn FileSystem> { Arc::new(OsFileSystem::new(&test_dir_str)) };
+    let recorded = async |conn: &Connection| -> anyhow::Result<(String, i64)> {
+        let row = one_row(
+            conn,
+            "SELECT long_hash, file_size FROM media_item WHERE media_path = 'photo.jpg'",
+            (),
+        )
+        .await?;
+        Ok((row.get(0)?, row.get(1)?))
+    };
 
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(
-        container,
-        &conn,
-        DbScanOpts::default(),
-        &test_dir_str,
-        crate::test_util::tz(),
-    )
-    .await?;
-    let hash_before: String = one_row(
-        &conn,
-        "SELECT long_hash FROM media_item WHERE media_path = 'photo.jpg'",
-        (),
-    )
-    .await?
-    .get(0)?;
-    let size_before: i64 = one_row(
-        &conn,
-        "SELECT file_size FROM media_item WHERE media_path = 'photo.jpg'",
-        (),
-    )
-    .await?
-    .get(0)?;
+    scan(fs_at(), &conn, &test_dir_str).await?;
+    let (hash_before, size_before) = recorded(&conn).await?;
 
     // Bytes appended past a JPEG's end marker leave it a valid image but change
     // its size, which is what the resume guard checks.
@@ -626,35 +446,15 @@ async fn test_db_scan_reinspects_changed_file() -> anyhow::Result<()> {
     f.write_all(&[0u8; 4096])?;
     drop(f);
 
-    let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-    run_db_scan(
-        container,
-        &conn,
-        DbScanOpts::default(),
-        &test_dir_str,
-        crate::test_util::tz(),
-    )
-    .await?;
+    scan(fs_at(), &conn, &test_dir_str).await?;
 
     // Still one row for that path, but its recorded content is refreshed.
-    let count: i64 = one_row(&conn, "SELECT COUNT(*) FROM media_item", ())
-        .await?
-        .get(0)?;
-    assert_eq!(count, 1, "the changed file replaces its row, not adds one");
-    let hash_after: String = one_row(
-        &conn,
-        "SELECT long_hash FROM media_item WHERE media_path = 'photo.jpg'",
-        (),
-    )
-    .await?
-    .get(0)?;
-    let size_after: i64 = one_row(
-        &conn,
-        "SELECT file_size FROM media_item WHERE media_path = 'photo.jpg'",
-        (),
-    )
-    .await?
-    .get(0)?;
+    let (hash_after, size_after) = recorded(&conn).await?;
+    assert_eq!(
+        count_of(&conn, "media_item").await?,
+        1,
+        "the changed file replaces its row, not adds one"
+    );
     assert_ne!(hash_before, hash_after, "changed bytes are re-hashed");
     assert_eq!(
         size_after,
@@ -668,41 +468,23 @@ async fn test_db_scan_reinspects_changed_file() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
-    use std::io::Write;
     crate::test_util::setup_log();
-    let test_dir = Path::new("target/test_db_skip_flags");
-    if test_dir.exists() {
-        fs::remove_dir_all(test_dir)?;
-    }
-    fs::create_dir_all(test_dir)?;
-
-    // A full scan of this would populate media_item, album and album_file.
-    fs::copy("test/Canon_40D.jpg", test_dir.join("Canon_40D.jpg"))?;
-    let mut file = fs::File::create(test_dir.join("album.csv"))?;
-    writeln!(file, "Images")?;
-    writeln!(file, "Canon_40D.jpg")?;
-
+    let test_dir = album_fixture("test_db_skip_flags")?;
     let test_dir_str = test_dir.to_string_lossy();
-    let count_of = async |conn: &Connection, table: &str| -> anyhow::Result<i64> {
-        Ok(one_row(conn, &format!("SELECT COUNT(*) FROM {table}"), ())
-            .await?
-            .get(0)?)
-    };
+    let fs_at = || -> Arc<dyn FileSystem> { Arc::new(OsFileSystem::new(&test_dir_str)) };
 
     // --skip-media --skip-albums: classification only.
     {
         let (_db, conn) = open_conn(":memory:").await?;
-        let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-        run_db_scan(
-            container,
+        scan_with(
+            fs_at(),
             &conn,
+            &test_dir_str,
             DbScanOpts {
                 skip_media: true,
                 skip_albums: true,
                 ..Default::default()
             },
-            &test_dir_str,
-            crate::test_util::tz(),
         )
         .await?;
 
@@ -720,16 +502,14 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
     // because a resumed run re-visits the album pass.
     {
         let (_db, conn) = open_conn(":memory:").await?;
-        let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-        run_db_scan(
-            container.clone(),
+        scan_with(
+            fs_at(),
             &conn,
+            &test_dir_str,
             DbScanOpts {
                 skip_media: true,
                 ..Default::default()
             },
-            &test_dir_str,
-            crate::test_util::tz(),
         )
         .await?;
 
@@ -741,14 +521,7 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
             "no links without media_item rows"
         );
 
-        run_db_scan(
-            container,
-            &conn,
-            DbScanOpts::default(),
-            &test_dir_str,
-            crate::test_util::tz(),
-        )
-        .await?;
+        scan(fs_at(), &conn, &test_dir_str).await?;
 
         assert_eq!(
             count_of(&conn, "media_item").await?,
@@ -766,16 +539,14 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
     // --skip-albums alone leaves media untouched.
     {
         let (_db, conn) = open_conn(":memory:").await?;
-        let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
-        run_db_scan(
-            container,
+        scan_with(
+            fs_at(),
             &conn,
+            &test_dir_str,
             DbScanOpts {
                 skip_albums: true,
                 ..Default::default()
             },
-            &test_dir_str,
-            crate::test_util::tz(),
         )
         .await?;
 

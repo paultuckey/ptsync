@@ -164,61 +164,33 @@ mod tests {
         m
     }
 
+    /// The candidate ladder: the bare name, then a short-checksum suffix, then
+    /// the long one — no `-1`/`-2` counter at any rung. The fixtures under
+    /// `test/duplicates` are laid out so each case falls one rung further.
     #[test]
-    fn test_resolve_no_collision_uses_bare_name() -> anyhow::Result<()> {
+    fn test_resolve_output_path_candidate_ladder() {
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/fresh-name".to_string()), "txt");
-        let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
-        assert_eq!(
-            res,
-            DeDuplicationResult::WritePath("duplicates/fresh-name.txt".to_string())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_resolve_base_collision_uses_short_checksum() -> anyhow::Result<()> {
-        // `duplicates/one.txt` exists with different content, so this goes
-        // straight to the short-checksum suffix — no -1/-2 counter.
-        let c = OsFileSystem::new("test");
-        let mfi = MediaFileInfo::new_for_test();
-        let derived = MediaFileDerivedInfo::new_for_test(Some("duplicates/one".to_string()), "txt");
-        let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
-        assert_eq!(
-            res,
-            DeDuplicationResult::WritePath("duplicates/one-tsc.txt".to_string())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_resolve_short_checksum_collision_falls_back_to_long() -> anyhow::Result<()> {
-        // Both `short-clash.txt` and `short-clash-tsc.txt` exist with different
-        // content.
-        let c = OsFileSystem::new("test");
-        let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/short-clash".to_string()), "txt");
-        let res = Deduplicator::resolve_output_path(&mfi, &derived, &c)?;
-        assert_eq!(
-            res,
-            DeDuplicationResult::WritePath("duplicates/short-clash-tlc.txt".to_string())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_resolve_all_candidates_taken_errors() -> anyhow::Result<()> {
-        // All three candidate names exist with different content.
-        let c = OsFileSystem::new("test");
-        let mfi = MediaFileInfo::new_for_test();
-        let derived =
-            MediaFileDerivedInfo::new_for_test(Some("duplicates/too-many".to_string()), "txt");
-        let res = Deduplicator::resolve_output_path(&mfi, &derived, &c);
-        assert_eq!(res.ok(), None);
-        Ok(())
+        for (desired, expected) in [
+            ("duplicates/fresh-name", Some("duplicates/fresh-name.txt")),
+            // `duplicates/one.txt` exists with different content.
+            ("duplicates/one", Some("duplicates/one-tsc.txt")),
+            // So do both `short-clash.txt` and `short-clash-tsc.txt`.
+            (
+                "duplicates/short-clash",
+                Some("duplicates/short-clash-tlc.txt"),
+            ),
+            // All three candidate names are taken, so there is nowhere to write.
+            ("duplicates/too-many", None),
+        ] {
+            let derived = MediaFileDerivedInfo::new_for_test(Some(desired.to_string()), "txt");
+            let res = Deduplicator::resolve_output_path(&mfi, &derived, &c);
+            assert_eq!(
+                res.ok(),
+                expected.map(|p| DeDuplicationResult::WritePath(p.to_string())),
+                "resolving {desired}"
+            );
+        }
     }
 
     #[test]
@@ -239,47 +211,30 @@ mod tests {
         Ok(())
     }
 
+    /// The same photo arriving twice collapses to one entry recording both
+    /// source paths, and which one is canonical does not depend on the order
+    /// they were added in.
     #[test]
     fn test_collapses_files_with_same_checksum() -> anyhow::Result<()> {
-        let mut d = Deduplicator::new();
-        d.add(media_with("a/photo.jpg", "hashX"));
-        d.add(media_with("b/photo.jpg", "hashX"));
+        let both_paths = vec!["a/photo.jpg".to_string(), "b/photo.jpg".to_string()];
+        for order in [
+            ["a/photo.jpg", "b/photo.jpg"],
+            ["b/photo.jpg", "a/photo.jpg"],
+        ] {
+            let mut d = Deduplicator::new();
+            for path in order {
+                d.add(media_with(path, "hashX"));
+            }
 
-        assert_eq!(d.by_checksum().len(), 1);
-        let entry = d
-            .by_checksum()
-            .get("hashX")
-            .ok_or_else(|| anyhow!("collapsed entry missing"))?;
-        assert_eq!(
-            entry.original_path,
-            vec!["a/photo.jpg".to_string(), "b/photo.jpg".to_string()]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_collapse_canonical_entry_is_order_independent() -> anyhow::Result<()> {
-        let mut forward = Deduplicator::new();
-        forward.add(media_with("b/photo.jpg", "hashX"));
-        forward.add(media_with("a/photo.jpg", "hashX"));
-
-        let mut reverse = Deduplicator::new();
-        reverse.add(media_with("a/photo.jpg", "hashX"));
-        reverse.add(media_with("b/photo.jpg", "hashX"));
-
-        let f = forward
-            .by_checksum()
-            .get("hashX")
-            .ok_or_else(|| anyhow!("forward entry missing"))?;
-        let r = reverse
-            .by_checksum()
-            .get("hashX")
-            .ok_or_else(|| anyhow!("reverse entry missing"))?;
-
-        // Lowest-sorting source path wins, regardless of add order.
-        assert_eq!(f.original_file_this_run, "a/photo.jpg");
-        assert_eq!(r.original_file_this_run, "a/photo.jpg");
-        assert_eq!(f.original_path, r.original_path);
+            assert_eq!(d.by_checksum().len(), 1);
+            let entry = d
+                .by_checksum()
+                .get("hashX")
+                .ok_or_else(|| anyhow!("collapsed entry missing"))?;
+            assert_eq!(entry.original_path, both_paths, "added {order:?}");
+            // Lowest-sorting source path wins.
+            assert_eq!(entry.original_file_this_run, "a/photo.jpg");
+        }
         Ok(())
     }
 

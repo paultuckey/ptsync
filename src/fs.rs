@@ -355,67 +355,121 @@ mod tests {
     use std::io::Write;
     use zip::write::FileOptions;
 
-    #[test]
-    fn test_zip_open_streaming() -> Result<()> {
-        let mut temp_file = tempfile::NamedTempFile::new()?;
-
+    /// Entry names are used verbatim so traversal names can be tested. Names the
+    /// zip writer refuses are skipped: the point is the read side.
+    fn zip_with(entries: &[(&str, &[u8])]) -> Result<tempfile::NamedTempFile> {
+        let mut temp = tempfile::Builder::new().suffix(".zip").tempfile()?;
         {
-            let mut zip_writer = zip::ZipWriter::new(&mut temp_file);
+            let mut w = zip::ZipWriter::new(&mut temp);
             let options =
                 FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
-
-            let large_content = vec![b'a'; 200];
-            zip_writer.start_file("large.txt", options)?;
-            zip_writer.write_all(&large_content)?;
-
-            let small_content = vec![b'b'; 50];
-            zip_writer.start_file("small.txt", options)?;
-            zip_writer.write_all(&small_content)?;
-
-            zip_writer.finish()?;
+            for (name, content) in entries {
+                if w.start_file(*name, options).is_ok() {
+                    w.write_all(content)?;
+                }
+            }
+            w.finish()?;
         }
+        Ok(temp)
+    }
 
-        let fs = ZipFileSystem::new(&temp_file.path().to_string_lossy())?;
-
-        // Over the threshold, so the reader streams from the archive.
-        let mut reader = fs.open("large.txt")?;
+    fn read_entry(fs: &ZipFileSystem, name: &str) -> Result<Vec<u8>> {
         let mut content = Vec::new();
-        reader.read_to_end(&mut content)?;
-        assert_eq!(content.len(), 200);
-        assert_eq!(content, vec![b'a'; 200]);
+        fs.open(name)?.read_to_end(&mut content)?;
+        Ok(content)
+    }
 
-        // Under it, so the whole entry is buffered in memory.
-        let mut reader = fs.open("small.txt")?;
-        let mut content = Vec::new();
-        reader.read_to_end(&mut content)?;
-        assert_eq!(content.len(), 50);
-        assert_eq!(content, vec![b'b'; 50]);
+    /// `walk()` must report `/`-separated names on every platform, and every
+    /// name it reports must round-trip back through `open()` — on both sides of
+    /// the size threshold, which decides whether an entry is streamed from the
+    /// archive or buffered whole.
+    #[test]
+    fn test_zip_walk_and_open() -> Result<()> {
+        let large = vec![b'a'; 200];
+        let small = vec![b'b'; 50];
+        let temp = zip_with(&[
+            ("large.txt", &large),
+            ("small.txt", &small),
+            ("Photos/Holiday/img.txt", b"hello"),
+        ])?;
+        let fs = ZipFileSystem::new(&temp.path().to_string_lossy())?;
 
+        let names = fs.walk();
+        assert!(names.contains(&"Photos/Holiday/img.txt".to_string()));
+        for name in &names {
+            fs.open(name)?;
+        }
+        assert_eq!(read_entry(&fs, "large.txt")?, large);
+        assert_eq!(read_entry(&fs, "small.txt")?, small);
+        assert_eq!(read_entry(&fs, "Photos/Holiday/img.txt")?, b"hello");
+        Ok(())
+    }
+
+    /// `enclosed_name` rejects anything that would escape, so traversal entries
+    /// never appear in the walk and can't be opened or written.
+    #[test]
+    fn test_zip_entries_with_parent_dir_names_are_dropped() -> Result<()> {
+        let temp = zip_with(&[
+            ("good/photo.jpg", b"ok"),
+            ("../evil.jpg", b"nope"),
+            ("a/../../evil2.jpg", b"nope"),
+            ("nested/../../../evil3.jpg", b"nope"),
+        ])?;
+        let fs = ZipFileSystem::new(&temp.path().to_string_lossy())?;
+        for name in fs.walk() {
+            assert!(
+                !crate::test_util::escapes_output(&name),
+                "zip walk surfaced an escaping entry name: {name}"
+            );
+            read_entry(&fs, &name)?;
+        }
         Ok(())
     }
 
     #[test]
-    fn test_zip_nested_entries_walk_with_slashes_and_open() -> Result<()> {
-        let mut temp_file = tempfile::NamedTempFile::new()?;
+    fn test_broken_zip_errors_rather_than_panics() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // An empty file, random bytes, and the first half of a real zip (its
+        // central directory missing) must all be rejected with an error.
+        let full = std::fs::read("test/Canon_40D.jpg.zip")?;
+        for (name, bytes) in [
+            ("empty.zip", b"".as_slice()),
+            (
+                "garbage.zip",
+                b"PK\x03\x04 then total nonsense that is not a zip",
+            ),
+            ("truncated.zip", &full[..full.len() / 2]),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes)?;
+            assert!(
+                ZipFileSystem::new(&path.to_string_lossy()).is_err(),
+                "{name} should be rejected"
+            );
+        }
+        Ok(())
+    }
+
+    /// A few MB of zeros stored tiny on disk. The test-build threshold is 100
+    /// bytes, so this takes the decompress-to-disk path and shows it is bounded
+    /// by the entry's declared size. There is no explicit expansion cap, which
+    /// is why the fixture is kept modest.
+    #[test]
+    fn test_zip_entry_decompresses_without_panic() -> Result<()> {
+        let size = 4 * 1024 * 1024;
+        let mut temp = tempfile::Builder::new().suffix(".zip").tempfile()?;
         {
-            let mut zip_writer = zip::ZipWriter::new(&mut temp_file);
+            let mut w = zip::ZipWriter::new(&mut temp);
             let options =
-                FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
-            zip_writer.start_file("Photos/Holiday/img.txt", options)?;
-            zip_writer.write_all(b"hello")?;
-            zip_writer.finish()?;
+                FileOptions::<()>::default().compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("zeros.bin", options)?;
+            w.write_all(&vec![0u8; size])?;
+            w.finish()?;
         }
-        let fs = ZipFileSystem::new(&temp_file.path().to_string_lossy())?;
-        // walk() must report `/`-separated names on every platform, and every
-        // name it reports must round-trip back through open().
-        let names = fs.walk();
-        assert!(names.contains(&"Photos/Holiday/img.txt".to_string()));
-        for name in &names {
-            let mut reader = fs.open(name)?;
-            let mut content = Vec::new();
-            reader.read_to_end(&mut content)?;
-            assert_eq!(content, b"hello");
-        }
+        let fs = ZipFileSystem::new(&temp.path().to_string_lossy())?;
+        let content = read_entry(&fs, "zeros.bin")?;
+        assert_eq!(content.len(), size, "decompressed size must match declared");
+        assert!(content.iter().all(|b| *b == 0));
         Ok(())
     }
 

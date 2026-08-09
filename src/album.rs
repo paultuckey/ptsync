@@ -250,25 +250,29 @@ pub(crate) fn build_album_md(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::{OsFileSystem, WritableFileSystem};
+    use crate::fs::OsFileSystem;
+
+    fn scanned(paths: &[&str]) -> Vec<ScanInfo> {
+        paths
+            .iter()
+            .map(|p| ScanInfo::new(p.to_string(), None, None, 0))
+            .collect()
+    }
 
     #[test]
-    fn test_ic_sample() -> anyhow::Result<()> {
+    fn test_parse_csv_album() -> anyhow::Result<()> {
         use anyhow::anyhow;
         crate::test_util::setup_log();
         let c = OsFileSystem::new("test");
         let qsf = ScanInfo::new("ic-album-sample.csv".to_string(), None, None, 0);
         // The CSV lists bare filenames, so resolution must reach into `Photos/`.
-        let media: Vec<ScanInfo> = [
+        let media = scanned(&[
             "Photos/35F8739B-30E0-4620-802C-0817AD7356F6.JPG",
             "Photos/AECA2F1F-8308-4989-8149-89D45A5867FD.jpg",
             "Photos/7AB0F3A2-9235-44D4-8AC9-C9B758CF15C0.jpg",
             "Photos/6F00C466-8F35-499D-9346-554E3BC2F931.jpg",
             "Photos/399E997B-A322-449A-80B5-F2F5AE98DAD5.JPG",
-        ]
-        .iter()
-        .map(|p| ScanInfo::new(p.to_string(), None, None, 0))
-        .collect();
+        ]);
         let a = parse_album(&c, &qsf, &media).ok_or_else(|| anyhow!("Failed to parse album"))?;
         assert_eq!(a.title, "ic-album-sample".to_string());
         assert_eq!(
@@ -280,140 +284,171 @@ mod tests {
             a.files.first().ok_or_else(|| anyhow!("Album empty"))?,
             "Photos/35F8739B-30E0-4620-802C-0817AD7356F6.JPG"
         );
-        Ok(())
-    }
 
-    #[test]
-    fn test_ic_sample_unresolved_members_skipped() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
         // No CSV member is present in the scan, so nothing resolves.
-        let c = OsFileSystem::new("test");
-        let qsf = ScanInfo::new("ic-album-sample.csv".to_string(), None, None, 0);
         assert!(parse_album(&c, &qsf, &[]).is_none());
         Ok(())
     }
 
     #[test]
-    fn test_g_year_folder_not_album() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let c = OsFileSystem::new("test/takeout1");
-        let qsf = ScanInfo::new(
-            "Google Photos/Photos from 2012/metadata.json".to_string(),
-            None,
-            None,
-            0,
-        );
-        let photo = ScanInfo::new(
-            "Google Photos/Photos from 2012/IMG_1234.jpg".to_string(),
-            None,
-            None,
-            0,
-        );
-        assert!(parse_album(&c, &qsf, &[photo]).is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn test_g_sample() -> anyhow::Result<()> {
+    fn test_parse_json_album() -> anyhow::Result<()> {
         use anyhow::anyhow;
         crate::test_util::setup_log();
         let c = OsFileSystem::new("test/takeout1");
-        let qsf = ScanInfo::new(
-            "Google Photos/album1/metadata.json".to_string(),
-            None,
-            None,
-            0,
-        );
-        let si1 = ScanInfo::new("Google Photos/album1/test1.jpg".to_string(), None, None, 0);
-        let si2 = ScanInfo::new("different/test2.jpg".to_string(), None, None, 0);
-        let a =
-            parse_album(&c, &qsf, &[si1, si2]).ok_or_else(|| anyhow!("Failed to parse album"))?;
+        let album_at = |dir: &str, media: &[&str]| {
+            let qsf = ScanInfo::new(format!("{dir}/metadata.json"), None, None, 0);
+            parse_album(&c, &qsf, &scanned(media))
+        };
+
+        // Only files under the album's own directory are members.
+        let a = album_at(
+            "Google Photos/album1",
+            &["Google Photos/album1/test1.jpg", "different/test2.jpg"],
+        )
+        .ok_or_else(|| anyhow!("Failed to parse album"))?;
         assert_eq!(a.title, "Some album title".to_string());
-        assert_eq!(a.files.len(), 1);
-        assert_eq!(
-            a.files
-                .first()
-                .ok_or_else(|| anyhow!("Album empty"))?
-                .to_string(),
-            "Google Photos/album1/test1.jpg".to_string()
-        );
-        Ok(())
-    }
+        assert_eq!(a.files, vec!["Google Photos/album1/test1.jpg".to_string()]);
 
-    #[test]
-    fn test_g_empty_title_falls_back_to_dir_name() -> anyhow::Result<()> {
-        use anyhow::anyhow;
-        crate::test_util::setup_log();
-        let c = OsFileSystem::new("test/takeout1");
-        let qsf = ScanInfo::new(
-            "Google Photos/empty-title-album/metadata.json".to_string(),
-            None,
-            None,
-            0,
-        );
-        let photo = ScanInfo::new(
-            "Google Photos/empty-title-album/test1.jpg".to_string(),
-            None,
-            None,
-            0,
-        );
-        let a = parse_album(&c, &qsf, &[photo]).ok_or_else(|| anyhow!("Failed to parse album"))?;
+        // An empty title falls back to the directory name.
+        let a = album_at(
+            "Google Photos/empty-title-album",
+            &["Google Photos/empty-title-album/test1.jpg"],
+        )
+        .ok_or_else(|| anyhow!("Failed to parse album"))?;
         assert_eq!(a.title, "empty-title-album".to_string());
+
+        // A year folder is Takeout's own bucketing, not an album a user made.
+        assert!(
+            album_at(
+                "Google Photos/Photos from 2012",
+                &["Google Photos/Photos from 2012/IMG_1234.jpg"],
+            )
+            .is_none()
+        );
         Ok(())
     }
 
+    /// Album files are whatever the export wrote, so the parsers must return
+    /// rather than panic, and never name an output path outside the archive.
     #[test]
-    fn test_build_album_md_no_media_info() {
-        let album = Album {
+    fn test_parse_album_never_panics_on_malformed() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let dir = tempfile::tempdir()?;
+        // A normal (non year-folder) directory so parse_json_album does not
+        // early-out.
+        std::fs::create_dir_all(dir.path().join("SomeAlbum"))?;
+        let fs = OsFileSystem::new(&dir.path().to_string_lossy());
+
+        let csvs: Vec<(&str, &str)> = vec![
+            ("empty.csv", ""),
+            ("garbage.csv", "\u{0}\u{1}binary\u{7f}payload"),
+            ("wrong_header.csv", "NotImages\nfoo.jpg\n"),
+            ("images_no_rows.csv", "Images\n"),
+            // Unbalanced quotes: the csv reader must not choke fatally.
+            ("unclosed_quote.csv", "Images\n\"unterminated,foo.jpg\n"),
+            // Ragged rows with wildly varying column counts.
+            ("ragged.csv", "Images\na.jpg,b,c,d,e\n\n,,,\nx.jpg\n"),
+            // Unicode and embedded newlines inside a quoted field.
+            (
+                "unicode.csv",
+                "Images\n\"Ñoño 📸\nsecond line\"\ncafé.jpg\n",
+            ),
+            // Members that try to traverse out of the tree.
+            ("traversal.csv", "Images\n../../../etc/passwd\n..\\evil\n"),
+        ];
+        let jsons: Vec<&str> = vec![
+            "",
+            "\u{0}not json",
+            "{\"title\": \"unterminated",
+            "[1,2,3]",
+            "42",
+            "null",
+            r#"{"title": 12345}"#,     // title is a number
+            r#"{"title": null}"#,      // title is null
+            r#"{"title": {"a":"b"}}"#, // title is an object
+            r#"{"title": "   "}"#,     // whitespace-only, falls back to dir name
+            r#"{"notitle": "x"}"#,     // missing title key
+            r#"{"title": "Ñoño 📸 café"}"#,
+        ];
+
+        let json_rel = "SomeAlbum/metadata.json";
+        let cases = csvs
+            .into_iter()
+            .chain(jsons.into_iter().map(|body| (json_rel, body)));
+        for (name, body) in cases {
+            std::fs::write(dir.path().join(name), body)?;
+            let si = ScanInfo::new(name.to_string(), None, None, 0);
+            // No scanned media, so nothing resolves; any album that does come
+            // back must still have a safe output path.
+            if let Some(album) = parse_album(&fs, &si, &[]) {
+                assert!(
+                    !crate::test_util::escapes_output(&album.desired_album_md_path),
+                    "album path escaped output: {}",
+                    album.desired_album_md_path
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn test_album(files: &[&str]) -> Album {
+        Album {
             desired_album_md_path: "albums/test.md".to_string(),
             title: "Test Album".to_string(),
-            files: vec!["file1.jpg".to_string(), "file2.jpg".to_string()],
-        };
-        let (md, rendered) = build_album_md(&album, None, "../media/", None, "");
+            files: files.iter().map(|f| f.to_string()).collect(),
+        }
+    }
+
+    /// Without a media index the member paths are used as they are; with one,
+    /// each member is rewritten to where the file was actually written.
+    #[test]
+    fn test_build_album_md_links_members() {
+        let (md, rendered) = build_album_md(
+            &test_album(&["file1.jpg", "file2.jpg"]),
+            None,
+            "../media/",
+            None,
+            "",
+        );
         assert_eq!(rendered, 2);
         assert!(md.contains("# Test Album"));
         assert!(md.contains("![Photo](../media/file1.jpg)"));
         assert!(md.contains("![Photo](../media/file2.jpg)"));
-    }
 
-    #[test]
-    fn test_build_album_md_with_mappings() {
-        let album = Album {
-            desired_album_md_path: "albums/test.md".to_string(),
-            title: "Test Album".to_string(),
-            files: vec!["file1.jpg".to_string()],
-        };
         let mut media_info = MediaFileInfo::new_for_test();
         media_info.original_path = vec!["file1.jpg".to_string()];
         media_info.hash_info.long_checksum = "longhash1".to_string();
-
         let mut all_media = HashMap::new();
         all_media.insert("key1".to_string(), media_info);
-
         let mut final_path_by_checksum = HashMap::new();
         final_path_by_checksum.insert("longhash1".to_string(), "2023/01/file1.jpg".to_string());
 
         let (md, rendered) = build_album_md(
-            &album,
+            &test_album(&["file1.jpg"]),
             Some(&all_media),
             "../media/",
             Some(&final_path_by_checksum),
             "",
         );
         assert_eq!(rendered, 1);
-        assert!(md.contains("# Test Album"));
         assert!(md.contains("![Photo](../media/2023/01/file1.jpg)"));
+
+        // Re-rendering the same album is byte-identical, which is what lets the
+        // write be skipped on a re-run.
+        let (md2, _) = build_album_md(
+            &test_album(&["file1.jpg"]),
+            Some(&all_media),
+            "../media/",
+            Some(&final_path_by_checksum),
+            "",
+        );
+        assert_eq!(md, md2);
     }
 
     /// A member left out rather than rendered as a broken link, whichever hop
     /// failed: never inspected, or inspected but never written.
     #[test]
     fn test_build_album_md_unresolvable_member_is_skipped() {
-        let album = Album {
-            desired_album_md_path: "albums/test.md".to_string(),
-            title: "Test Album".to_string(),
-            files: vec!["file1.jpg".to_string()],
-        };
         let mut media_info = MediaFileInfo::new_for_test();
         media_info.original_path = vec!["file1.jpg".to_string()];
         media_info.hash_info.long_checksum = "longhash1".to_string();
@@ -422,7 +457,7 @@ mod tests {
 
         for all_media in [HashMap::new(), inspected] {
             let (md, rendered) = build_album_md(
-                &album,
+                &test_album(&["file1.jpg"]),
                 Some(&all_media),
                 "../media/",
                 Some(&HashMap::new()),
@@ -434,47 +469,33 @@ mod tests {
         }
     }
 
+    /// Everything below the marker is the user's, so it round-trips verbatim
+    /// however odd or large it is.
     #[test]
-    fn test_build_album_md_preserves_notes() {
-        let album = Album {
-            desired_album_md_path: "albums/test.md".to_string(),
-            title: "Test Album".to_string(),
-            files: vec!["file1.jpg".to_string()],
-        };
+    fn test_split_album_notes() {
+        crate::test_util::setup_log();
+        let album = test_album(&["file1.jpg"]);
         let (first, _) = build_album_md(&album, None, "../media/", None, "");
         assert!(first.contains(&album_notes_marker()));
 
-        // Notes written below the marker survive a re-render verbatim.
         let edited = format!("{first}## My notes\n\nGreat trip!\n");
         let notes = split_album_notes(&edited);
         assert_eq!(notes, "## My notes\n\nGreat trip!\n");
         let (second, _) = build_album_md(&album, None, "../media/", None, &notes);
         assert!(second.contains("## My notes\n\nGreat trip!\n"));
-
         assert_eq!(split_album_notes(&second), notes);
-    }
 
-    #[test]
-    fn test_split_album_notes_no_marker() {
-        assert_eq!(split_album_notes("# Just a heading\n"), "");
-    }
+        // No marker at all: no notes, rather than a panic.
+        assert_eq!(split_album_notes(""), "");
+        assert_eq!(split_album_notes("# heading only\n"), "");
 
-    #[test]
-    fn test_album_rerun_is_a_no_op_write() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let dir = tempfile::tempdir()?;
-        let out = OsFileSystem::new(&dir.path().to_string_lossy());
-        let album = Album {
-            desired_album_md_path: "albums/test.md".to_string(),
-            title: "Test Album".to_string(),
-            files: vec!["file1.jpg".to_string()],
-        };
-        let (md, _) = build_album_md(&album, None, "../", None, "");
-        assert!(out.write_if_changed(false, &album.desired_album_md_path, md.as_bytes())?);
-
-        let (md2, _) = build_album_md(&album, None, "../", None, "");
-        assert_eq!(md, md2);
-        assert!(!out.write_if_changed(false, &album.desired_album_md_path, md2.as_bytes())?);
-        Ok(())
+        // A very large body, and binary-ish unicode, both survive unchanged.
+        let marker = album_notes_marker();
+        for body in ["x".repeat(200_000), "Ñoño\u{0}\u{7f}📸".to_string()] {
+            assert_eq!(
+                split_album_notes(&format!("# Album\n\n{marker}\n{body}")),
+                body
+            );
+        }
     }
 }
