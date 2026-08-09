@@ -11,16 +11,15 @@ use std::io::Cursor;
 #[test]
 fn file_type_detection_is_content_based_not_extension() -> Result<()> {
     setup_log();
-    // A file that lies about its type via its extension must be classified by
-    // its bytes, so a re-extension attack cannot smuggle unsupported content
-    // through as media.
+    // Classified by its bytes, so a re-extension cannot smuggle unsupported
+    // content through as media.
     let png_named_jpg = fake_png();
     assert_eq!(
         determine_file_type(Cursor::new(png_named_jpg.clone()), &"photo.jpg".to_string())?,
         AccurateFileType::Png,
         "a PNG named .jpg must be detected as PNG from its content"
     );
-    // ...and feeding that same mislabelled file to the EXIF parser must not panic.
+    // The same mislabelled file through the EXIF parser must not panic.
     assert!(parse_exif_info(Cursor::new(png_named_jpg)).is_ok());
 
     // A real JPEG named .png is still a JPEG.

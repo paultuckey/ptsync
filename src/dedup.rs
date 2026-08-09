@@ -14,20 +14,14 @@ pub(crate) enum DeDuplicationResult {
     SkipWrite(String),
 }
 
-/// Collects inspected media and removes duplicates. It performs two jobs:
-///
-/// 1. *Content dedup* - files that share a long (sha256) checksum are the same
-///    bytes. [`Deduplicator::add`] keeps a single entry per checksum and records every original
-///    path that resolved to it.
-/// 2. *Path dedup* - [`Deduplicator::resolve_output_path`] finds a free name in
-///    the output directory, reusing an existing file when its checksum matches
-///    and otherwise suffixing the name with the file's own checksum.
+/// Collects inspected media and removes duplicates, by content
+/// ([`Deduplicator::add`], on the sha256) and by output path
+/// ([`Deduplicator::resolve_output_path`]).
 ///
 /// Both are deliberately deterministic: re-running over the same input produces
-/// the same canonical entries, the same write order, and the same output names
-/// every time. Parallel inspection yields files in whatever order the worker
-/// threads happen to finish, so anything order-sensitive has to be pinned here
-/// rather than left to that race.
+/// the same canonical entries, write order and output names. Parallel inspection
+/// yields files in whatever order the workers finish, so anything order-sensitive
+/// has to be pinned here rather than left to that race.
 pub(crate) struct Deduplicator {
     by_checksum: HashMap<String, MediaFileInfo>,
 }
@@ -39,8 +33,8 @@ impl Deduplicator {
         }
     }
 
-    /// Fold one inspected file into the collection, collapsing it onto any
-    /// existing entry that has the same content hash.
+    /// Fold one inspected file in, collapsing it onto any entry with the same
+    /// content hash.
     pub(crate) fn add(&mut self, media: MediaFileInfo) {
         let checksum = media.hash_info.long_checksum.clone();
         match self.by_checksum.get_mut(&checksum) {
@@ -51,18 +45,15 @@ impl Deduplicator {
         }
     }
 
-    /// The deduplicated media keyed by long checksum, for callers (albums) that
-    /// look entries up by content hash.
     pub(crate) fn by_checksum(&self) -> &HashMap<String, MediaFileInfo> {
         &self.by_checksum
     }
 
-    /// All deduplicated media in a stable order (by long checksum).
+    /// All deduplicated media ordered by long checksum.
     ///
-    /// The write loop decides which file claims a bare (un-suffixed) name when
-    /// two distinct files want the same one: the first writer wins it, the rest
-    /// fall back to a checksum suffix. Iterating a `HashMap` directly would let
-    /// that "first writer" flip every run, so we pin the order by checksum.
+    /// When two distinct files want the same bare name the first writer claims
+    /// it and the rest take a checksum suffix. Iterating the `HashMap` directly
+    /// would let that first writer flip every run.
     pub(crate) fn sorted_media(&self) -> Vec<&MediaFileInfo> {
         let mut media: Vec<&MediaFileInfo> = self.by_checksum.values().collect();
         media.sort_by(|a, b| a.hash_info.long_checksum.cmp(&b.hash_info.long_checksum));
@@ -72,21 +63,13 @@ impl Deduplicator {
     /// Resolve the path a media file should be written to, given what is already
     /// in `output_container`.
     ///
-    /// Candidate names are tried in this order:
-    ///   1. the bare desired path (`date/hhmm-ssms`) - keeps the readable name
-    ///      for the common, no-collision case;
-    ///   2. desired path + `-<short checksum>` - used as soon as the bare name is
-    ///      taken by *different* content. The suffix comes from the file's own
-    ///      bytes, so a file's collision name never depends on processing order
-    ///      or on what else happens to land on the same name;
-    ///   3. desired path + `-<long checksum>` - last resort for the
-    ///      (astronomically unlikely) case of two different files sharing a
-    ///      short checksum.
+    /// Names are tried bare, then suffixed with the short then the long checksum.
+    /// A free name becomes the write target, one already holding the *same* bytes
+    /// means the write can be skipped, and one holding *different* bytes falls
+    /// through to the next candidate; running out is an error.
     ///
-    /// At each candidate: a free name becomes the write target, a name already
-    /// holding the *same* bytes means the write can be skipped, and a name
-    /// holding *different* bytes falls through to the next candidate. Errors if
-    /// even the long-checksum name is taken by different content.
+    /// The suffix comes from the file's own bytes, so a collision name never
+    /// depends on processing order or on what else landed on the same name.
     pub(crate) fn resolve_output_path(
         media_file: &MediaFileInfo,
         derived: &MediaFileDerivedInfo,
@@ -128,7 +111,6 @@ impl Deduplicator {
                     warn!(
                         "  Existing file is different, trying a checksum-suffixed name: {desired_output_path_with_ext}"
                     );
-                    // fall through to the next candidate suffix
                 }
                 None => {
                     warn!(
@@ -148,11 +130,9 @@ impl Deduplicator {
 
 /// Collapse a byte-identical duplicate into `canonical`.
 ///
-/// Parallel inspection means "first one wins" would let a thread race decide
-/// which entry's metadata (modified time, sidecar, the path whose bytes get
-/// written) survives. Instead the entry whose source path sorts first is kept
-/// canonical, and every original path is gathered into a sorted, de-duplicated
-/// list. The chosen entry is therefore independent of inspection order.
+/// The entry whose source path sorts first is kept, rather than the first one
+/// seen — under parallel inspection that would let a thread race decide whose
+/// metadata survives.
 fn merge_into(canonical: &mut MediaFileInfo, dup: MediaFileInfo) {
     let mut paths = std::mem::take(&mut canonical.original_path);
     paths.extend(dup.original_path.iter().cloned());
@@ -173,8 +153,6 @@ mod tests {
     use crate::util::HashInfo;
     use anyhow::anyhow;
 
-    /// Build a media entry with a controllable source path and content hash so
-    /// tests can exercise collapsing and ordering directly.
     fn media_with(path: &str, long_checksum: &str) -> MediaFileInfo {
         let mut m = MediaFileInfo::new_for_test();
         m.original_file_this_run = path.to_string();
@@ -188,7 +166,6 @@ mod tests {
 
     #[test]
     fn test_resolve_no_collision_uses_bare_name() -> anyhow::Result<()> {
-        // Nothing exists at the desired path, so it is written as-is.
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
         let derived =
@@ -203,8 +180,8 @@ mod tests {
 
     #[test]
     fn test_resolve_base_collision_uses_short_checksum() -> anyhow::Result<()> {
-        // `duplicates/one.txt` exists with different content, so we go straight
-        // to the short-checksum suffix (no -1/-2 counter).
+        // `duplicates/one.txt` exists with different content, so this goes
+        // straight to the short-checksum suffix — no -1/-2 counter.
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
         let derived = MediaFileDerivedInfo::new_for_test(Some("duplicates/one".to_string()), "txt");
@@ -219,7 +196,7 @@ mod tests {
     #[test]
     fn test_resolve_short_checksum_collision_falls_back_to_long() -> anyhow::Result<()> {
         // Both `short-clash.txt` and `short-clash-tsc.txt` exist with different
-        // content, so the long checksum is used.
+        // content.
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
         let derived =
@@ -234,8 +211,7 @@ mod tests {
 
     #[test]
     fn test_resolve_all_candidates_taken_errors() -> anyhow::Result<()> {
-        // The bare, short- and long-checksum names all exist with different
-        // content, so there is nowhere to write.
+        // All three candidate names exist with different content.
         let c = OsFileSystem::new("test");
         let mfi = MediaFileInfo::new_for_test();
         let derived =
@@ -247,8 +223,6 @@ mod tests {
 
     #[test]
     fn test_resolve_skips_when_identical_file_exists() -> anyhow::Result<()> {
-        // The desired path already holds a byte-identical file (matching long
-        // checksum), so there is nothing to write.
         let c = OsFileSystem::new("test");
         let mut mfi = MediaFileInfo::new_for_test();
         mfi.hash_info = HashInfo {
@@ -285,8 +259,6 @@ mod tests {
 
     #[test]
     fn test_collapse_canonical_entry_is_order_independent() -> anyhow::Result<()> {
-        // The same two byte-identical files, added in opposite orders, must
-        // collapse to the same canonical entry and the same path list.
         let mut forward = Deduplicator::new();
         forward.add(media_with("b/photo.jpg", "hashX"));
         forward.add(media_with("a/photo.jpg", "hashX"));
@@ -304,7 +276,7 @@ mod tests {
             .get("hashX")
             .ok_or_else(|| anyhow!("reverse entry missing"))?;
 
-        // Lowest-sorting source path wins as canonical, regardless of add order.
+        // Lowest-sorting source path wins, regardless of add order.
         assert_eq!(f.original_file_this_run, "a/photo.jpg");
         assert_eq!(r.original_file_this_run, "a/photo.jpg");
         assert_eq!(f.original_path, r.original_path);

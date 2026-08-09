@@ -24,8 +24,7 @@ pub(crate) fn main(input: &String, root_s: &str, tz: OutputTZ) -> anyhow::Result
     Ok(())
 }
 
-/// Render the `info` report for a single media file. Returns an empty string
-/// when the file isn't a supported media type.
+/// Empty when the file isn't a supported media type.
 pub(crate) fn media(si: &ScanInfo, root: &dyn FileSystem, tz: OutputTZ) -> anyhow::Result<String> {
     let Some(media_file_info) = analyze_file(root, si)? else {
         debug!("Not a valid media file: {}", si.file_path);
@@ -65,8 +64,7 @@ pub(crate) fn media(si: &ScanInfo, root: &dyn FileSystem, tz: OutputTZ) -> anyho
     Ok(out)
 }
 
-/// Render the `info` report for an album file. Returns an empty string when the
-/// file isn't a valid album.
+/// Empty when the file isn't a valid album.
 pub(crate) fn album(si: &ScanInfo, root: &dyn FileSystem) -> anyhow::Result<String> {
     let files = scan_fs(root);
     let album_o = parse_album(root, si, &files);
@@ -86,8 +84,8 @@ pub(crate) fn album(si: &ScanInfo, root: &dyn FileSystem) -> anyhow::Result<Stri
     }
     writeln!(out)?;
 
-    // The markdown links to the media's original paths (see `build_album_md`'s
-    // `None` branch), so there's no need to inspect/hash the referenced media.
+    // Links to the media's original paths (`build_album_md`'s `None` branch), so
+    // the referenced media needs no inspecting or hashing.
     writeln!(out, "Markdown:")?;
     let (md, _) = build_album_md(&album, None, "", None, "");
     writeln!(out, "{md}")?;

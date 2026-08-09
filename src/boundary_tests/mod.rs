@@ -12,10 +12,8 @@ use std::path::{Component, Path};
 use zip::CompressionMethod;
 use zip::write::FileOptions;
 
-/// True when a tool-derived output path would escape the `--output` directory it
-/// is joined onto: an absolute path, a rooted path, or one that climbs above the
-/// root with `..`. This is the machine-checkable form of "never write outside
-/// `--output`".
+/// The machine-checkable form of "never write outside `--output`": true for an
+/// absolute or rooted path, or one that climbs above the root with `..`.
 fn escapes_output(rel: &str) -> bool {
     let p = Path::new(rel);
     let mut depth: i32 = 0;
@@ -40,8 +38,8 @@ fn real_jpeg() -> Result<Vec<u8>> {
     Ok(std::fs::read("test/Canon_40D.jpg")?)
 }
 
-/// A minimal but signature-valid PNG (8-byte magic + an IHDR chunk). Enough for
-/// content sniffing to call it a PNG; deliberately not a decodable image.
+/// Signature-valid PNG (8-byte magic plus an IHDR chunk) — enough for content
+/// sniffing, deliberately not a decodable image.
 fn fake_png() -> Vec<u8> {
     let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     v.extend_from_slice(&[0, 0, 0, 0x0d]); // IHDR length
@@ -51,8 +49,7 @@ fn fake_png() -> Vec<u8> {
     v
 }
 
-/// A handful of names that stress every filename-handling code path: `../`
-/// traversal, unicode, a name well over 255 chars, Windows-reserved device
+/// `../` traversal, unicode, a name well over 255 chars, Windows-reserved device
 /// names, and embedded control characters.
 fn hostile_names() -> Vec<String> {
     vec![
@@ -75,9 +72,8 @@ fn hostile_names() -> Vec<String> {
     ]
 }
 
-/// Build a zip whose entry *names* are used verbatim (so traversal names can be
-/// tested). Names the zip writer refuses are skipped, since the point is the
-/// read side: whatever ends up inside must never surface as an escaping path.
+/// Entry names are used verbatim so traversal names can be tested. Names the zip
+/// writer refuses are skipped: the point is the read side.
 fn zip_with_raw_names(entries: &[(&str, &[u8])]) -> Result<tempfile::NamedTempFile> {
     let mut temp = tempfile::Builder::new().suffix(".zip").tempfile()?;
     {

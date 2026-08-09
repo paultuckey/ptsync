@@ -14,9 +14,8 @@ use std::path::{Path, PathBuf};
 #[test]
 fn derived_media_paths_never_escape_output() {
     setup_log();
-    // Real short checksums are always hex, so the only attacker-influenced input
-    // to the media path is the datetime string. None of these - including ones
-    // crafted to look like traversal - may produce an escaping path.
+    // Real short checksums are always hex, so the datetime string is the only
+    // attacker-influenced input to the media path.
     let checksum = "6bfdabd";
     let datetimes: Vec<Option<String>> = vec![
         None,
@@ -40,10 +39,9 @@ fn derived_media_paths_never_escape_output() {
 #[test]
 fn hostile_filenames_do_not_panic_path_helpers() -> Result<()> {
     setup_log();
-    // Feed traversal, unicode, over-255-char, reserved and control-char names to
-    // every filename helper. None may panic. The markdown-path helper preserves
-    // the directory (it only swaps the extension), so we do not require it to
-    // sanitise - the output path it is fed is itself always tool-derived.
+    // None of the helpers may panic. The markdown-path helper only swaps the
+    // extension, so it is not required to sanitise — what it is fed is always
+    // tool-derived.
     for name in hostile_names() {
         let _ = find_quick_file_type(&name);
         let _ = name_part(&name);
@@ -67,9 +65,9 @@ fn sync_over_hostile_input_names_stays_within_output() -> Result<()> {
     let input = temp.path().join("input");
     let output = temp.path().join("output");
 
-    // A subdirectory whose name is unicode, containing two distinct real photos
-    // under a reserved device name and a long-ish name, each with supplemental
-    // metadata fixing the date, plus an album metadata.json for the folder.
+    // A unicode subdirectory holding two real photos — one under a reserved
+    // device name, one long — each with supplemental metadata fixing the date,
+    // plus an album metadata.json.
     let album_dir = input.join("café 📸 Ñoño");
     std::fs::create_dir_all(&album_dir)?;
     let base = real_jpeg()?;
@@ -100,8 +98,8 @@ fn sync_over_hostile_input_names_stays_within_output() -> Result<()> {
         crate::test_util::tz(),
     )?;
 
-    // Every file the sync produced must sit under the output root - the derived
-    // names are date/checksum based, so nothing leaks the hostile input names.
+    // Derived names are date/checksum based, so nothing leaks the hostile input
+    // names and everything stays under the output root.
     let mut count = 0;
     for path in files_under(&output)? {
         let rel = path.strip_prefix(&output)?.to_string_lossy().to_string();
@@ -112,7 +110,6 @@ fn sync_over_hostile_input_names_stays_within_output() -> Result<()> {
     Ok(())
 }
 
-/// Every regular file under `dir`, recursing into subdirectories.
 fn files_under(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     if !dir.exists() {

@@ -33,11 +33,9 @@ const DB_MEDIA_ITEM_CREATE: &str = "
     )
 ";
 
-// OR REPLACE, keyed on the path-derived media_item_id: a fresh scan of the same
-// path overwrites the old row. This matters on resume — a file whose bytes
-// changed in place (so `run_db_scan` re-inspects it) gets its new metadata,
-// rather than the stale first row winning as it would with OR IGNORE. Files that
-// are unchanged are filtered out before inspection and so never reach here.
+// OR REPLACE rather than OR IGNORE, keyed on the path-derived media_item_id: a
+// file whose bytes changed in place is re-inspected on resume and must get its
+// new metadata, not have the stale first row win.
 pub(super) const DB_MEDIA_ITEM_INSERT: &str = "
     INSERT OR REPLACE INTO media_item (media_path, long_hash, short_hash, quick_file_type,
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
@@ -47,11 +45,11 @@ pub(super) const DB_MEDIA_ITEM_INSERT: &str = "
 ";
 pub(super) const DB_MEDIA_ITEM_ID_BY_PATH: &str =
     "SELECT media_item_id FROM media_item WHERE media_path = ?1";
-// Every recorded media row's id and size, read at the start of a run so already
-// recorded files can be skipped instead of re-hashed (see `load_recorded_media`).
+// Read at the start of a run so already-recorded files can be skipped instead of
+// re-hashed; see `load_recorded_media`.
 pub(super) const DB_MEDIA_ITEM_LOAD_RECORDED: &str =
     "SELECT media_item_id, file_size FROM media_item";
-// Album building and many info queries look media rows up by `media_path`
+// Album building and many info queries look media rows up by `media_path`.
 const DB_MEDIA_ITEM_PATH_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_media_item_media_path ON media_item (media_path)";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
@@ -118,9 +116,8 @@ const DB_ALBUM_FILE_DELETE_ALL: &str = "DELETE FROM album_file";
 
 // ---- run -----------------------------------------------------------------
 
-// One row per distinct --input, not per invocation: re-running the same input
-// resumes its run (see `run_db_scan`), reusing this row so classified_file /
-// classified_dir stay a single, refreshed set rather than one per attempt.
+// One row per distinct --input, not per invocation, so classified_file and
+// classified_dir stay a single refreshed set rather than one per attempt.
 const DB_RUN_CREATE: &str = "
     CREATE TABLE IF NOT EXISTS run (
         run_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,8 +126,7 @@ const DB_RUN_CREATE: &str = "
     )
 ";
 pub(super) const DB_RUN_INSERT: &str = "INSERT INTO run (run_input) VALUES (?1)";
-// Find an input's existing run so a re-run resumes it rather than starting a new
-// one. Newest first, though in practice there is at most one row per input.
+// Newest first, though in practice there is at most one row per input.
 pub(super) const DB_RUN_FIND_BY_INPUT: &str =
     "SELECT run_id FROM run WHERE run_input = ?1 ORDER BY run_id DESC LIMIT 1";
 const DB_RUN_DELETE_ALL: &str = "DELETE FROM run";
@@ -177,15 +173,14 @@ pub(super) const DB_CLASSIFIED_DIR_DELETE_BY_RUN: &str =
 
 // ---- schema version & build order ----------------------------------------
 
-// Bump whenever a CREATE TABLE statement changes. `user_version` defaults to 0.
-// Consider migrating users existing DBs on incrementing. The `schema_hash_is_current`
-// test fails on any schema change to force this bump; see it before editing.
+// Bump whenever a CREATE TABLE statement changes, and consider migrating existing
+// databases. `schema_hash_is_current` fails on any schema change to force this;
+// read it before editing.
 const DB_SCHEMA_VERSION: i64 = 3;
 
-// The whole schema, as the ordered statements `db_prepare` runs to build it:
-// tables first (parents before children so foreign keys resolve), then indexes.
-// Single source of truth — `db_prepare` builds from these, the docs generator
-// reads them, and `schema_hash_is_current` hashes them.
+// The single source of truth for the schema: `db_prepare` builds from these, the
+// docs generator reads them, and `schema_hash_is_current` hashes them. Ordered
+// parents before children so foreign keys resolve.
 pub(crate) const SCHEMA_TABLE_STATEMENTS: [&str; 8] = [
     DB_MEDIA_ITEM_CREATE,
     DB_PERSON_CREATE,
@@ -205,10 +200,9 @@ pub(super) async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result
         .transpose()?
         .unwrap_or(0);
 
-    // Version 0 is a brand-new database with no schema yet, so there is nothing
-    // to reconcile. Any other version that doesn't match is a schema mismatch we
-    // can only resolve by rebuilding, which throws away data — so we only do it
-    // when the user opted into --clear, and otherwise refuse.
+    // Version 0 is a brand-new database with nothing to reconcile. Any other
+    // mismatch can only be resolved by rebuilding, which throws away data, so it
+    // needs `--clear`.
     if version != 0 && version != DB_SCHEMA_VERSION {
         if clear {
             info!("DB schema version {version} != {DB_SCHEMA_VERSION}, rebuilding from scratch");
@@ -222,9 +216,8 @@ pub(super) async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result
         }
     }
 
-    // All create statements are `IF NOT EXISTS`: a no-op when the schema already
-    // matches, and a full build on a fresh or just-dropped database. Tables first,
-    // then indexes.
+    // Every create statement is `IF NOT EXISTS`, so this is a no-op on a matching
+    // schema and a full build on a fresh or just-dropped one.
     for stmt in SCHEMA_TABLE_STATEMENTS
         .iter()
         .chain(&SCHEMA_INDEX_STATEMENTS)
@@ -232,9 +225,7 @@ pub(super) async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result
         conn.execute(*stmt, ()).await?;
     }
 
-    // Clear existing rows only when asked. Delete children before parents so
-    // foreign keys hold (media_person and album_file reference media_item;
-    // classified_file and classified_dir reference run).
+    // Children before parents so foreign keys hold.
     if clear {
         conn.execute(DB_MEDIA_PERSON_DELETE_ALL, ()).await?;
         conn.execute(DB_ALBUM_FILE_DELETE_ALL, ()).await?;
@@ -251,8 +242,7 @@ pub(super) async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result
     Ok(())
 }
 
-// Drop every table so the following CREATE statements rebuild them at the current
-// schema. Children before parents to satisfy foreign keys.
+// Children before parents to satisfy foreign keys.
 async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
     for table in [
         "media_person",
@@ -274,9 +264,8 @@ async fn db_drop_all(conn: &Connection) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Canonical text of the whole schema: line comments dropped and whitespace
-    /// collapsed, so only a meaningful SQL change moves the hash — reindenting a
-    /// statement or rewording a `-- comment` does not.
+    /// Line comments dropped and whitespace collapsed, so only a meaningful SQL
+    /// change moves the hash — reindenting or rewording a `-- comment` does not.
     fn canonical_schema() -> String {
         SCHEMA_TABLE_STATEMENTS
             .iter()
@@ -301,15 +290,10 @@ mod tests {
         hex::encode(hasher.finalize())
     }
 
-    /// Tripwire so a schema change can't ship without a deliberate version bump.
-    /// Any edit to a `CREATE TABLE`/`INDEX` statement moves `schema_hash()`, which
-    /// makes existing databases on the old `DB_SCHEMA_VERSION` incompatible. When
-    /// this fails and the change was intended:
-    ///   1. Bump `DB_SCHEMA_VERSION`.
-    ///   2. Decide how existing databases move from the previous version to the new
-    ///      one. Today `db_prepare` only offers a `--clear` rebuild (which discards
-    ///      data); add a real migration there if the data is worth keeping.
-    ///   3. Update `EXPECTED_SCHEMA_HASH` below to the value the failure prints.
+    /// Tripwire so a schema change can't ship without a deliberate version bump:
+    /// any edit to a statement makes existing databases on the old
+    /// `DB_SCHEMA_VERSION` incompatible. The failure message below spells out the
+    /// steps.
     #[test]
     fn schema_hash_is_current() {
         const EXPECTED_SCHEMA_HASH: &str =

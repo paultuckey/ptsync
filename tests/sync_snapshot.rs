@@ -18,8 +18,8 @@ const TAPE_PATH: &str = "docs/demo.tape";
 
 const DEMO_NOTE: &str = "photo-archive/2024/05/22/1217-51000.md";
 
-/// The zone both this snapshot and `docs/demo.tape` are recorded in, as a value
-/// for `TZ`. Fixed so it doesn't differ by machine test run on.
+/// The `TZ` both this snapshot and `docs/demo.tape` are recorded in, fixed so the
+/// output doesn't differ by machine.
 const SNAPSHOT_TZ: &str = "+12:00";
 
 #[test]
@@ -86,15 +86,13 @@ fn repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
-/// The `ptsync` binary under test — built by Cargo and handed to us via
-/// `CARGO_BIN_EXE_ptsync`, so it always matches the current tree.
+/// From `CARGO_BIN_EXE_ptsync`, so it always matches the current tree.
 fn ptsync_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ptsync"))
 }
 
-/// The argv for the sync, run from the directory [`prepare_demo_dir`] creates.
-/// `docs/demo.tape` types the same command, so the snapshot really does stand in
-/// for what the GIF shows.
+/// Run from the directory [`prepare_demo_dir`] creates. `docs/demo.tape` types
+/// the same command, which is what lets this snapshot stand in for the GIF.
 fn sync_argv() -> Result<Vec<String>> {
     Ok(vec![
         path_arg(&ptsync_bin())?,
@@ -184,8 +182,8 @@ fn collect_files(dir: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Skip macOS's `.DS_Store` droppings, which would otherwise land in the zip and
-/// show up as a skipped file in the demo output.
+/// macOS's `.DS_Store` droppings would otherwise land in the zip and show up as
+/// a skipped file in the demo output.
 fn is_ignorable(path: &Path) -> bool {
     path.file_name()
         .map(|name| name == ".DS_Store")

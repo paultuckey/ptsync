@@ -1,16 +1,11 @@
 //! The `db` command: scan an archive and collect its metadata into a SQLite
 //! index. This module owns the flow — open the container, prepare the schema,
-//! classify paths, inspect media, and record albums. The pieces it orchestrates
-//! live in submodules:
+//! classify paths, inspect media, record albums — over the submodules below.
 //!
-//! A run is keyed on its `--input`, not on the invocation, so re-running the
-//! same input resumes it: media already recorded is skipped rather than
-//! re-hashed. See [`run_db_scan`].
-//!
-//! The two skip flags in [`DbScanOpts`] cut whole phases out of that flow. They
-//! are independent, and because a resumed run re-visits the album pass, a
-//! `--skip-media` scan followed by a full one still ends up with complete
-//! `album_file` links.
+//! A run is keyed on its `--input` rather than on the invocation, so re-running
+//! the same input resumes it and already-recorded media is not re-hashed. Because
+//! a resumed run re-visits the album pass, a `--skip-media` scan followed by a
+//! full one still ends up with complete `album_file` links.
 
 use crate::classify::{classify_dir, classify_file};
 use crate::file_type::QuickFileType;
@@ -64,9 +59,9 @@ pub(crate) fn main(
     info!("Writing database: {output}");
     let rt = runtime::Builder::new_current_thread().build()?;
     // `container` keeps its own handle so the one moved into the async block is
-    // never the last: `S3FileSystem` owns a tokio runtime, and dropping a runtime
-    // from inside another runtime's context panics. This way the S3 runtime is
-    // released here, on a plain blocking thread, after `block_on` returns.
+    // never the last. `S3FileSystem` owns a tokio runtime, and dropping a runtime
+    // from inside another runtime's context panics; this releases it here, on a
+    // plain blocking thread, after `block_on` returns.
     let result = rt.block_on(async {
         let (_db, conn) = open_conn(output).await?;
         run_db_scan(container.clone(), &conn, opts, input, tz).await
@@ -84,7 +79,6 @@ async fn run_db_scan(
 ) -> anyhow::Result<()> {
     db_prepare(conn, opts.clear).await?;
 
-    // A run is identified by its input: re-running for same input reuses run row.
     let run_id = match query_one(conn, DB_RUN_FIND_BY_INPUT, [run_input]).await? {
         Some(row) => {
             let id = row.get::<i64>(0)?;
@@ -105,14 +99,13 @@ async fn run_db_scan(
     if opts.skip_media {
         info!("Skipping inspection of photo and video files");
     } else {
-        // Everything classified as media, before we set aside the ones already done.
         let all_media: Vec<&ScanInfo> = files
             .iter()
             .filter(|m| m.quick_file_type == QuickFileType::Media)
             .collect();
 
-        // Media already recorded by an earlier run are skipped so we don't re-hash
-        // them. Only re-hash if size changes.
+        // Media an earlier run already recorded is re-hashed only if its size
+        // changed.
         let recorded = load_recorded_media(conn).await?;
         let media_si_files: Vec<ScanInfo> = all_media
             .iter()
@@ -133,9 +126,9 @@ async fn run_db_scan(
         info!("Inspecting {} photo and video files", media_si_files.len());
         let prog = Arc::new(Progress::new(media_si_files.len() as u64));
 
-        // Inspect in parallel and stream the results straight into the db, committing
-        // in batches to avoid the per-row fsync of autocommit. A single writer drains
-        // the channel; the parallelism lives in `inspect_media_files`.
+        // Results stream straight into the db, batched to avoid autocommit's
+        // per-row fsync. This is the single writer; the parallelism is inside
+        // `inspect_media_files`.
         conn.execute("BEGIN", ()).await?;
         let mut batch_count = 0;
         let mut inspected = inspect_media_files(container.clone(), media_si_files, prog.clone());
@@ -188,9 +181,8 @@ async fn run_db_scan(
                 )
                 .await?;
                 for file in &album.files {
-                    // Album members reference scanned file paths; link them to the
-                    // media_item row for that path. Skip any that weren't indexed as
-                    // media (e.g. an unsupported type, or a --skip-media run).
+                    // Members that were never indexed as media — an unsupported
+                    // type, or a `--skip-media` run — are skipped.
                     let media_item_id: Option<String> =
                         match query_one(conn, DB_MEDIA_ITEM_ID_BY_PATH, [file.as_str()]).await? {
                             Some(row) => Some(row.get::<String>(0)?),
@@ -213,7 +205,7 @@ async fn run_db_scan(
         drop(prog_albums);
     }
 
-    // Fold WAL back into the main file so the output is a single, file.
+    // Fold the WAL back in so the output is a single file.
     let _ = query_one(conn, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
 
     info!("Done {} files", files.len());
@@ -229,9 +221,8 @@ async fn db_classify_paths(
 
     conn.execute("BEGIN", ()).await?;
 
-    // This run may be a resume of an earlier one: clear its previous
-    // classification rows so a re-scan refreshes them in place instead of
-    // stacking a second full set under the same run_id.
+    // On a resume, clearing this run's previous classification rows refreshes them
+    // in place rather than stacking a second set under the same run_id.
     conn.execute(DB_CLASSIFIED_FILE_DELETE_BY_RUN, [run_id])
         .await?;
     conn.execute(DB_CLASSIFIED_DIR_DELETE_BY_RUN, [run_id])
@@ -296,8 +287,8 @@ async fn load_recorded_media(conn: &Connection) -> anyhow::Result<HashMap<String
     let mut recorded = HashMap::new();
     while let Some(row) = rows.next().await? {
         let id = row.get::<String>(0)?;
-        // file_size is always written by db_record; treat a NULL as "unknown"
-        // (-1) so it never matches a scanned size and the file is re-inspected.
+        // `db_record` always writes file_size, so a NULL means unknown. -1 never
+        // matches a scanned size, which forces a re-inspect.
         let size = row.get::<Option<i64>>(1)?.unwrap_or(-1);
         recorded.insert(id, size);
     }
@@ -307,8 +298,7 @@ async fn load_recorded_media(conn: &Connection) -> anyhow::Result<HashMap<String
 #[cfg(test)]
 mod tests;
 
-/// Test-only: checks every SQL snippet in `docs/db-example-queries.md` runs
-/// against a scanned database. (The `docs/db-schema.md` generator that reads
-/// `SCHEMA_TABLE_STATEMENTS` lives in the crate's `docs_generator` module.)
+/// The `docs/db-schema.md` generator that reads `SCHEMA_TABLE_STATEMENTS` lives
+/// in `docs_generator` instead.
 #[cfg(test)]
 mod db_example_queries;

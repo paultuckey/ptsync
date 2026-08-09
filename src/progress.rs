@@ -62,8 +62,8 @@ mod tests {
     use std::time::Duration;
     use tracing::debug;
 
-    /// Progress example (not really a test)
-    /// increase delay to make it more visible as progress bar has a frame rate
+    /// A demo rather than an assertion. The bar has a frame rate, so raise the
+    /// delay to watch it.
     #[test]
     fn test_progress() -> anyhow::Result<()> {
         crate::test_util::setup_log();

@@ -33,9 +33,8 @@ pub(crate) fn main(
     let mut deduper = Deduplicator::new();
     let mut final_path_by_checksum = HashMap::<String, String>::new();
 
-    // Albums are parsed up front so each photo's sidecar can record the albums it
-    // belongs to. The album markdown files themselves are written later, once the
-    // final media output paths are known.
+    // Parsed up front so each photo's sidecar can record its albums; the album
+    // files themselves are written later, once the output paths are known.
     let albums = if skip_albums {
         Vec::new()
     } else {
@@ -51,10 +50,8 @@ pub(crate) fn main(
             .collect();
         info!("Inspecting {} photo and video files", media_si_files.len());
         let prog = Arc::new(Progress::new(media_si_files.len() as u64));
-        // Inspection (hashing + metadata) runs in parallel; dedup must stay on
-        // this thread since it mutates the shared collection. Files with the
-        // same content hash collapse into one entry, recording each original
-        // path (see `Deduplicator`).
+        // Inspection is parallel, but dedup stays on this thread since it mutates
+        // the shared collection.
         let mut inspected = inspect_media_files(container.clone(), media_si_files, prog.clone());
         for media in inspected.by_ref() {
             deduper.add(media);
@@ -130,9 +127,8 @@ pub(crate) fn main(
                 warn!("Skipping album with no resolvable photos: {output_path:?}");
                 continue;
             }
-            // The photo list is regenerated every run. An unchanged album
-            // yields identical content; only write when it actually differs
-            // so a re-run leaves the file (and its mtime) untouched.
+            // The photo list is regenerated every run, so writing only on a real
+            // difference is what leaves a re-run's files and mtimes untouched.
             if let Err(e) = output_container.write_if_changed(dry_run, output_path, md.as_bytes()) {
                 warn!("Error writing album file {output_path:?}: {e}");
             }
@@ -164,8 +160,7 @@ fn parse_albums(container: &dyn FileSystem, files: &[ScanInfo]) -> Vec<Album> {
     albums
 }
 
-/// Map each original (source) media path to the album link names it belongs to,
-/// so a photo's sidecar can list the albums it is part of.
+/// Each original media path to the album link names it belongs to.
 fn build_album_membership(albums: &[Album]) -> HashMap<String, Vec<String>> {
     let mut by_path: HashMap<String, Vec<String>> = HashMap::new();
     for album in albums {
@@ -177,8 +172,7 @@ fn build_album_membership(albums: &[Album]) -> HashMap<String, Vec<String>> {
     by_path
 }
 
-/// The album's vault link name: its file basename without the `albums/` folder or
-/// `.md` extension (e.g. `albums/Trip.md` -> `Trip`).
+/// The album's vault link name: `albums/Trip.md` -> `Trip`.
 fn album_link_name(desired_album_md_path: &str) -> String {
     let name = desired_album_md_path
         .strip_prefix("albums/")
@@ -186,8 +180,7 @@ fn album_link_name(desired_album_md_path: &str) -> String {
     name.strip_suffix(".md").unwrap_or(name).to_string()
 }
 
-/// Album names (deduplicated, order preserved) for a media file given all of its
-/// original paths.
+/// Deduplicated, order preserved.
 fn album_names_for(
     album_names_by_path: &HashMap<String, Vec<String>>,
     original_paths: &[String],
@@ -252,24 +245,21 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// Tiny Google Takeout. Every media file has a `.supplemental-metadata.json`
-    /// with a fixed `photoTakenTime`, so dates are derived from the sidecar rather
-    /// than from whatever mtime the checkout happens to have.
+    /// with a fixed `photoTakenTime`, so dates come from the sidecar rather than
+    /// from whatever mtime the checkout happens to have.
     const TAKEOUT_BASIC: &str = "test/takeout_basic";
 
     /// Where the fixture's two media files land, minus the extension.
     ///
-    /// A `photoTakenTime` is an absolute instant — Google's own `formatted` field
-    /// spells the first of these "22 May 2024, 00:17:51 UTC" — and ptsync buckets
-    /// instants in the output zone. Every test here runs at
-    /// [`crate::test_util::tz`]'s fixed `+12:00`, which is what lets these
-    /// be literals: the jpg's instant is a quarter past midnight in Greenwich and
-    /// a quarter past noon at +12:00, so a regression to rendering at UTC changes
-    /// the name these assert on rather than quietly agreeing with itself.
+    /// These can be literals because every test here runs at
+    /// [`crate::test_util::tz`]'s fixed `+12:00`. The jpg's instant is a quarter
+    /// past midnight in Greenwich and a quarter past noon at +12:00, so a
+    /// regression to rendering at UTC changes the name rather than quietly
+    /// agreeing with itself.
     const FIXTURE_JPG_STEM: &str = "2024/05/22/1217-51000";
     const FIXTURE_MP4_STEM: &str = "2023/11/02/2130-00000";
 
-    /// The instant behind [`FIXTURE_JPG_STEM`], for the assertions that care about
-    /// the reading rather than the path.
+    /// The instant behind [`FIXTURE_JPG_STEM`].
     const FIXTURE_JPG_EPOCH: i64 = 1716337071;
 
     fn run_sync(input: &str) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
@@ -294,8 +284,8 @@ mod tests {
         Ok(tree)
     }
 
-    /// Relative path -> modified time for every file under `archive`. Used to
-    /// prove a re-run rewrites nothing: an untouched file keeps its mtime.
+    /// An untouched file keeps its mtime, which is how a re-run is shown to have
+    /// rewritten nothing.
     fn mtimes_under(archive: &Path) -> anyhow::Result<BTreeMap<String, std::time::SystemTime>> {
         let mut tree = BTreeMap::new();
         for path in files_under(archive)? {
@@ -308,7 +298,6 @@ mod tests {
         Ok(tree)
     }
 
-    /// Every regular file under `dir`, recursing into subdirectories.
     fn files_under(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         let mut out = Vec::new();
         for entry in fs::read_dir(dir)? {
@@ -322,7 +311,6 @@ mod tests {
         Ok(out)
     }
 
-    /// Recursively copy a directory tree so a test can run against a copy
     fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
         fs::create_dir_all(dst)?;
         for entry in fs::read_dir(src)? {
@@ -345,9 +333,8 @@ mod tests {
         assert!(archive.join(format!("{FIXTURE_MP4_STEM}.mp4")).exists());
         assert!(!archive.join("undated").exists());
 
-        // The sidecar records the same instant the fixture does. Its offset is
-        // this machine's, so the reading is compared as an instant rather than as
-        // a string — the two are only the same spelling on a UTC machine.
+        // Compared as an instant rather than a string: the sidecar's offset is
+        // this machine's, so the two only spell the same on a UTC machine.
         let md = read_to_string(archive.join(format!("{FIXTURE_JPG_STEM}.md")))?;
         let recorded = md
             .lines()
@@ -399,7 +386,6 @@ mod tests {
         let output = Some(archive.to_string_lossy().to_string());
         let input = TAKEOUT_BASIC.to_string();
 
-        // First run populates the archive
         main(false, &input, &output, false, false, false, tz())?;
         let first = mtimes_under(&archive)?;
         let stem = FIXTURE_JPG_STEM;
@@ -410,7 +396,6 @@ mod tests {
             "first run should have written media, sidecar and album files"
         );
 
-        // Re-running over identical input must be a no-op in writes
         main(false, &input, &output, false, false, false, tz())?;
         let second = mtimes_under(&archive)?;
         assert_eq!(
@@ -420,8 +405,7 @@ mod tests {
         Ok(())
     }
 
-    /// A sync must never modify, delete, or add anything in the input tree. Snapshot the
-    /// input before the run and assert it is byte-for-byte identical afterward.
+    /// A sync must never modify, delete, or add anything in the input tree.
     #[test]
     fn sync_never_modifies_input() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -452,9 +436,8 @@ mod tests {
         Ok(())
     }
 
-    /// Different photos taken at the same time must each get their own
-    /// sidecar. The date-based name collides, so the second gains a
-    /// checksum suffix, the md should match.
+    /// The date-based name collides, so the second photo gains a checksum suffix
+    /// and its sidecar must follow.
     #[test]
     fn sync_same_instant_photos_each_get_a_sidecar() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -463,8 +446,7 @@ mod tests {
         let output = temp.path().join("output");
         fs::create_dir_all(&input)?;
 
-        // Two distinct photos at the same photoTakenTime (1700000000, i.e.
-        // 2023-11-14T22:13:20Z), so both want the same name.
+        // Two distinct photos sharing a photoTakenTime, so both want one name.
         const SAME_INSTANT_STEM: &str = "2023/11/15/1013-20000";
         let base = fs::read("test/Canon_40D.jpg")?;
         for (name, marker) in [("a.jpg", "X"), ("b.jpg", "YY")] {
@@ -481,7 +463,6 @@ mod tests {
         let output_s = Some(output.to_string_lossy().to_string());
         main(false, &input_s, &output_s, false, false, false, tz())?;
 
-        // Both photos written, one keeps bare date name, the other is suffixed.
         let media: Vec<PathBuf> = files_under(&output)?
             .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "jpg"))
@@ -492,7 +473,6 @@ mod tests {
             "one photo should keep the bare date name"
         );
 
-        // Exactly one sidecar per media file
         let sidecars: BTreeSet<PathBuf> = files_under(&output)?
             .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "md"))
@@ -503,7 +483,7 @@ mod tests {
             "each media file must have exactly one matching sibling sidecar"
         );
 
-        // Each sidecar embeds its *own* photo by name and records that photo's details
+        // Each sidecar embeds its *own* photo and records that photo's details.
         let mut sources = BTreeSet::new();
         for photo in &media {
             let file_name = photo
@@ -528,7 +508,6 @@ mod tests {
             "each source photo should be recorded in its own sidecar"
         );
 
-        // re-running over the same input rewrites nothing.
         let first = mtimes_under(&output)?;
         main(false, &input_s, &output_s, false, false, false, tz())?;
         let second = mtimes_under(&output)?;
@@ -558,12 +537,9 @@ mod tests {
         Ok(())
     }
 
-    /// The write path is generic over `WritableFileSystem`. Driving it against
-    /// the S3 fake (not `OsFileSystem`) must still produce each media file and
-    /// its sidecar, and a second pass must add nothing - proving the dedup checks
-    /// work against a non-OS backend. Because the fake reports a native checksum,
-    /// the second pass also exercises the Option A fast path (skip via
-    /// `recorded_checksum`, no re-read). This is the seam real S3 output reuses.
+    /// The write path is generic over `WritableFileSystem`, and this is the seam
+    /// real S3 output reuses. Because the fake reports a native checksum, the
+    /// second pass also exercises the skip-via-`recorded_checksum` path.
     #[test]
     fn sync_writes_through_writable_trait_to_fake_s3() -> anyhow::Result<()> {
         use crate::media::media_file_derived_from_media_info;
@@ -586,7 +562,6 @@ mod tests {
         }
         drop(prog);
 
-        // First pass writes media + sidecars into the fake bucket.
         let out = FakeS3FileSystem::new();
         for media in deduper.sorted_media() {
             let derived = media_file_derived_from_media_info(media, tz())?;
@@ -596,16 +571,14 @@ mod tests {
         let stem = FIXTURE_JPG_STEM;
         assert!(out.exists(&format!("{stem}.jpg")));
         assert!(out.exists(&format!("{stem}.md")));
-        // The fake surfaces the object's SHA-256 the way S3's native checksum
-        // does - this is the value the Option A fast path compares against, so a
-        // metadata-only HeadObject can answer "already here?" without a GET.
+        // The value a metadata-only HeadObject would compare against.
         assert_eq!(
             out.recorded_checksum(&format!("{stem}.jpg")).as_deref(),
             Some("6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f")
         );
 
-        // Second pass over identical input must add nothing: the media dedups to
-        // SkipWrite (via the fake's recorded checksum) and the sidecar is unchanged.
+        // The media dedups to SkipWrite via the recorded checksum, and the sidecar
+        // is unchanged.
         let before = out.walk().len();
         for media in deduper.sorted_media() {
             let derived = media_file_derived_from_media_info(media, tz())?;

@@ -25,20 +25,17 @@ pub(crate) fn setup_log() {
 /// The zone every test states its date expectations in, so an assertion means
 /// the same thing on a laptop in Auckland and on a build agent in UTC.
 ///
-/// `+12:00` is chosen deliberately over something closer to UTC: it is far enough
-/// east that converting an instant crosses a day boundary for most of the day, so
-/// a test asserting a full path catches a regression to UTC in the *directory*
-/// and not merely in the offset spelling. `tests/sync_snapshot.rs` pins its
-/// subprocess to `Pacific/Auckland`, the zone this stands in for.
-///
-/// It is a function rather than a constant because [`chrono::FixedOffset`] has no
-/// const constructor.
+/// `+12:00` is far enough east that converting an instant crosses a day boundary
+/// for most of the day, so a test asserting a full path catches a regression to
+/// UTC in the *directory* rather than only in the offset spelling.
+/// `tests/sync_snapshot.rs` pins its subprocess to `Pacific/Auckland`, the zone
+/// this stands in for.
 #[cfg(test)]
 pub(crate) fn tz() -> crate::util::OutputTZ {
     const TWELVE_HOURS_EAST: i32 = 12 * 3600;
-    // `east_opt` only rejects offsets beyond ±24h, which this plainly is not, but
-    // `unwrap` is denied crate-wide; UTC is the visible fallback, and every
-    // expectation written against +12:00 would fail loudly if it were ever taken.
+    // `east_opt` only rejects offsets beyond ±24h, but `unwrap` is denied
+    // crate-wide. Every expectation written against +12:00 fails loudly if this
+    // fallback is ever taken.
     use chrono::{Offset, Utc};
     let offset = chrono::FixedOffset::east_opt(TWELVE_HOURS_EAST).unwrap_or_else(|| Utc.fix());
     crate::util::OutputTZ::Fixed(offset)

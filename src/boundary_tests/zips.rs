@@ -38,11 +38,10 @@ fn truncated_or_garbage_zip_errors_not_panics() -> Result<()> {
 #[test]
 fn zip_entry_decompresses_without_panic() -> Result<()> {
     setup_log();
-    // A highly compressible entry: a few MB of zeros stored tiny on disk. The
-    // reader streams it to a temp file (the test-build threshold is 100 bytes),
-    // so this exercises the decompress-to-disk path and proves it is bounded by
-    // the entry's declared size rather than exploding. NOTE: there is no
-    // explicit expansion cap, so this fixture is deliberately kept modest.
+    // A few MB of zeros stored tiny on disk. The test-build threshold is 100
+    // bytes, so this takes the decompress-to-disk path and shows it is bounded by
+    // the entry's declared size. There is no explicit expansion cap, which is why
+    // the fixture is kept modest.
     let size = 4 * 1024 * 1024;
     let mut temp = tempfile::Builder::new().suffix(".zip").tempfile()?;
     {
@@ -64,10 +63,8 @@ fn zip_entry_decompresses_without_panic() -> Result<()> {
 #[test]
 fn zip_entries_with_parent_dir_names_are_dropped() -> Result<()> {
     setup_log();
-    // Craft a zip carrying traversal entry names. On read, `enclosed_name`
-    // rejects anything that would escape, so those entries never appear in the
-    // walk - the tool can never be tricked into opening or writing them outside
-    // the output tree.
+    // `enclosed_name` rejects anything that would escape, so traversal entries
+    // never appear in the walk and can't be opened or written.
     let temp = zip_with_raw_names(&[
         ("good/photo.jpg", b"ok"),
         ("../evil.jpg", b"nope"),

@@ -21,16 +21,12 @@ pub(crate) fn mfm_from_media_file_info(
         latitude,
         longitude,
         people: people_links(media_info),
-        // Render album membership as wikilinks so each photo note links
-        // back to the album files under `albums/`
         albums: album_names.iter().map(|n| as_wikilink(n)).collect(),
     }
 }
 
-/// Best guess at GPS coordinates, preferring the EXIF embedded in the file, then
-/// the supplemental metadata Google ships alongside it (Takeout often strips EXIF
-/// GPS but keeps it in the metadata JSON). Google writes `0,0` to mean "no
-/// location", so it's treated as absent.
+/// Embedded EXIF first, then Google's supplemental metadata — Takeout often
+/// strips EXIF GPS but keeps it in the metadata JSON.
 fn best_guess_coords(media_info: &MediaFileInfo) -> (Option<f64>, Option<f64>) {
     if let Some(exif) = &media_info.exif_info
         && let Some(coords) = non_null_island(exif.latitude, exif.longitude)
@@ -54,7 +50,7 @@ fn non_null_island(lat: Option<f64>, long: Option<f64>) -> Option<(f64, f64)> {
     }
 }
 
-/// People (face tags) from Google supplemental metadata, rendered as wikilinks
+/// Face tags from Google supplemental metadata, as wikilinks.
 fn people_links(media_info: &MediaFileInfo) -> Vec<String> {
     let Some(supp) = &media_info.supp_info else {
         return vec![];
@@ -78,9 +74,9 @@ pub(crate) struct PhotoSorterFrontMatter {
     pub(crate) datetime: Option<String>,
     pub(crate) latitude: Option<f64>,
     pub(crate) longitude: Option<f64>,
-    /// People (face tags), as wikilinks.
+    /// As wikilinks.
     pub(crate) people: Vec<String>,
-    /// Albums this photo belongs to, as wikilinks.
+    /// As wikilinks, pointing at the album files under `albums/`.
     pub(crate) albums: Vec<String>,
 }
 
@@ -92,17 +88,13 @@ pub(crate) fn sync_markdown(
     output_c: &dyn WritableFileSystem,
     tz: OutputTZ,
 ) -> anyhow::Result<()> {
-    // The sidecar is placed beside the *resolved* media file (the path
-    // `write_media` actually wrote to), not the bare date path. Same-instant
-    // photos collide on the date name and all but the first carry a checksum
-    // suffix (`2213-20000-ccf63c8.jpg`); deriving the sidecar from the resolved
-    // path gives each its own note (`2213-20000-ccf63c8.md`) instead of having
-    // them all clobber a single `2213-20000.md`.
+    // Derived from the *resolved* media path rather than the bare date path, so
+    // same-instant photos — which all but the first carry a checksum suffix — get
+    // a note each instead of clobbering one shared `2213-20000.md`.
     let output_path = get_desired_markdown_path(resolved_media_path)?;
     let mfm = mfm_from_media_file_info(media_file, album_names, tz);
-    // On first creation the body embeds the photo itself, so opening the note in
-    // A markdown viewer shows the image. The body is preserved
-    // verbatim on later runs, so user notes and this embed are never clobbered.
+    // Only used on first creation; an existing body is preserved verbatim so
+    // user notes are never clobbered.
     let mut e_md = new_note_body(resolved_media_path);
     let mut e_yaml = None;
 
@@ -132,8 +124,8 @@ pub(crate) fn sync_markdown(
     Ok(())
 }
 
-/// Grab anything between "---[\r]\n" and "---[\r]\n" and put into .0. Put everything else into .1.
-/// If any sort of invalid case is encountered, return empty frontmatter and original content.
+/// Split into `(frontmatter, body)` on `---[\r]\n` delimiters. Anything
+/// malformed yields empty frontmatter and the original content untouched.
 pub(crate) fn split_frontmatter(file_contents: &str) -> (String, String) {
     let trimmed = file_contents.trim_start_matches(['\n', '\r']);
 
@@ -186,8 +178,8 @@ pub(crate) fn split_frontmatter(file_contents: &str) -> (String, String) {
             let fm = potential_frontmatter
                 .trim_end_matches(['\n', '\r'])
                 .to_string();
-            // Body content ran straight into the closing "---" with no newline
-            // between them; re-insert the file's own line ending.
+            // Body ran straight into the closing "---"; re-insert the file's own
+            // line ending.
             if !after_closing.is_empty() {
                 let remaining_with_newline = format!("{line_ending}{after_closing}");
                 return (fm, remaining_with_newline);
@@ -225,9 +217,9 @@ pub(crate) fn assemble_markdown(
         warn!("Generated YAML is empty, returning markdown content");
         return Ok(AssembledMarkdown::Unchanged(markdown_content.to_string()));
     }
-    // `changed` compares the parsed/canonicalised frontmatter, not the raw bytes,
-    // so re-running over a hand-formatted file that is already semantically
-    // current does not rewrite (and thus does not reformat) it.
+    // `changed` compares parsed frontmatter, not raw bytes, so a hand-formatted
+    // file that is already semantically current is not rewritten — and so not
+    // reformatted.
     if !changed {
         return Ok(AssembledMarkdown::Unchanged(markdown_content.to_string()));
     }
@@ -240,20 +232,16 @@ pub(crate) fn assemble_markdown(
 }
 
 struct MergedYaml {
-    /// The merged frontmatter, emitted as the body of a frontmatter block.
     yaml: String,
-    /// Whether the merge added or altered anything versus the existing
-    /// frontmatter. When false the caller should leave the file untouched.
+    /// False means the caller should leave the file untouched.
     changed: bool,
 }
 
 /// Merge the generated metadata in `fm` into any existing frontmatter `s`.
 ///
-/// Existing keys (including ones the user added by hand) are preserved in place;
-/// array fields like `original-paths`, `people` and `albums` are unioned. Returns
-/// an error if `s` is present but is not a parseable YAML mapping, so the caller
-/// can surface the problem and leave the file untouched rather than silently
-/// dropping the generated metadata.
+/// Existing keys, including hand-added ones, are preserved in place, and array
+/// fields are unioned. An `s` that is not a parseable YAML mapping is an error
+/// rather than a silent overwrite, so the caller can leave the file alone.
 fn merge_yaml(s: &Option<String>, fm: &PhotoSorterFrontMatter) -> anyhow::Result<MergedYaml> {
     let mut root: Hash = match s {
         Some(s) => {
@@ -269,10 +257,8 @@ fn merge_yaml(s: &Option<String>, fm: &PhotoSorterFrontMatter) -> anyhow::Result
         }
         None => Hash::default(),
     };
-    // Snapshot before merging so we can tell whether anything actually changed.
-    // Updates below preserve key order (re-inserting an existing key would move
-    // it to the end), so an order-sensitive comparison is both correct and avoids
-    // rewriting - and thus reformatting - files that are already current.
+    // The updates below preserve key order, so this snapshot can be compared
+    // order-sensitively to tell whether anything actually changed.
     let original = root.clone();
 
     if let Some(dt) = &fm.datetime {
@@ -298,8 +284,7 @@ fn merge_yaml(s: &Option<String>, fm: &PhotoSorterFrontMatter) -> anyhow::Result
     })
 }
 
-/// Set a scalar key, updating an existing entry in place (preserving its
-/// position) rather than re-inserting it (which would move it to the end).
+/// Updates in place rather than re-inserting, which would move the key to the end.
 fn set_scalar(root: &mut Hash, key: &str, value: Yaml) {
     let k = Yaml::String(key.to_string());
     if root.get(&k).is_some() {
@@ -309,8 +294,7 @@ fn set_scalar(root: &mut Hash, key: &str, value: Yaml) {
     }
 }
 
-/// Emit a YAML mapping as the body of a frontmatter block (no `---` fences, a
-/// single trailing newline).
+/// No `---` fences, a single trailing newline.
 fn emit_yaml(root: &Hash) -> anyhow::Result<String> {
     let mut out_str = String::new();
     {
@@ -348,7 +332,7 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
                 return;
             }
             Yaml::BadValue => {
-                // fall through as current value is empty/unknown
+                // Falls through: the current value is empty or unknown.
                 warn!("Expected {key} to be an array, but it was a bad value");
             }
             _ => {
@@ -367,29 +351,24 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
     }
 }
 
-/// Body is a relative markdown image embed of the sibling media file.
-/// A relative link (rather than a
-/// `![[wikilink]]`) renders in plain markdown viewers too and is unambiguous
-/// because the photo is in the same directory as the note. The embed uses the
-/// resolved media file name (including any collision-resolving checksum suffix)
-/// so each same-instant photo embeds its own file, not a shared bare name.
+/// A relative image embed of the sibling media file, so opening the note in a
+/// viewer shows the photo. Relative rather than a `![[wikilink]]` so it renders
+/// in plain markdown viewers too, and unambiguous because the photo sits in the
+/// same directory.
 fn new_note_body(resolved_media_path: &str) -> String {
     let file_name = name_part(&resolved_media_path.to_string());
     format!("\n![]({file_name})\n")
 }
 
-/// The sidecar markdown path for a media file: the media file's own path with
-/// its extension swapped for `.md`, so the note is a sibling of the photo even
-/// when the photo's name carries a collision-resolving checksum suffix
+/// The media path with its extension swapped for `.md`, keeping the note a
+/// sibling of the photo even when the name carries a checksum suffix
 /// (`2213-20000-ccf63c8.jpg` -> `2213-20000-ccf63c8.md`).
 pub(crate) fn get_desired_markdown_path(resolved_media_path: &str) -> anyhow::Result<String> {
     if resolved_media_path.is_empty() {
         return Err(anyhow!("Resolved media path is empty"));
     }
-    // Swap the trailing extension for `.md`. The file name carries exactly one
-    // dot (the extension); date-based names, checksums and the `undated` folder
-    // contain none, so the final dot - when it sits in the file name - is the
-    // extension separator.
+    // Date names, checksums and `undated` contain no dots, so a dot in the file
+    // name is always the extension separator.
     let last_slash = resolved_media_path.rfind('/').map_or(0, |i| i + 1);
     match resolved_media_path[last_slash..].rfind('.') {
         Some(dot) => Ok(format!("{}.md", &resolved_media_path[..last_slash + dot])),
@@ -555,19 +534,16 @@ checksum: abcdefg
     fn test_desired_md_path() {
         crate::test_util::setup_log();
         assert_eq!(get_desired_markdown_path("").ok(), None);
-        // The media extension is swapped for `.md`, so the sidecar is a sibling
-        // of the photo it describes...
         assert_eq!(
             get_desired_markdown_path("2025/02/09/1818-44000.jpg").ok(),
             Some("2025/02/09/1818-44000.md".to_string())
         );
-        // ...including when the name carries a collision-resolving checksum suffix.
+        // Including when the name carries a checksum suffix.
         assert_eq!(
             get_desired_markdown_path("2025/02/09/1818-44000-ccf63c8.jpg").ok(),
             Some("2025/02/09/1818-44000-ccf63c8.md".to_string())
         );
-        // A name without an extension just gains `.md` (dots only ever appear in
-        // the file name, never in the date directories).
+        // No extension: just gains `.md`.
         assert_eq!(
             get_desired_markdown_path("abc").ok(),
             Some("abc.md".to_string())
@@ -580,7 +556,7 @@ checksum: abcdefg
             new_note_body("2025/02/09/1818-44000.jpg"),
             "\n![](1818-44000.jpg)\n"
         );
-        // The embed uses the resolved (suffixed) file name, not the bare date name.
+        // The resolved (suffixed) name, not the bare date name.
         assert_eq!(
             new_note_body("2025/02/09/1818-44000-ccf63c8.jpg"),
             "\n![](1818-44000-ccf63c8.jpg)\n"
@@ -611,8 +587,7 @@ checksum: abcdefg
     #[test]
     fn test_mfm_people_albums_and_supplemental_gps() {
         use crate::supplemental_info::SupplementalInfoGeoData;
-        // People come from supplemental metadata; blank names are dropped. GPS is
-        // taken from supplemental geo_data when EXIF has none.
+        // Blank names are dropped, and GPS falls back to geo_data with no EXIF.
         let geo = SupplementalInfoGeoData {
             latitude: Some(-21.6303),
             longitude: Some(152.2605),
@@ -649,8 +624,7 @@ checksum: abcdefg
         assert!(first.changed);
         assert!(first.yaml.contains("[[Tim Tam]]"));
         assert!(first.yaml.contains("[[Holiday]]"));
-        // Re-running over the emitted frontmatter adds nothing, which proves the
-        // wikilinks re-parse as valid YAML and that there is no rewrite churn.
+        // Re-running adds nothing, proving the wikilinks re-parse as valid YAML.
         let second = merge_yaml(&Some(first.yaml.clone()), &mfm)?;
         assert!(
             !second.changed,
@@ -663,9 +637,7 @@ checksum: abcdefg
     #[test]
     fn test_no_rewrite_when_reformatted_but_current() -> anyhow::Result<()> {
         crate::test_util::setup_log();
-        // Frontmatter that already contains everything the tool would add, but
-        // hand-indented and reordered. Comparison is on parsed content, so this
-        // must not be flagged as changed (no reformatting churn).
+        // Everything the tool would add, but hand-indented and reordered.
         let mangled = "original-paths:\n      - p1\n      - p2\nchecksum: abcdefg\n".to_string();
         let res = merge_yaml(&Some(mangled), &get_mfi())?;
         assert!(
@@ -679,15 +651,13 @@ checksum: abcdefg
     #[test]
     fn test_assemble_markdown_unchanged_on_rerun_skips_write() -> anyhow::Result<()> {
         crate::test_util::setup_log();
-        // First try yields Modified output that sync_markdown would write to disk.
         let mfm = get_mfi();
         let first = assemble_markdown(&mfm, &None, "\n![](x.jpg)\n")?;
         let AssembledMarkdown::Modified(full) = first else {
             return Err(anyhow!("first assembly should be Modified"));
         };
-        // Re-run: split the on-disk file exactly as sync_markdown does, then
-        // re-assemble. With nothing changed it must report Unchanged, which is how
-        // sync_markdown knows to skip the write (a true no-op, not identical bytes).
+        // Split and re-assemble exactly as sync_markdown does. `Unchanged` is how
+        // it knows to skip the write — a true no-op, not identical bytes.
         let (yaml, body) = split_frontmatter(&full);
         let second = assemble_markdown(&mfm, &Some(yaml), &body)?;
         assert!(
@@ -700,8 +670,6 @@ checksum: abcdefg
     #[test]
     fn test_malformed_frontmatter_errors_rather_than_dropping_metadata() {
         crate::test_util::setup_log();
-        // Unparseable YAML must surface as an error so the caller leaves the file
-        // untouched, instead of silently discarding the generated metadata.
         assert!(merge_yaml(&Some("foo: [unclosed".to_string()), &get_mfi()).is_err());
         // A non-mapping root is equally unusable.
         assert!(merge_yaml(&Some("- a\n- b\n".to_string()), &get_mfi()).is_err());

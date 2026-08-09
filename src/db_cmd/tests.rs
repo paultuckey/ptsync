@@ -55,8 +55,7 @@ async fn test_db_scan() -> anyhow::Result<()> {
             .any(|(path, ftype)| path == "Hello.mp4" && ftype == "Media")
     );
 
-    // Video dimensions, duration and orientation are derived from track
-    // metadata; duration is null for photos.
+    // Video dimensions, duration and orientation come from track metadata.
     let row = one_row(
         &conn,
         "SELECT width, height, duration_ms, orientation FROM media_item WHERE media_path = ?1",
@@ -99,8 +98,8 @@ async fn test_db_scan() -> anyhow::Result<()> {
     .get(0)?;
     assert_eq!(photo_kind, "p");
 
-    // EXIF Orientation is split into display_mirrored/display_rotate, which
-    // are never NULL. Canon_40D.jpg is orientation 1, the no-op transform.
+    // display_mirrored/display_rotate are never NULL. Canon_40D.jpg is
+    // orientation 1, the no-op transform.
     let row = one_row(
         &conn,
         "SELECT display_mirrored, display_rotate FROM media_item WHERE media_path = ?1",
@@ -123,8 +122,8 @@ async fn test_db_scan() -> anyhow::Result<()> {
         "no EXIF defaults to no transform"
     );
 
-    // With no supplemental or EXIF date, the video's guessed date comes from
-    // its embedded track creation time rather than the file timestamps.
+    // With no supplemental or EXIF date, the video falls back to its embedded
+    // track creation time rather than the file timestamps.
     let guessed: Option<String> = one_row(
         &conn,
         "SELECT guessed_datetime FROM media_item WHERE media_path = ?1",
@@ -265,8 +264,7 @@ async fn test_db_scan_with_album() -> anyhow::Result<()> {
     assert_eq!(path, "album.csv");
     assert_eq!(album_id, crate::util::album_id_for("album.csv"));
 
-    // Membership is stored by media_item_id and joins back to the media
-    // item's path.
+    // Membership is stored by media_item_id and joins back to the item's path.
     let row = one_row(
         &conn,
         "SELECT m.media_path FROM album_file af
@@ -291,9 +289,8 @@ async fn test_db_scan_records_people_and_location() -> anyhow::Result<()> {
     }
     fs::create_dir_all(test_dir)?;
 
-    // A media file with an adjacent Google supplemental json carrying named
-    // people and geo coordinates. Canon_40D.jpg has no EXIF GPS coords, so
-    // the location must come from the supplemental data.
+    // Canon_40D.jpg has no EXIF GPS coords, so the location must come from the
+    // supplemental json beside it.
     fs::copy("test/Canon_40D.jpg", test_dir.join("Canon_40D.jpg"))?;
     let mut supp = fs::File::create(test_dir.join("Canon_40D.jpg.supplemental-metadata.json"))?;
     write!(
@@ -437,7 +434,6 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
     )
     .await?;
 
-    // Additive tables hold exactly one of each despite the re-scan.
     let album_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM album", ())
         .await?
         .get(0)?;
@@ -458,9 +454,6 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
         "media_item_id stable across runs"
     );
 
-    // Re-running the same input resumes its run rather than logging a new
-    // one, so there is still exactly one run row and one run's worth of
-    // classified rows — refreshed in place, not duplicated.
     let run_count: i64 = one_row(&conn, "SELECT COUNT(*) FROM run", ())
         .await?
         .get(0)?;
@@ -476,8 +469,6 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
         classified_runs, 1,
         "classified rows refreshed, not duplicated"
     );
-    // The single classified_file row for our media file was refreshed, not
-    // stacked: a resume must not double-insert it under the same run.
     let classified_files: i64 = one_row(
         &conn,
         "SELECT COUNT(*) FROM classified_file WHERE file_path = 'Canon_40D.jpg'",
@@ -524,8 +515,8 @@ async fn test_db_scan_rerun() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resume as incremental indexing: a second run over the same input keeps the
-/// files already recorded and only takes in the ones that have since appeared.
+/// Resume as incremental indexing: a second run takes in only the files that
+/// have since appeared.
 #[tokio::test]
 async fn test_db_scan_resumes_and_adds_new_files() -> anyhow::Result<()> {
     crate::test_util::setup_log();
@@ -539,7 +530,6 @@ async fn test_db_scan_resumes_and_adds_new_files() -> anyhow::Result<()> {
     let (_db, conn) = open_conn(":memory:").await?;
     let test_dir_str = test_dir.to_string_lossy();
 
-    // First run records the single file present.
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
     run_db_scan(
         container,
@@ -555,8 +545,8 @@ async fn test_db_scan_resumes_and_adds_new_files() -> anyhow::Result<()> {
     assert_eq!(count, 1, "first run records the initial file");
     let first_id = media_item_id_of(&conn, "Canon_40D.jpg").await?;
 
-    // A new file appears; re-running the same input picks it up while the
-    // already-recorded file is skipped rather than duplicated.
+    // A new file appears: it is picked up, and the recorded one is skipped
+    // rather than duplicated.
     fs::copy("test/Hello.mp4", test_dir.join("Hello.mp4"))?;
     let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));
     run_db_scan(
@@ -630,8 +620,8 @@ async fn test_db_scan_reinspects_changed_file() -> anyhow::Result<()> {
     .await?
     .get(0)?;
 
-    // Change the file in place. Bytes appended past a JPEG's end marker leave
-    // it a valid image but change its size and content, so the guard re-scans.
+    // Bytes appended past a JPEG's end marker leave it a valid image but change
+    // its size, which is what the resume guard checks.
     let mut f = fs::OpenOptions::new().append(true).open(&media_path)?;
     f.write_all(&[0u8; 4096])?;
     drop(f);
@@ -686,8 +676,7 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
     }
     fs::create_dir_all(test_dir)?;
 
-    // A media file plus an album CSV referencing it, so a full scan would
-    // populate media_item, album and album_file.
+    // A full scan of this would populate media_item, album and album_file.
     fs::copy("test/Canon_40D.jpg", test_dir.join("Canon_40D.jpg"))?;
     let mut file = fs::File::create(test_dir.join("album.csv"))?;
     writeln!(file, "Images")?;
@@ -726,9 +715,9 @@ async fn test_db_scan_skip_flags() -> anyhow::Result<()> {
         assert_eq!(count_of(&conn, "album_file").await?, 0, "album_file empty");
     }
 
-    // --skip-media alone still records albums, but with no links: the lookup
-    // for each member finds no media_item row. A later full run fills them in,
-    // since a resumed run re-visits the album pass.
+    // --skip-media alone still records albums, but with no links, since each
+    // member lookup finds no media_item row. A later full run fills them in,
+    // because a resumed run re-visits the album pass.
     {
         let (_db, conn) = open_conn(":memory:").await?;
         let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new(&test_dir_str));

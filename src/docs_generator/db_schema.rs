@@ -1,8 +1,6 @@
 //! Generates `docs/db-schema.md` as a mermaid ER diagram from the `CREATE TABLE`
-//! statements in `db_cmd`, and verifies the committed copy is current.
-//!
-//! Run `UPDATE_DOCS=1 cargo test` to regenerate the doc after changing the
-//! schema; a plain `cargo test` (locally and in CI) fails if it is stale.
+//! statements in `db_cmd`. A plain `cargo test` fails if the committed copy is
+//! stale; `UPDATE_DOCS=1 cargo test` regenerates it.
 
 const DOC_PATH: &str = "docs/db-schema.md";
 
@@ -23,7 +21,6 @@ struct Table {
     foreign_keys: Vec<ForeignKey>,
 }
 
-/// Drop `-- ...` line comments so they don't interfere with parsing.
 fn strip_comments(sql: &str) -> String {
     sql.lines()
         .map(|line| match line.find("--") {
@@ -34,8 +31,8 @@ fn strip_comments(sql: &str) -> String {
         .join("\n")
 }
 
-/// Split a `CREATE TABLE (...)` body on commas that are not nested inside
-/// parentheses (e.g. a `FOREIGN KEY(col) REFERENCES t(col)` clause).
+/// Split on commas not nested inside parentheses, so a `FOREIGN KEY(col)
+/// REFERENCES t(col)` clause stays whole.
 fn split_top_level(body: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
@@ -81,7 +78,6 @@ fn parse_table(create_sql: &str) -> anyhow::Result<Table> {
         .rfind(')')
         .ok_or_else(|| anyhow!("CREATE TABLE has a closing paren"))?;
 
-    // The table name is the last whitespace-delimited token before `(`.
     let name = sql[..open]
         .split_whitespace()
         .last()
@@ -137,7 +133,6 @@ fn parse_table(create_sql: &str) -> anyhow::Result<Table> {
         });
     }
 
-    // Flag columns backing a foreign key.
     for fk in &foreign_keys {
         if let Some(col) = columns.iter_mut().find(|c| c.name == fk.column)
             && !col.keys.contains(&"FK")
@@ -167,7 +162,7 @@ fn generate() -> anyhow::Result<String> {
     out.push_str("<!-- Do not edit by hand. Run `UPDATE_DOCS=1 cargo test` to regenerate. -->\n\n");
     out.push_str("```mermaid\nerDiagram\n");
 
-    // Relationships first, then an entity block per table.
+    // Mermaid wants relationships before the entity blocks.
     for table in &tables {
         for fk in &table.foreign_keys {
             out.push_str(&format!(

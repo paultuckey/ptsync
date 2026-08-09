@@ -8,7 +8,7 @@ use tracing::{info, warn};
 pub(crate) struct PsTrackInfo {
     pub width: Option<u64>,
     pub height: Option<u64>,
-    // rfc3339
+    /// RFC 3339.
     pub creation_time: Option<String>,
     pub duration_ms: Option<u64>,
     pub make: Option<String>,
@@ -27,11 +27,10 @@ impl PsTrackInfo {
     }
 }
 
-/// Parse an ISO 6709 point string in decimal-degree form, e.g.
-/// `+27.5916+086.5640/` or `-21.6303-152.2605+077.000CRSWGS_84/`, into
-/// `(latitude, longitude)`. The `+`/`-` sign prefixes delimit the fields;
-/// latitude comes first, longitude second, and any altitude or CRS suffix is
-/// ignored. Returns `None` if fewer than two numeric fields parse.
+/// Parse an ISO 6709 point in decimal-degree form — `+27.5916+086.5640/` or
+/// `-21.6303-152.2605+077.000CRSWGS_84/` — into `(latitude, longitude)`. The
+/// `+`/`-` prefixes delimit the fields, and any altitude or CRS suffix is
+/// ignored.
 fn parse_iso6709(s: &str) -> Option<(f64, f64)> {
     let mut fields: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -87,7 +86,7 @@ pub fn parse_track_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<Option<
                 gps_iso_6709: parse_to_o_s(&info.get(TrackInfoTag::GpsIso6709)),
             };
             info.iter()
-                // filter out known tags from above
+                // The tags promoted into fields above; the rest are kept as-is.
                 .filter(|(tag, _)| {
                     !matches!(
                         tag,

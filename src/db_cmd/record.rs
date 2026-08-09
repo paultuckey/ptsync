@@ -20,8 +20,7 @@ pub(super) async fn db_record(
         None => (None, None),
     };
     let geohash = lat_long.map(|(lat, long)| geohash_encode(lat, long, GEOHASH_PRECISION));
-    // Camera and dimensions come from EXIF for images; for videos they live in
-    // the track metadata, so fall back to that when EXIF has nothing.
+    // Videos have no EXIF, so camera and dimensions fall back to track metadata.
     let exif = info.exif_info.as_ref();
     let track = info.track_info.as_ref();
 
@@ -103,9 +102,8 @@ pub(super) async fn db_record(
     ])
     .await?;
 
-    // Named people come from Google supplemental metadata. Each name resolves to
-    // a stable, content-derived person id (shared across items and rebuilds), so
-    // we upsert the person then link it to this media item.
+    // Each name resolves to a content-derived person id shared across items and
+    // rebuilds, so the person is upserted and then linked.
     if let Some(supp) = &info.supp_info {
         let mut stmt_person = conn.prepare_cached(DB_PERSON_INSERT).await?;
         let mut stmt_media_person = conn.prepare_cached(DB_MEDIA_PERSON_INSERT).await?;
@@ -127,7 +125,7 @@ pub(super) async fn db_record(
 
 #[derive(Debug)]
 struct DbMediaItem {
-    // stable hash of media_path; reproducible across runs/machines/clears
+    /// Stable hash of `media_path`, reproducible across runs, machines and clears.
     media_item_id: String,
     media_path: String,
     long_hash: String,
@@ -135,31 +133,28 @@ struct DbMediaItem {
     media_info: Option<String>,
     quick_file_type: String,
     accurate_file_type: String,
-    // formatted as ISO 8601
+    /// ISO 8601.
     guessed_datetime: Option<String>,
     modified_at: i64,
     created_at: i64,
-    // file size in bytes
+    /// Bytes.
     file_size: i64,
-    // best-guess GPS coordinates, None if unknown
     latitude: Option<f64>,
     longitude: Option<f64>,
-    // EXIF camera details, None if unknown
     camera_make: Option<String>,
     camera_model: Option<String>,
-    // image/video dimensions in pixels, None if unknown
+    /// Pixels.
     width: Option<i64>,
     height: Option<i64>,
-    // video duration in ms, None for photos
+    /// `None` for photos.
     duration_ms: Option<i64>,
-    // portrait/landscape/square, None if dimensions unknown
+    /// `portrait` / `landscape` / `square`.
     orientation: Option<String>,
-    // whether the image must be flipped horizontally for display; false if no EXIF
+    /// Whether display requires a horizontal flip. False when there is no EXIF.
     display_mirrored: bool,
-    // clockwise degrees to rotate for display (-90/0/90/180); 0 if no EXIF
+    /// Clockwise degrees to rotate for display: -90, 0, 90 or 180.
     display_rotate: i64,
-    // geohash of the coordinates, None if no location
     geohash: Option<String>,
-    // 'p' for photo, 'v' for video, None if neither
+    /// `p` for photo, `v` for video, `None` for neither.
     kind: Option<&'static str>,
 }
