@@ -644,37 +644,29 @@ mod tests {
         Ok(())
     }
 
+    /// S3 reports a native SHA-256 base64-encoded. A multipart upload's is a
+    /// composite of the part hashes with a `-N` suffix, which is not the
+    /// object's own hash and must not be compared against one.
     #[test]
-    fn recorded_checksum_decodes_native_sha256() -> anyhow::Result<()> {
+    fn recorded_checksum_decodes_only_a_native_sha256() -> anyhow::Result<()> {
         crate::test_util::setup_log();
         let hex_cs = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        let b64 = BASE64_STANDARD.encode(hex::decode(hex_cs)?);
-        let list = mock!(aws_sdk_s3::Client::list_objects_v2)
-            .then_output(|| ListObjectsV2Output::builder().is_truncated(false).build());
-        let head = mock!(aws_sdk_s3::Client::head_object).then_output(move || {
-            HeadObjectOutput::builder()
-                .checksum_sha256(b64.clone())
-                .build()
-        });
-        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &head]);
-        let fs = mock_fs("s3://bucket/out", client)?;
-        assert_eq!(fs.recorded_checksum("x.jpg"), Some(hex_cs.to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn recorded_checksum_none_for_composite_multipart() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let list = mock!(aws_sdk_s3::Client::list_objects_v2)
-            .then_output(|| ListObjectsV2Output::builder().is_truncated(false).build());
-        let head = mock!(aws_sdk_s3::Client::head_object).then_output(|| {
-            HeadObjectOutput::builder()
-                .checksum_sha256("YWJjZA==-3")
-                .build()
-        });
-        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &head]);
-        let fs = mock_fs("s3://bucket/out", client)?;
-        assert_eq!(fs.recorded_checksum("x.jpg"), None);
+        let native = BASE64_STANDARD.encode(hex::decode(hex_cs)?);
+        for (header, expected) in [
+            (native, Some(hex_cs.to_string())),
+            ("YWJjZA==-3".to_string(), None),
+        ] {
+            let list = mock!(aws_sdk_s3::Client::list_objects_v2)
+                .then_output(|| ListObjectsV2Output::builder().is_truncated(false).build());
+            let head = mock!(aws_sdk_s3::Client::head_object).then_output(move || {
+                HeadObjectOutput::builder()
+                    .checksum_sha256(header.clone())
+                    .build()
+            });
+            let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &head]);
+            let fs = mock_fs("s3://bucket/out", client)?;
+            assert_eq!(fs.recorded_checksum("x.jpg"), expected);
+        }
         Ok(())
     }
 

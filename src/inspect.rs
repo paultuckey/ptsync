@@ -145,45 +145,22 @@ mod tests {
     use crate::fs::OsFileSystem;
     use crate::util::scan_fs;
 
+    /// Photos and videos come back inspected; anything that classified as media
+    /// on its name but cannot be read is counted instead of yielded.
     #[test]
-    fn test_inspect_media_files_yields_media() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        let container: Arc<dyn FileSystem> = Arc::new(OsFileSystem::new("test"));
-        let media_si_files: Vec<ScanInfo> = scan_fs(container.as_ref())
-            .into_iter()
-            .filter(|m| m.quick_file_type == QuickFileType::Media)
-            .collect();
-        let prog = Arc::new(Progress::new(media_si_files.len() as u64));
-
-        let results: Vec<MediaFileInfo> =
-            inspect_media_files(container, media_si_files, prog).collect();
-
-        assert!(
-            results
-                .iter()
-                .any(|m| m.original_file_this_run == "Canon_40D.jpg")
-        );
-        assert!(
-            results
-                .iter()
-                .any(|m| m.original_file_this_run == "Hello.mp4")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_inspect_counts_unprocessable_files() -> anyhow::Result<()> {
+    fn test_inspect_media_files() -> anyhow::Result<()> {
         use std::fs;
         use std::io::Write;
         crate::test_util::setup_log();
 
         // Isolated input dir so the skipped count is deterministic.
-        let test_dir = std::path::Path::new("target/test_inspect_skipped");
+        let test_dir = std::path::Path::new("target/test_inspect");
         if test_dir.exists() {
             fs::remove_dir_all(test_dir)?;
         }
         fs::create_dir_all(test_dir)?;
         fs::copy("test/Canon_40D.jpg", test_dir.join("good.jpg"))?;
+        fs::copy("test/Hello.mp4", test_dir.join("good.mp4"))?;
         // A .jpg extension over plain text: classifies as media, but is not a
         // valid image.
         let mut bad = fs::File::create(test_dir.join("bad.jpg"))?;
@@ -195,14 +172,18 @@ mod tests {
             .into_iter()
             .filter(|m| m.quick_file_type == QuickFileType::Media)
             .collect();
-        assert_eq!(media_si_files.len(), 2, "both files classify as media");
+        assert_eq!(media_si_files.len(), 3, "all three classify as media");
 
         let prog = Arc::new(Progress::new(media_si_files.len() as u64));
         let mut inspected = inspect_media_files(container, media_si_files, prog);
         let results: Vec<MediaFileInfo> = inspected.by_ref().collect();
 
-        assert_eq!(results.len(), 1, "only the valid media file is yielded");
-        assert_eq!(results[0].original_file_this_run, "good.jpg");
+        let mut names: Vec<String> = results
+            .iter()
+            .map(|m| m.original_file_this_run.clone())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["good.jpg", "good.mp4"]);
         assert_eq!(
             inspected.skipped_count(),
             1,

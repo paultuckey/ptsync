@@ -290,23 +290,12 @@ mod tests {
         let dt =
             best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date when both present"))?;
         assert_eq!(dt, AT_ZONE);
-        Ok(())
-    }
 
-    /// Rendered at UTC — what `DateTime::from_timestamp_millis` gives unaided —
-    /// this instant would be filed under the 9th at 01:46 instead.
-    #[test]
-    fn test_filesystem_time_is_bucketed_in_the_output_tz() -> anyhow::Result<()> {
-        use anyhow::anyhow;
-
-        let mut info = MediaFileInfo::new_for_test();
-        info.modified = Some(1_000_000_000_000);
-        let taken =
-            best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from modified"))?;
-
-        assert_eq!(taken, "2001-09-09T13:46:40+12:00");
+        // Bucketed on that reading. Rendered at UTC — what
+        // `DateTime::from_timestamp_millis` gives unaided — this instant would
+        // be filed under the 9th at 01:46 instead.
         assert_eq!(
-            get_desired_media_path("abc1234", &Some(taken)),
+            get_desired_media_path("abc1234", &Some(dt)),
             "2001/09/09/1346-40000"
         );
         Ok(())
@@ -344,10 +333,13 @@ mod tests {
         );
     }
 
+    /// The whole precedence chain: EXIF, then a video's track string, then the
+    /// two supplemental fields — with `(0, 0)` treated as absence throughout.
     #[test]
-    fn test_best_guess_lat_long_precedence() {
+    fn test_best_guess_lat_long() {
         use crate::exif_util::PsExifInfo;
         use crate::supplemental_info::{PsSupplementalInfo, SupplementalInfoGeoData};
+        use crate::track_util::PsTrackInfo;
         use std::collections::HashMap;
 
         let exif = |lat, long| PsExifInfo {
@@ -367,36 +359,6 @@ mod tests {
             photo_taken_time: None,
             creation_time: None,
         };
-
-        // EXIF wins over supplemental data.
-        let mut info = MediaFileInfo::new_for_test();
-        info.exif_info = Some(exif(Some(1.0), Some(2.0)));
-        info.supp_info = Some(supp(Some(geo(3.0, 4.0)), Some(geo(5.0, 6.0))));
-        assert_eq!(best_guess_lat_long(&info), Some((1.0, 2.0)));
-
-        // geo_data_exif over geo_data.
-        info.exif_info = None;
-        assert_eq!(best_guess_lat_long(&info), Some((3.0, 4.0)));
-
-        info.supp_info = Some(supp(None, Some(geo(5.0, 6.0))));
-        assert_eq!(best_guess_lat_long(&info), Some((5.0, 6.0)));
-
-        // (0, 0) is absent, so this falls through to supplemental.
-        info.exif_info = Some(exif(Some(0.0), Some(0.0)));
-        info.supp_info = Some(supp(Some(geo(7.0, 8.0)), None));
-        assert_eq!(best_guess_lat_long(&info), Some((7.0, 8.0)));
-
-        info.exif_info = None;
-        info.supp_info = Some(supp(Some(geo(0.0, 0.0)), None));
-        assert_eq!(best_guess_lat_long(&info), None);
-    }
-
-    #[test]
-    fn test_best_guess_lat_long_video_track() {
-        use crate::exif_util::PsExifInfo;
-        use crate::track_util::PsTrackInfo;
-        use std::collections::HashMap;
-
         let track = |gps: &str| PsTrackInfo {
             width: None,
             height: None,
@@ -409,19 +371,31 @@ mod tests {
             gps_iso_6709: Some(gps.to_string()),
         };
 
+        // EXIF wins over both the track string and supplemental data.
         let mut info = MediaFileInfo::new_for_test();
-        info.exif_info = None;
+        info.exif_info = Some(exif(Some(1.0), Some(2.0)));
         info.track_info = Some(track("+27.5916+086.5640/"));
+        info.supp_info = Some(supp(Some(geo(3.0, 4.0)), Some(geo(5.0, 6.0))));
+        assert_eq!(best_guess_lat_long(&info), Some((1.0, 2.0)));
+
+        // Then a video's own track string.
+        info.exif_info = None;
         assert_eq!(best_guess_lat_long(&info), Some((27.5916, 86.5640)));
 
-        // EXIF still wins over the track string when both exist.
-        info.exif_info = Some(PsExifInfo {
-            tags: HashMap::new(),
-            gps: None,
-            latitude: Some(1.0),
-            longitude: Some(2.0),
-        });
-        assert_eq!(best_guess_lat_long(&info), Some((1.0, 2.0)));
+        // Then geo_data_exif, then geo_data.
+        info.track_info = None;
+        assert_eq!(best_guess_lat_long(&info), Some((3.0, 4.0)));
+        info.supp_info = Some(supp(None, Some(geo(5.0, 6.0))));
+        assert_eq!(best_guess_lat_long(&info), Some((5.0, 6.0)));
+
+        // (0, 0) is absent, so this falls through to supplemental.
+        info.exif_info = Some(exif(Some(0.0), Some(0.0)));
+        info.supp_info = Some(supp(Some(geo(7.0, 8.0)), None));
+        assert_eq!(best_guess_lat_long(&info), Some((7.0, 8.0)));
+
+        info.exif_info = None;
+        info.supp_info = Some(supp(Some(geo(0.0, 0.0)), None));
+        assert_eq!(best_guess_lat_long(&info), None);
     }
 
     #[test]
@@ -448,6 +422,25 @@ mod tests {
             ),
             "2008/05/30/1556-01009".to_string()
         );
+
+        // Real short checksums are always hex, so the datetime string is the
+        // only attacker-influenced input — and the path it produces must stay
+        // inside the output tree whatever it says.
+        for dt in [
+            None,
+            Some("../../../../etc/passwd".to_string()),
+            Some("/absolute/path".to_string()),
+            Some("not a date at all".to_string()),
+            Some("9999-99-99T99:99:99Z".to_string()),
+            Some("Ñoño 📸".to_string()),
+            Some(String::new()),
+        ] {
+            let path = get_desired_media_path(&short_checksum, &dt);
+            assert!(
+                !crate::test_util::escapes_output(&path),
+                "media path escaped output for datetime {dt:?}: {path}"
+            );
+        }
         Ok(())
     }
 }

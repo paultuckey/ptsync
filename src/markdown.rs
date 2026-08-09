@@ -380,16 +380,6 @@ pub(crate) fn get_desired_markdown_path(resolved_media_path: &str) -> anyhow::Re
 mod tests {
     use super::*;
 
-    fn assert_split(text: &str, expected_fm: &str, expected_md: &str) {
-        let (fm, md) = split_frontmatter(text);
-        assert_eq!(
-            fm, expected_fm,
-            "Frontmatter mismatch for input: {:?}",
-            text
-        );
-        assert_eq!(md, expected_md, "Markdown mismatch for input: {:?}", text);
-    }
-
     fn get_mfi() -> PhotoSorterFrontMatter {
         PhotoSorterFrontMatter {
             path_original: vec!["p1".to_string(), "p2".to_string()],
@@ -470,64 +460,69 @@ checksum: abcdefg
         Ok(())
     }
 
+    /// Both line endings throughout: a sidecar hand-edited on Windows must split
+    /// the same way as one written here.
     #[test]
-    fn parse_with_missing_beginning_line() {
-        assert_split("", "", "");
+    fn test_split_frontmatter() {
+        for (text, expected_fm, expected_md) in [
+            ("", "", ""),
+            // Opened but never closed, so none of it is frontmatter.
+            ("---\n", "", "---\n"),
+            ("---\r\n", "", "---\r\n"),
+            ("---\n---\n", "", "---\n---\n"),
+            ("---\r\n---\r\n", "", "---\r\n---\r\n"),
+            ("---\ndate: 2000-01-01\n---\n", "date: 2000-01-01", "\n"),
+            (
+                "---\r\ndate: 2000-01-01\r\n---\r\n",
+                "date: 2000-01-01",
+                "\r\n",
+            ),
+            (
+                "---\ntitle: dummy_title---\ndummy_body",
+                "title: dummy_title",
+                "dummy_body",
+            ),
+            (
+                "---\r\ntitle: dummy_title---\r\ndummy_body",
+                "title: dummy_title",
+                "dummy_body",
+            ),
+            // Leading blank lines before the opening marker.
+            (
+                "\n\n\n---\ntitle: dummy_title---\ndummy_body",
+                "title: dummy_title",
+                "dummy_body",
+            ),
+            (
+                "\r\n\r\n\r\n---\r\ntitle: dummy_title---\r\ndummy_body",
+                "title: dummy_title",
+                "dummy_body",
+            ),
+            ("\n\n\ndummy_body", "", "\n\n\ndummy_body"),
+        ] {
+            let (fm, md) = split_frontmatter(text);
+            assert_eq!(fm, expected_fm, "frontmatter for input: {text:?}");
+            assert_eq!(md, expected_md, "markdown for input: {text:?}");
+        }
     }
 
+    /// Sidecars are user-editable, so the splitter has to survive whatever comes
+    /// back. The requirement is only that it returns.
     #[test]
-    fn parse_with_missing_ending_line() {
-        assert_split("---\n", "", "---\n");
-        assert_split("---\r\n", "", "---\r\n");
-    }
-
-    #[test]
-    fn parse_with_empty_frontmatter() {
-        assert_split("---\n---\n", "", "---\n---\n");
-        assert_split("---\r\n---\r\n", "", "---\r\n---\r\n");
-    }
-
-    #[test]
-    fn parse_with_missing_known_field() {
-        assert_split("---\ndate: 2000-01-01\n---\n", "date: 2000-01-01", "\n");
-        assert_split(
-            "---\r\ndate: 2000-01-01\r\n---\r\n",
-            "date: 2000-01-01",
-            "\r\n",
-        );
-    }
-
-    #[test]
-    fn parse_with_valid_frontmatter() {
-        assert_split(
-            "---\ntitle: dummy_title---\ndummy_body",
-            "title: dummy_title",
-            "dummy_body",
-        );
-        assert_split(
-            "---\r\ntitle: dummy_title---\r\ndummy_body",
-            "title: dummy_title",
-            "dummy_body",
-        );
-    }
-
-    #[test]
-    fn parse_with_extra_whitespace() {
-        assert_split(
-            "\n\n\n---\ntitle: dummy_title---\ndummy_body",
-            "title: dummy_title",
-            "dummy_body",
-        );
-        assert_split(
-            "\r\n\r\n\r\n---\r\ntitle: dummy_title---\r\ndummy_body",
-            "title: dummy_title",
-            "dummy_body",
-        );
-    }
-
-    #[test]
-    fn parse_md_only_with_no_frontmatter() {
-        assert_split("\n\n\ndummy_body", "", "\n\n\ndummy_body");
+    fn test_split_frontmatter_survives_adversarial_input() {
+        crate::test_util::setup_log();
+        for text in [
+            "---".to_string(),
+            "------------".to_string(),
+            "---\n---\n---\n---\n".to_string(),
+            "\u{feff}---\ntitle: bom\n---\nbody".to_string(),
+            "---\nÑoño: 📸\n---\ncafé".to_string(),
+            "-".repeat(100_000),
+            "---\n\u{0}\u{1}\u{2}\n---\nbody".to_string(),
+        ] {
+            let (fm, md) = split_frontmatter(&text);
+            let _ = (fm.len(), md.len());
+        }
     }
 
     #[test]
@@ -548,6 +543,15 @@ checksum: abcdefg
             get_desired_markdown_path("abc").ok(),
             Some("abc.md".to_string())
         );
+        // Only the extension is swapped, so nothing here needs sanitising — but
+        // nothing may panic either. Empty input is the one Err case.
+        for name in crate::test_util::hostile_names() {
+            assert_eq!(
+                get_desired_markdown_path(&name).is_ok(),
+                !name.is_empty(),
+                "resolving markdown path for {name:?}"
+            );
+        }
     }
 
     #[test]
@@ -667,11 +671,35 @@ checksum: abcdefg
         Ok(())
     }
 
+    /// Unparseable YAML and non-mapping roots must come back as errors so the
+    /// caller leaves the file untouched rather than dropping metadata.
     #[test]
     fn test_malformed_frontmatter_errors_rather_than_dropping_metadata() {
         crate::test_util::setup_log();
-        assert!(merge_yaml(&Some("foo: [unclosed".to_string()), &get_mfi()).is_err());
-        // A non-mapping root is equally unusable.
-        assert!(merge_yaml(&Some("- a\n- b\n".to_string()), &get_mfi()).is_err());
+        for yaml in ["foo: [unclosed", "- a\n- b\n", "just a scalar"] {
+            let existing = Some(yaml.to_string());
+            assert!(
+                merge_yaml(&existing, &get_mfi()).is_err(),
+                "merging {yaml:?}"
+            );
+            assert!(
+                assemble_markdown(&get_mfi(), &existing, "body").is_err(),
+                "assembling over {yaml:?}"
+            );
+        }
+
+        // Odd-but-valid existing frontmatter is not an error, and must not panic.
+        for yaml in [
+            "Ñoño: 📸\n".to_string(),
+            format!("giant: {}\n", "z".repeat(50_000)),
+            "nested:\n  a:\n    b:\n      c: 1\n".to_string(),
+            "checksum: abcdefg\noriginal-paths:\n  - p1\n".to_string(),
+        ] {
+            assert!(
+                assemble_markdown(&get_mfi(), &Some(yaml.clone()), "body").is_ok(),
+                "assembling over {:?}",
+                yaml.chars().take(40).collect::<String>()
+            );
+        }
     }
 }
