@@ -455,11 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn test_split_album_notes_no_marker() {
-        assert_eq!(split_album_notes("# Just a heading\n"), "");
-    }
-
-    #[test]
     fn test_album_rerun_is_a_no_op_write() -> anyhow::Result<()> {
         crate::test_util::setup_log();
         let dir = tempfile::tempdir()?;

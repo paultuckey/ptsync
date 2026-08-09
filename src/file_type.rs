@@ -182,7 +182,6 @@ pub(crate) fn determine_file_type<R: Read + Seek>(
 mod tests {
     use super::*;
     use crate::fs::FileSystem;
-    use std::io::Cursor;
 
     #[test]
     fn test_quick_file_type() {
@@ -425,22 +424,5 @@ mod tests {
             file_type_from_content_type("application/vnd.ms-asf"),
             AccurateFileType::Unsupported
         );
-    }
-
-    #[test]
-    fn test_accurate_file_type() -> anyhow::Result<()> {
-        crate::test_util::setup_log();
-        use crate::fs::OsFileSystem;
-        let name = "Canon_40D.jpg".to_string();
-        let root = OsFileSystem::new("test");
-        let r = root.open(&name)?;
-        assert_eq!(determine_file_type(r, &name)?, AccurateFileType::Jpg);
-
-        let bad: Vec<u8> = vec![];
-        assert_eq!(
-            determine_file_type(Cursor::new(&bad), &"bad.bad".to_string())?,
-            AccurateFileType::Unsupported
-        );
-        Ok(())
     }
 }

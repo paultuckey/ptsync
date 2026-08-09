@@ -1,7 +1,8 @@
 
 # Test files
 
-
+`Canon_40D.jpg` comes from
+<https://github.com/ianare/exif-samples/blob/master/jpg/Canon_40D.jpg>.
 
 ### Regenerate Hello.wmv
 

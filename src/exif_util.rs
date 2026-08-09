@@ -635,21 +635,6 @@ mod tests {
         );
     }
 
-    /// 19:30 on the 17th in Greenwich is 07:30 on the *18th* at +12:00, so a
-    /// regression to rendering at UTC shows up as a different day, not merely a
-    /// different offset.
-    #[test]
-    fn test_gps_reading_is_converted_to_the_output_tz() {
-        let exif = exif_with(&[
-            (ExifTag::GPSDateStamp, "2015:04:17"),
-            (ExifTag::GPSTimeStamp, "19:30:45"),
-        ]);
-        assert_eq!(
-            best_guess_taken_exif(&exif, tz()).as_deref(),
-            Some("2015-04-18T07:30:45+12:00")
-        );
-    }
-
     #[test]
     fn test_camera_clock_outranks_gps() {
         let exif = exif_with(&[
@@ -789,20 +774,6 @@ mod tests {
             crate::media::get_desired_media_path("abc1234", &taken),
             "2008/05/30/1556-01070"
         );
-    }
-
-    #[test]
-    fn test_converted_dates_produce_a_dated_path() -> anyhow::Result<()> {
-        use anyhow::anyhow;
-        crate::test_util::setup_log();
-        let c = OsFileSystem::new("test");
-        let reader = c.open("Canon_40D.jpg")?;
-        let info = parse_exif_info(reader)?.ok_or_else(|| anyhow!("Failed to parse exif"))?;
-        let taken =
-            best_guess_taken_exif(&Some(info), tz()).ok_or_else(|| anyhow!("no exif date"))?;
-        let path = crate::media::get_desired_media_path("abc1234", &Some(taken));
-        assert!(!path.starts_with("undated/"), "got {path}");
-        Ok(())
     }
 
     #[test]

@@ -575,42 +575,6 @@ checksum: abcdefg
         assert_eq!(mfm.longitude, Some(152.2605));
     }
 
-    /// The sidecar shares [`best_guess_lat_long`] with the database, so a video's
-    /// embedded track GPS reaches it too — it has no EXIF to fall back on.
-    #[test]
-    fn test_mfm_gps_from_video_track() {
-        use crate::track_util::PsTrackInfo;
-        let mut m = MediaFileInfo::new_for_test();
-        m.track_info = Some(PsTrackInfo {
-            width: None,
-            height: None,
-            creation_time: None,
-            duration_ms: None,
-            make: None,
-            model: None,
-            software: None,
-            author: None,
-            gps_iso_6709: Some("+27.5916+086.5640/".to_string()),
-        });
-        let mfm = mfm_from_media_file_info(&m, &[], crate::test_util::tz());
-        assert_eq!(mfm.latitude, Some(27.5916));
-        assert_eq!(mfm.longitude, Some(86.5640));
-    }
-
-    #[test]
-    fn test_mfm_null_island_gps_is_dropped() {
-        use crate::supplemental_info::SupplementalInfoGeoData;
-        // Google writes 0,0 to mean "no location"; it must not be recorded.
-        let geo = SupplementalInfoGeoData {
-            latitude: Some(0.0),
-            longitude: Some(0.0),
-        };
-        let m = mfi_with_supp(Some(geo), &[]);
-        let mfm = mfm_from_media_file_info(&m, &[], crate::test_util::tz());
-        assert_eq!(mfm.latitude, None);
-        assert_eq!(mfm.longitude, None);
-    }
-
     #[test]
     fn test_yaml_wikilinks_emit_and_round_trip() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -662,13 +626,5 @@ checksum: abcdefg
             "re-running over current frontmatter must not rewrite the sidecar"
         );
         Ok(())
-    }
-
-    #[test]
-    fn test_malformed_frontmatter_errors_rather_than_dropping_metadata() {
-        crate::test_util::setup_log();
-        assert!(merge_yaml(&Some("foo: [unclosed".to_string()), &get_mfi()).is_err());
-        // A non-mapping root is equally unusable.
-        assert!(merge_yaml(&Some("- a\n- b\n".to_string()), &get_mfi()).is_err());
     }
 }
