@@ -23,6 +23,19 @@ be treated as media. 24 kbps is the encoder's floor.
 ffmpeg -y -f lavfi -i "sine=frequency=440:duration=0.5" -c:a wmav2 -b:a 24k -ar 8000 -ac 1 Hello.wma
 ```
 
+### Regenerate Hello.png and Hello.gif
+
+Flat-colour stills, small enough to stay unnoticeable in the repo. Neither
+carries a date, so anything using them needs a sidecar to be dated.
+
+```shell
+magick -size 160x120 xc:'#3366aa' -define png:include-chunk=none Hello.png
+```
+
+```shell
+magick -size 160x120 xc:'#aa6633' Hello.gif
+```
+
 ### Add modified time to mp4
 
 ```shell

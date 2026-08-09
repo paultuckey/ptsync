@@ -167,13 +167,44 @@ exiftool "input/Takeout/Google Photos/Photos from 2024/IMG_3986.HEIC" > a.txt
 exiftool "input/iCloud Photos/Photos/IMG_3986.HEIC" > b.txt
 ```
 
+## Tests
+
+Prefer adding to the corpus over adding a test.
+
+`tests/corpus.rs` builds one input tree covering every file format and dating
+edge case, syncs it by running the real binary, and diffs the whole output tree
+against `tests/snapshots/corpus.txt`. Media shows as a digest; markdown is
+quoted in full, so dates, deduplication, sidecar contents, album membership and
+extension corrections are all readable in that one file. A new format or edge
+case is usually a few lines in `build_corpus` plus a snapshot regeneration —
+read the diff to check the new behaviour is what you meant.
+
+The corpus deliberately holds no hostile filenames: `CON.jpg` and 300-character
+names cannot be created on every platform, so the output would differ per OS and
+the snapshot could not be shared. `src/boundary_tests/` covers those, and
+malformed input generally, with invariants ("never panics", "never writes
+outside `--output`") rather than snapshots.
+
+`test/` holds the format primitives the corpus is assembled from, and
+`test/takeout_basic` is kept small and separate because `docs/demo.tape` records
+it into the README's GIF.
+
+Unit tests stay for things a black box cannot reach — a fake S3 filesystem, a
+parser's own table of inputs.
+
 ## Update docs
 
-Regenerate `docs/cli.md` and `docs/db-schema.md` (a plain `cargo test` fails if
-they are stale):
+Regenerate `docs/cli.md`, `docs/db-schema.md` and the test snapshots (a plain
+`cargo test` fails if any are stale):
 
 ```shell
 UPDATE_DOCS=1 cargo test
+```
+
+Known bugs are recorded as `#[ignore]`d tests. To see them:
+
+```shell
+cargo test -- --ignored
 ```
 
 ### Demo GIF
