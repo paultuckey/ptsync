@@ -1,20 +1,16 @@
-//! Shared database plumbing for the `db_cmd` submodules: opening a connection
-//! and running single-row queries, plus (test-only) fixtures reused across the
-//! submodules' tests.
+//! Shared database plumbing for the `db_cmd` submodules.
 
 use turso::{Builder, Connection, Database, IntoParams, Row};
 
-/// Open (or create) a local SQLite database at `path`, returning the owning
-/// handle alongside a connection. No encryption: the on-disk file stays a
-/// standard SQLite file that users can open directly with sqlite3.
+/// Open (or create) a local SQLite database. Unencrypted, so the file stays one
+/// users can open directly with sqlite3.
 pub(super) async fn open_conn(path: &str) -> anyhow::Result<(Database, Connection)> {
     let db = Builder::new_local(path).build().await?;
     let conn = db.connect()?;
     Ok((db, conn))
 }
 
-/// Run a query expected to yield at most one row: return the first row (if any)
-/// and drain the rest so the statement runs to completion.
+/// The first row, with the rest drained so the statement runs to completion.
 pub(super) async fn query_one(
     conn: &Connection,
     sql: &str,
@@ -26,7 +22,6 @@ pub(super) async fn query_one(
     Ok(first)
 }
 
-/// Test fixtures shared across the `db_cmd` submodules' tests.
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::query_one;
@@ -34,7 +29,7 @@ pub(crate) mod test_support {
     use std::path::Path;
     use turso::{Connection, IntoParams, Row};
 
-    /// Fetch the single row a query is expected to return, erroring if there is none.
+    /// Errors when the query returns no row at all.
     pub(crate) async fn one_row(
         conn: &Connection,
         sql: &str,
@@ -45,8 +40,8 @@ pub(crate) mod test_support {
             .ok_or_else(|| anyhow!("query returned no rows: {sql}"))
     }
 
-    /// Zip every file in the `test/` directory into `output_path` (flat, base
-    /// names only) to exercise the zip-container scan path.
+    /// Zip the `test/` directory flat, base names only, to exercise the
+    /// zip-container scan path.
     pub(crate) fn create_zip_of_test_dir(output_path: &Path) -> anyhow::Result<()> {
         use std::fs;
         use zip::ZipWriter;

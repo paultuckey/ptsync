@@ -30,8 +30,7 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// The binary / command name, used wherever the tool labels its own output
-/// (generated-file markers, docs, etc.).
+/// Used wherever the tool labels its own output — generated-file markers, docs.
 pub(crate) const COMMAND_NAME: &str = "ptsync";
 
 #[derive(Parser)]
@@ -44,8 +43,7 @@ struct Cli {
     /// UTC offset to use when localizing UTC dates - `+12:00`, `-04:00`, `+0545` or `+00:00`
     /// (else `TZ` env var, else the machine's zone)
     // `allow_hyphen_values` because half the world's offsets start with one, and
-    // `-z -04:00` is how a person writes it; without it clap reads the value as
-    // another flag and rejects it.
+    // clap would otherwise read `-z -04:00`'s value as another flag.
     #[arg(short = 'z', long, global = true, allow_hyphen_values = true)]
     timezone: Option<String>,
 
@@ -214,7 +212,8 @@ fn go() -> anyhow::Result<()> {
 }
 
 fn enable_debug(debug: bool) {
-    // --debug is for tracing ptsync's own logic. Raising the default level
+    // `--debug` traces ptsync's own logic, so the noisy dependencies stay pinned
+    // at ERROR rather than following it up.
     let filter = tracing_subscriber::filter::Targets::new()
         .with_default(Level::INFO)
         .with_target("ptsync", if debug { Level::DEBUG } else { Level::INFO })
@@ -229,9 +228,8 @@ fn enable_debug(debug: bool) {
         .with_ansi(std::io::stderr().is_terminal())
         .with_target(false);
 
-    // A normal run should read like rsync's output: just the message. A
-    // timestamp on every line is noise when the whole sync takes a second, but
-    // it earns its place when reading back a --debug trace.
+    // A normal run should read like rsync's output: just the message. A timestamp
+    // per line only earns its place when reading back a `--debug` trace.
     let registry_layer = if debug {
         registry_layer.boxed()
     } else {

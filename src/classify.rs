@@ -1,18 +1,17 @@
-//! Classification of the dirs/files in a google takeout or icloud directory/zip.
+//! Classification of the dirs/files in a Google Takeout or iCloud directory/zip,
+//! consumed by the `db` command, which stores the result for every scanned path.
 //!
-//! Naming is pretty loose, especially in google takeout. This module uses the strictest possible regex to identify
-//! dirs/files that match known patterns. The classification is consumed by the
-//! `db` command, which stores the result for every scanned path.
+//! Naming is loose, especially in Takeout, so the patterns here are the strictest
+//! regexes that still match.
 //!
 //! Open questions:
 //!  - How do we relate albums to corresponding photos/videos?
 //!  - How do we relate photos/videos to separate corresponding metadata files?
-//!  - Do dirs change names for other languages? eg, es:fotos zh:照片?
-//!  - Fo file prefixes/suffixes change for other languages? eg, is `image_001.jpg` different in ES?
+//!  - Do dir names change for other languages? eg, es:fotos zh:照片?
+//!  - Do file prefixes/suffixes? eg, is `image_001.jpg` different in ES?
 //!
-//! Out of scope:
-//!  - relate edits/animations/originals together
-//!    - this requires too much knowledge of icloud and google takeout structure
+//! Relating edits/animations/originals together is out of scope; it needs too
+//! much knowledge of iCloud and Takeout structure.
 
 use regex::Regex;
 use std::path::Path;
@@ -20,14 +19,12 @@ use std::sync::LazyLock;
 use strum_macros::Display;
 use tracing::warn;
 
-/// Classify a single file by its path. Returns the first matching pattern, or
-/// `None` if the file does not match any known pattern.
+/// The first matching pattern, or `None` if none is known.
 pub(crate) fn classify_file(file_path: &str) -> Option<KnownFileType> {
     find_known_files(file_path).into_iter().next()
 }
 
-/// Classify a single directory by its path. Returns the first matching pattern,
-/// or `None` if the directory does not match any known pattern.
+/// The first matching pattern, or `None` if none is known.
 pub(crate) fn classify_dir(dir_path: &str) -> Option<KnownDir> {
     find_known_dirs(dir_path).into_iter().next()
 }
@@ -45,8 +42,7 @@ pub(crate) enum KnownDir {
 }
 
 impl KnownDir {
-    /// The captured value (e.g. the year for `GpPhotosFromYear`), if the variant
-    /// carries one. Stored alongside the variant name in the database.
+    /// The captured value, stored in the database alongside the variant name.
     pub(crate) fn value(&self) -> Option<String> {
         match self {
             KnownDir::GpPhotosFromYear(v) => Some(v.clone()),
@@ -57,11 +53,12 @@ impl KnownDir {
 
 #[derive(Debug, Display, PartialEq)]
 pub(crate) enum KnownFileType {
-    // can be in either provider
+    // Either provider.
     Photo(String),
-    Ignored, // any file where we know it's file pattern and we know we don't need it
+    /// A recognised pattern that is deliberately not wanted.
+    Ignored,
 
-    // typically in google photos
+    // Typically Google Photos.
     GpMetadataJson(String),
     GpPicasaSyncMetadataJson(String),
     GpAlbumJson,
@@ -73,14 +70,13 @@ pub(crate) enum KnownFileType {
     GpUserGeneratedMemoryTitles,
     GpArchiveBrowser,
 
-    // typically in icloud photos
+    // Typically iCloud Photos.
     IcpAlbumCsv(String),
     IcpSharedAlbumsZip,
 }
 
 impl KnownFileType {
-    /// The captured value (e.g. the photo id) if the variant carries one.
-    /// Stored alongside the variant name in the database.
+    /// The captured value, stored in the database alongside the variant name.
     pub(crate) fn value(&self) -> Option<String> {
         match self {
             KnownFileType::Photo(v)
@@ -97,10 +93,8 @@ impl KnownFileType {
 
 fn match_re(haystack: &str, re: &Regex) -> Option<PatternMatch> {
     let haystack_lc = haystack.to_lowercase();
-    //debug!("haystack: {haystack_lc} needle: {re}");
     let caps_o = re.captures(&haystack_lc);
     if let Some(caps) = caps_o {
-        //debug!("Matched: {caps:?}");
         return Some(PatternMatch {
             g1: caps
                 .get(1)

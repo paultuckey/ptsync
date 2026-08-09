@@ -4,13 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use tracing::{debug, warn};
 
-/// Longest filename Takeout emits, in characters. Not derivable from anything
-/// else here — it is a property of Google's exporter, measured across a real
-/// export, where both media files and sidecars pile up at exactly this length
-/// and none exceeds it. A name too long is cut *before* its extension, so the
-/// extension always survives: a 47-character stem plus `.jpg`, or a
-/// 46-character stem plus `.json`. Duplicate counters are appended afterwards
-/// and can push the result past the cap.
+/// Longest filename Takeout emits, in characters. A property of Google's
+/// exporter, measured across a real export rather than documented. Names are cut
+/// *before* the extension, so the extension always survives; duplicate counters
+/// are appended afterwards and can push the result past the cap.
 const TAKEOUT_FILENAME_MAX_CHARS: usize = 51;
 const SUPP_TAG: &str = ".supplemental-metadata";
 const JSON_EXT: &str = ".json";
@@ -19,8 +16,8 @@ const JSON_EXT: &str = ".json";
 const SUPP_STEM_MAX_CHARS: usize = TAKEOUT_FILENAME_MAX_CHARS - JSON_EXT.len();
 
 /// Extensions a still image can carry when it is the metadata-bearing original
-/// behind a derived file or a live-photo motion clip. Each case is listed twice
-/// because archives come off case-preserving and case-sensitive filesystems alike.
+/// behind a derived file or a live-photo motion clip. Both cases are listed
+/// because archives come off case-sensitive filesystems too.
 const STILL_EXTS: &[&str] = &[
     ".HEIC", ".heic", ".JPG", ".jpg", ".JPEG", ".jpeg", ".PNG", ".png",
 ];
@@ -47,30 +44,8 @@ const DERIVED_SUFFIXES: &[&str] = &[
 /// How deep to peel derived suffixes: `-ERASER-edited` is two renditions deep.
 const MAX_DERIVED_DEPTH: usize = 3;
 
-/// Find the Takeout sidecar json describing `path`, if one exists.
-///
-/// Google names it `{media file}.supplemental-metadata.json`, but only when that
-/// name fits and only for files the user actually uploaded. Four rules reshape
-/// it, and they compose:
-///
-/// 1. **Length.** The json filename is capped at [`TAKEOUT_FILENAME_MAX_CHARS`]
-///    characters, so the tag is cut mid-word: a 29-character media name yields
-///    `….jpg.supplemental-met.json`, a 40-character one `….JPG.suppl.json`.
-/// 2. **Duplicate counters.** `FullSizeRender(42).jpg` is described by
-///    `FullSizeRender.jpg.supplemental-metadata(42).json` — the `(42)` moves off
-///    the media name onto the end of the json name, *after* truncation, which is
-///    why the result can exceed the cap.
-/// 3. **Extension-less titles.** When the original upload had no extension the
-///    json is keyed on that bare title, even though the exported media file
-///    gained one: `PicasaSync(6).jpg` -> `PicasaSync.supplemental-metadata(6).json`.
-/// 4. **Derived files.** Renditions Google made itself — `-edited`, `-EFFECTS`,
-///    `-ANIMATION` and friends — carry no sidecar; the metadata stays on the
-///    original, which may have a different extension (an `-ANIMATION.gif` comes
-///    from a `.jpg`). Live-photo motion clips work the same way:
-///    `IMG_3716.MP4`'s metadata lives on `IMG_3716.HEIC`.
-///
-/// Candidates are tried most specific first, so an exact sidecar always wins over
-/// one inherited from an original.
+/// Find the Takeout sidecar json describing `path`, if one exists. Candidates
+/// are tried most specific first, so an exact sidecar wins over an inherited one.
 pub(crate) fn detect_supplemental_info(path: &str, container: &dyn FileSystem) -> Option<String> {
     let (dir, file_name) = split_dir(path);
     for candidate in supplemental_candidates(file_name) {
@@ -82,8 +57,8 @@ pub(crate) fn detect_supplemental_info(path: &str, container: &dyn FileSystem) -
     None
 }
 
-/// Split a relative path into its directory prefix (with trailing `/`, empty at
-/// the root) and its file name. Paths from [`FileSystem::walk`] always use `/`.
+/// Directory prefix (with trailing `/`, empty at the root) and file name. Paths
+/// from [`FileSystem::walk`] always use `/`.
 fn split_dir(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(i) => (&path[..=i], &path[i + 1..]),
@@ -91,9 +66,8 @@ fn split_dir(path: &str) -> (&str, &str) {
     }
 }
 
-/// Split a file name into stem and extension, where the extension keeps its dot
-/// and is empty when there is none. Leading dots belong to the stem, so a
-/// `.hidden` file is all stem.
+/// Stem and extension, the extension keeping its dot. A leading dot belongs to
+/// the stem, so a `.hidden` file is all stem.
 fn split_ext(file_name: &str) -> (&str, &str) {
     match file_name.rfind('.') {
         Some(i) if i > 0 => (&file_name[..i], &file_name[i..]),
@@ -101,7 +75,6 @@ fn split_ext(file_name: &str) -> (&str, &str) {
     }
 }
 
-/// Split a trailing Takeout duplicate counter off a stem:
 /// `FullSizeRender(42)` -> `("FullSizeRender", "(42)")`.
 fn split_counter(stem: &str) -> (&str, &str) {
     let Some(open) = stem.rfind('(') else {
@@ -123,8 +96,6 @@ fn supp_json_name(base: &str, counter: &str) -> String {
     supp_json_name_cut_at(base, counter, SUPP_STEM_MAX_CHARS)
 }
 
-/// As [`supp_json_name`], but cutting the stem at an arbitrary length. Used to
-/// sweep every truncation point when the measured cap turns out to be wrong.
 fn supp_json_name_cut_at(base: &str, counter: &str, stem_chars: usize) -> String {
     let stem: String = format!("{base}{SUPP_TAG}")
         .chars()
@@ -133,14 +104,13 @@ fn supp_json_name_cut_at(base: &str, counter: &str, stem_chars: usize) -> String
     format!("{stem}{counter}{JSON_EXT}")
 }
 
-/// Every filename the sidecar for `base` could have if Takeout's length cap is
-/// not the one we measured, longest (least truncated) first.
+/// Every filename the sidecar for `base` could have if the measured cap is
+/// wrong, longest (least truncated) first.
 ///
-/// The stem is always some prefix of `{base}{SUPP_TAG}` that keeps the whole of
-/// `base` — Google only ever cuts into the tag, never into the filename it is
-/// describing. Enumerating those prefixes covers a cap that moved in either
-/// direction, and as a side effect covers Google shortening the tag itself to
-/// any prefix of its current spelling.
+/// Google only ever cuts into the tag, never into the filename it describes, so
+/// the stem is some prefix of `{base}{SUPP_TAG}` keeping all of `base`.
+/// Enumerating those covers a cap that moved either way, and as a side effect
+/// covers Google shortening the tag itself.
 fn supp_json_names_any_cap(base: &str, counter: &str) -> impl Iterator<Item = String> {
     let shortest = base.chars().count();
     let longest = shortest + SUPP_TAG.chars().count();
@@ -149,10 +119,9 @@ fn supp_json_names_any_cap(base: &str, counter: &str) -> impl Iterator<Item = St
         .map(move |n| supp_json_name_cut_at(base, counter, n))
 }
 
-/// Whether the cap is even involved for this name. When `{base}{SUPP_TAG}` fits
-/// inside it, [`supp_json_name`] returns the untruncated name and its exact value
-/// is irrelevant — so the sweep has nothing to add and is skipped, which is what
-/// keeps the cost off the common case and off archives with no sidecars at all.
+/// Whether the cap is involved at all. When it is not, [`supp_json_name`]
+/// already returns the untruncated name and the sweep is skipped — which is what
+/// keeps its cost off ordinary filenames.
 fn cap_applies(base: &str) -> bool {
     base.chars().count() + SUPP_TAG.chars().count() > SUPP_STEM_MAX_CHARS
 }
@@ -171,6 +140,21 @@ fn strip_derived_suffix(stem: &str) -> Option<&str> {
 /// The `(name, counter)` pairs a sidecar for `file_name` could be keyed on, most
 /// specific first. These encode *which file* the metadata belongs to; turning a
 /// pair into a filename is [`supp_json_name`]'s job.
+///
+/// Google names a sidecar `{media file}.supplemental-metadata.json`, but only
+/// when that fits and only for files the user actually uploaded. Three rules
+/// reshape the key, and they compose (truncation is [`supp_json_name`]'s job):
+///
+/// 1. **Duplicate counters** move off the media name onto the end of the json
+///    name, *after* truncation — which is why the result can exceed the cap:
+///    `FullSizeRender(42).jpg` -> `FullSizeRender.jpg.supplemental-metadata(42).json`.
+/// 2. **Extension-less titles.** An upload with no extension keys its json on
+///    that bare title even though the exported media file gained one:
+///    `PicasaSync(6).jpg` -> `PicasaSync.supplemental-metadata(6).json`.
+/// 3. **Derived files.** Renditions Google made itself carry no sidecar; the
+///    metadata stays on the original, which may have a different extension (an
+///    `-ANIMATION.gif` comes from a `.jpg`). Live-photo motion clips work the
+///    same way: `IMG_3716.MP4`'s metadata lives on `IMG_3716.HEIC`.
 fn supplemental_keys(file_name: &str) -> Vec<(String, String)> {
     let (stem, ext) = split_ext(file_name);
     let (base, counter) = split_counter(stem);
@@ -183,20 +167,19 @@ fn supplemental_keys(file_name: &str) -> Vec<(String, String)> {
         }
     };
 
-    // Rule 1: the sidecar named after this exact file.
+    // The sidecar named after this exact file.
     push(file_name.to_string(), "");
-    // Rule 2: the duplicate counter relocated onto the json name.
+    // Rule 1.
     if !counter.is_empty() {
         push(format!("{base}{ext}"), counter);
     }
-    // Rule 3: keyed on an extension-less upload title, counter either way round.
+    // Rule 2, counter either way round.
     push(stem.to_string(), "");
     if !counter.is_empty() {
         push(base.to_string(), counter);
     }
 
-    // Rule 4a: a rendition Google derived from an original that kept the sidecar.
-    // Peeled repeatedly, since renditions stack (`-ERASER-edited`).
+    // Rule 3, peeled repeatedly since renditions stack (`-ERASER-edited`).
     let mut original = base;
     for _ in 0..MAX_DERIVED_DEPTH {
         let Some(stripped) = strip_derived_suffix(original) else {
@@ -216,7 +199,7 @@ fn supplemental_keys(file_name: &str) -> Vec<(String, String)> {
         push(original.to_string(), "");
     }
 
-    // Rule 4b: a live-photo motion clip, whose metadata sits on the paired still.
+    // Rule 3, the live-photo case: metadata sits on the paired still.
     if is_motion_clip(ext) {
         for still_ext in STILL_EXTS {
             let named = format!("{base}{still_ext}");
@@ -232,14 +215,11 @@ fn supplemental_keys(file_name: &str) -> Vec<(String, String)> {
 
 /// Every json filename that could describe `file_name`, most specific first.
 ///
-/// Two passes. The first names each candidate at the length cap we have
-/// measured, which is what matches in practice — for the overwhelming majority
-/// of files the very first entry is the answer, one `exists` call and done.
-/// The second re-tries every candidate at every other truncation point, so an
-/// archive built with a different cap still resolves instead of silently
-/// falling back to EXIF. It costs nothing on the common path: it only produces
-/// entries for names long enough for the cap to bite, and it is only ever
-/// reached for a file whose sidecar was not found at all.
+/// Two passes. The first names each key at the measured cap, which is what
+/// matches in practice — usually the first entry is the answer, one `exists`
+/// call and done. The second re-tries at every other truncation point so an
+/// archive built with a different cap still resolves rather than silently
+/// falling back to EXIF; it is only reached when the first pass found nothing.
 fn supplemental_candidates(file_name: &str) -> Vec<String> {
     let keys = supplemental_keys(file_name);
     let mut out: Vec<String> = Vec::with_capacity(keys.len());
@@ -294,24 +274,18 @@ pub(crate) struct SupplementalInfoPerson {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
 pub(crate) struct SupplementalInfoDateTime {
-    timestamp: Option<String>, // actually a unix timestamp in seconds eg, 1716539968
+    /// Unix timestamp in seconds, as a string, e.g. `"1716539968"`.
+    timestamp: Option<String>,
     pub(crate) formatted: Option<String>,
 }
 
 impl SupplementalInfoDateTime {
-    /// Takeout writes this field as whole seconds since the epoch, always, so it
-    /// is read as seconds unconditionally.
+    /// Read unconditionally as seconds. Guessing the unit from the digit count
+    /// instead breaks on photos predating 2001-09-09, whose timestamps are nine
+    /// digits and would read as milliseconds — filing every older scan in 1970.
     ///
-    /// Guessing the unit from the digit count instead — ten digits means
-    /// seconds, anything else means milliseconds — looks harmless until a photo
-    /// predates 2001-09-09, when the timestamp is nine digits and the guess
-    /// reads real seconds as milliseconds. Every scanned or imported photo older
-    /// than that landed in January 1970.
-    ///
-    /// The value is an absolute instant — Google's own `formatted` sibling field
-    /// spells it "22 May 2024, 00:17:51 UTC" — so it is rendered in `zone` rather
-    /// than UTC, or every archive outside Britain would be bucketed against a wall
-    /// clock nobody was reading. See [`OutputTZ`].
+    /// The value is an absolute instant, so it renders in `tz` rather than UTC.
+    /// See [`OutputTZ`].
     pub(crate) fn timestamp_s_as_iso_8601(&self, tz: OutputTZ) -> Option<String> {
         let seconds = self.timestamp.as_ref()?.trim().parse::<i64>().ok()?;
         tz.render_millis(seconds.checked_mul(1000)?)
@@ -344,7 +318,7 @@ mod tests {
     use std::fs::File;
 
     /// Lay out `files` as empty files in a temp dir, then resolve the sidecar for
-    /// `media`. Returns the json filename found, or `None`.
+    /// `media`.
     fn detect_in(files: &[&str], media: &str) -> anyhow::Result<Option<String>> {
         let dir = tempfile::tempdir()?;
         std::fs::create_dir_all(dir.path().join("album"))?;
@@ -371,9 +345,8 @@ mod tests {
         Ok(())
     }
 
-    /// The json filename is capped at 51 characters, cutting the tag mid-word.
     /// Each of these names is a different length, so each is cut at a different
-    /// point — the two spellings that used to be hardcoded are just two of many.
+    /// point in the tag.
     #[test]
     fn test_detect_truncated_json_name() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -405,8 +378,7 @@ mod tests {
         Ok(())
     }
 
-    /// A duplicate counter moves off the media name and onto the json name,
-    /// *after* truncation - which is how the result can exceed the 51-char cap.
+    /// The counter is appended after truncation, so the result can exceed the cap.
     #[test]
     fn test_detect_counter_moves_onto_json_name() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -425,8 +397,6 @@ mod tests {
         Ok(())
     }
 
-    /// An upload with no extension keys its json on the bare title even though
-    /// the exported media file gained one.
     #[test]
     fn test_detect_extension_less_title() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -444,9 +414,6 @@ mod tests {
         Ok(())
     }
 
-    /// Renditions Google generated carry no sidecar; the metadata stays on the
-    /// original, which may have a different extension and may itself be a
-    /// rendition.
     #[test]
     fn test_detect_derived_file_inherits_original() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -474,10 +441,9 @@ mod tests {
                 "IMG_20140712_105906.jpg.supplemental-metadata.json",
             ),
         ] {
-            // Compared case-insensitively: an original's extension is tried in
-            // both cases, and on a case-insensitive filesystem (macOS) whichever
-            // spelling is tried first is the one that matches. Either resolves to
-            // the same file.
+            // Both spellings of an original's extension are tried, and on a
+            // case-insensitive filesystem whichever comes first matches. Either
+            // resolves to the same file.
             let found = detect_in(&[json], media)?;
             assert!(
                 found
@@ -489,7 +455,6 @@ mod tests {
         Ok(())
     }
 
-    /// A live photo's motion clip is described by the still it was shot with.
     #[test]
     fn test_detect_live_photo_motion_clip() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -498,7 +463,6 @@ mod tests {
         Ok(())
     }
 
-    /// A file's own sidecar always beats one it could inherit from an original.
     #[test]
     fn test_detect_prefers_exact_over_inherited() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -511,9 +475,8 @@ mod tests {
         Ok(())
     }
 
-    /// The measured cap is a fact about Google's exporter today, not a rule they
-    /// promised. If it moves, sidecars must still resolve — otherwise every
-    /// long-named photo quietly loses its date and falls back to EXIF.
+    /// If the cap moves, sidecars must still resolve — otherwise every long-named
+    /// photo quietly loses its date and falls back to EXIF.
     #[test]
     fn test_detect_survives_a_changed_length_cap() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -540,8 +503,7 @@ mod tests {
         Ok(())
     }
 
-    /// The same sweep also absorbs Google shortening the tag itself, as long as
-    /// the new spelling is a prefix of the current one.
+    /// Only when the new spelling is a prefix of the current one.
     #[test]
     fn test_detect_survives_a_shortened_tag() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -551,10 +513,7 @@ mod tests {
         Ok(())
     }
 
-    /// The sweep must stay off the common path. A name short enough that the cap
-    /// never bites gets exactly one candidate per key — no fallback probing — so
-    /// an archive of ordinary filenames, or one with no sidecars at all, does not
-    /// pay for this robustness.
+    /// An archive of ordinary filenames must not pay for the sweep.
     #[test]
     fn test_short_names_generate_no_fallback_candidates() {
         let short = supplemental_candidates("IMG_0001.jpg");
@@ -571,8 +530,8 @@ mod tests {
             "the cap is not in play for this name"
         );
 
-        // A long name does get the sweep, and it stays bounded: one entry per
-        // truncation point of the tag, per key.
+        // A long name does get the sweep, bounded at one entry per truncation
+        // point of the tag, per key.
         let long = supplemental_candidates("9C19C4BF-E0C8-4D74-8DC4-4BB2338FB029.JPG");
         assert!(long.len() > short.len());
         assert!(
@@ -597,8 +556,8 @@ mod tests {
         assert_eq!(split_counter("Foo(1"), ("Foo(1", ""));
     }
 
-    /// Truncation counts characters, not bytes: this name's narrow no-break space
-    /// is three bytes but one character, and Takeout cuts after `.supple`.
+    /// Truncation counts characters, not bytes: the narrow no-break space here is
+    /// three bytes but one character.
     #[test]
     fn test_truncation_counts_characters() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -617,7 +576,6 @@ mod tests {
         let json_reader = File::open(file)?;
         let r = parse_supplemental_info(json_reader)
             .ok_or_else(|| anyhow!("Failed to parse supplemental info"))?;
-        // long lat limited to 6 decimal places
         let latitude = r
             .geo_data
             .as_ref()
@@ -671,8 +629,8 @@ mod tests {
         let taken = r
             .photo_taken_time
             .ok_or_else(|| anyhow!("Missing photo_taken_time"))?;
-        // The `formatted` sibling above spells this instant in UTC; the reading
-        // comes out in the output zone, a quarter past noon rather than midnight.
+        // The `formatted` sibling spells this instant in UTC; the reading comes
+        // out in the output zone, a quarter past noon rather than midnight.
         assert_eq!(
             taken
                 .timestamp_s_as_iso_8601(tz())
@@ -682,9 +640,7 @@ mod tests {
         Ok(())
     }
 
-    /// Takeout timestamps are seconds, whatever their digit count. A photo from
-    /// before 2001-09-09 has a nine-digit one, and reading that as milliseconds
-    /// filed every older scan under January 1970.
+    /// Takeout timestamps are seconds whatever their digit count.
     #[test]
     fn test_timestamp_read_as_seconds_at_every_width() {
         let at = |ts: &str| {
@@ -704,19 +660,18 @@ mod tests {
             at("631152000").as_deref(),
             Some("1990-01-01T12:00:00+12:00")
         );
-        // Negative: a scan of something older than the epoch.
+        // Older than the epoch.
         assert_eq!(
             at("-31536000").as_deref(),
             Some("1969-01-01T12:00:00+12:00")
         );
-        // Whitespace and junk.
         assert_eq!(
             at(" 631152000 ").as_deref(),
             Some("1990-01-01T12:00:00+12:00")
         );
         assert_eq!(at(""), None);
         assert_eq!(at("not a timestamp"), None);
-        // Absurd values overflow rather than wrap into a plausible-looking date.
+        // Overflows rather than wrapping into a plausible-looking date.
         assert_eq!(at("9223372036854775807"), None);
     }
 }

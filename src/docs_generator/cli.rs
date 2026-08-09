@@ -1,20 +1,17 @@
-//! Generates `docs/cli.md` from the CLI's own `--help` output and verifies the
-//! committed copy is current.
-//!
-//! Run `UPDATE_DOCS=1 cargo test` to regenerate the doc after changing any
-//! argument; a plain `cargo test` (locally and in CI) fails if it is stale.
+//! Generates `docs/cli.md` from the CLI's own `--help` output. A plain
+//! `cargo test` fails if the committed copy is stale; `UPDATE_DOCS=1 cargo test`
+//! regenerates it.
 
 use crate::Cli;
 use clap::CommandFactory;
 
 const DOC_PATH: &str = "docs/cli.md";
 const BIN: &str = crate::COMMAND_NAME;
-/// Fixed width for the doc so it renders identically regardless of the
-/// terminal `cargo test` happens to run in.
+/// Fixed so the doc renders identically whatever terminal `cargo test` runs in.
 const DOC_WIDTH: usize = 100;
 
-/// Render the exact text `<args>` would print, by driving clap the same way
-/// the real binary does and capturing the resulting help "error".
+/// Drives clap the way the real binary does and captures the resulting help
+/// "error", so this is the exact text `<args>` would print.
 fn render_help(args: &[&str]) -> anyhow::Result<String> {
     match Cli::command()
         .color(clap::ColorChoice::Never)
@@ -38,8 +35,7 @@ fn generate() -> anyhow::Result<String> {
     out.push_str(render_help(&[BIN, "--help"])?.trim_end());
     out.push_str("\n```\n");
 
-    // Discover subcommands from the command model so new commands are
-    // documented automatically. Skip clap's built-in `help` command.
+    // Read off the command model so new commands document themselves.
     let subcommands: Vec<String> = Cli::command()
         .get_subcommands()
         .map(|s| s.get_name().to_string())

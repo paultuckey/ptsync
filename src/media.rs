@@ -23,18 +23,18 @@ pub(crate) struct MediaFileInfo {
     pub(crate) accurate_file_type: AccurateFileType,
     pub(crate) hash_info: HashInfo,
     pub(crate) supp_info: Option<PsSupplementalInfo>,
-    // Modified time of the file
+    /// Unix milliseconds.
     pub(crate) modified: Option<i64>,
+    /// Unix milliseconds.
     pub(crate) created: Option<i64>,
-    // Size of the file in bytes
     pub(crate) file_size: u64,
 }
 
 #[derive(Debug)]
 pub(crate) struct MediaFileDerivedInfo {
-    /// Desired path relative to output directory, minus the dot and file extension (eg, 2025/09/10/1234-56-789)
+    /// Relative to the output directory, without extension (eg `2025/09/10/1234-56-789`).
     pub(crate) desired_media_path: Option<String>,
-    /// Desired file extension (eg, jpg, mp4)
+    /// Without the dot (eg `jpg`).
     pub(crate) desired_media_extension: String,
 }
 
@@ -95,40 +95,24 @@ pub(crate) fn media_file_derived_from_media_info(
     Ok(media_file_info)
 }
 
-/// Best guess at the date the photo was taken from messy optional data, in the order of preference:
-/// 1. SupplementalInfo photo_taken_time
-/// 2. EXIF DateTimeOriginal
-/// 3. EXIF CreateDate (DateTimeDigitized)
-/// 4. EXIF DateTime (ModifyDate) - the last time the file changed, so any edit
-///    pushes it past the capture; below the two capture tags for that reason
-/// 5. EXIF GPSDateStamp + GPSTimeStamp - the receiver's own reading, UTC by
-///    definition rather than by assumption; the day alone if the time is missing
-/// 6. Track creation_time - the embedded capture time for videos (already rfc3339)
-/// 7. SupplementalInfo creation_time
-/// 8. File modified time
-///   - no timezone info, unreliable in zips, somewhat unreliable in directories due to file
-///     copying / syncing not preserving, only use as second to last resort
-/// 9. File creation time
-///   - no timezone info, unavailable in zips, somewhat unreliable in directories due to file
-///     copying / syncing not preserving, only use as a last resort
+/// Best guess at when the photo was taken, from messy optional data, in order of
+/// preference:
+/// 1. SupplementalInfo `photo_taken_time`
+/// 2. EXIF, ranked within [`best_guess_taken_exif`]
+/// 3. Track `creation_time` — the embedded capture time for videos
+/// 4. SupplementalInfo `creation_time`
+/// 5. File modified time, then created time — no zone, unreliable in zips and
+///    not preserved by copying, so both are last resorts
 ///
-/// Result returned as an RFC 3339 string. Every source above normalizes to that
-/// one form, because [`get_desired_media_path`] parses it back and files anything
-/// it cannot read under `undated/` — a source that returns its own native
-/// spelling silently loses the date it just found.
+/// Returned as RFC 3339, since [`get_desired_media_path`] parses it back and
+/// files anything it cannot read under `undated/`.
 ///
-/// The offset on that string decides the output directory, and the sources split
-/// into two kinds that reach the same spelling by opposite routes:
-///
-/// - **Wall-clock readings** (2, 3, 4, 6) are the numbers the photographer's own
-///   camera showed, with the zone unrecorded. `+00:00` is a placeholder that makes
-///   them parse; the digits are already right and must pass through unshifted.
-/// - **Instants** (1, 5, 8, 9) are true points in time. Rendering them at UTC and
-///   bucketing on those digits files them under the Greenwich wall clock, so they
-///   are converted to `zone` first — see [`crate::util::OutputTZ`].
-///
-/// Nothing downstream can tell the two apart once they are strings, which is why
-/// the conversion has to happen here at the source rather than at the bucketing.
+/// The offset on that string decides the output directory, and the sources reach
+/// it by opposite routes: wall-clock readings (2, 3) are the numbers the camera
+/// showed with the zone unrecorded, so `+00:00` is a placeholder and the digits
+/// pass through unshifted; instants (1, 4, 5) are converted to `tz` first — see
+/// [`crate::util::OutputTZ`]. Nothing downstream can tell the two apart once they
+/// are strings, so the conversion belongs here rather than at the bucketing.
 pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo, tz: OutputTZ) -> Option<String> {
     if let Some(dt) = info
         .supp_info
@@ -142,8 +126,7 @@ pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo, tz: OutputTZ) -> Option<
     if let Some(dt) = time_taken_from_exif {
         return Some(dt);
     }
-    // Videos have no EXIF; their capture time lives in the track metadata, which
-    // is the embedded-metadata equivalent of EXIF DateTimeOriginal for images.
+    // Videos have no EXIF; their capture time lives in the track metadata.
     if let Some(dt) = info
         .track_info
         .as_ref()
@@ -174,15 +157,11 @@ pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo, tz: OutputTZ) -> Option<
     None
 }
 
-/// Best guess at where the media was taken, as `(latitude, longitude)`, from the
-/// messy optional data, in order of preference:
-/// 1. EXIF GPS (embedded in images)
-/// 2. Track ISO 6709 GPS (embedded in videos)
-/// 3. SupplementalInfo `geo_data_exif` (Google's copy of the EXIF coordinates)
-/// 4. SupplementalInfo `geo_data` (Google's own, often absent)
+/// Best guess at `(latitude, longitude)`. Embedded metadata — EXIF for images,
+/// ISO 6709 track data for videos — is preferred over Google's supplemental
+/// copies, of which `geo_data_exif` is the more trustworthy.
 ///
-/// Embedded metadata is preferred over Google's supplemental copies. A `(0, 0)`
-/// pair is treated as absent at every source: EXIF and Takeout both write zeros
+/// `(0, 0)` is treated as absent everywhere: EXIF and Takeout both write zeros
 /// when they have no fix rather than omitting the value.
 pub(crate) fn best_guess_lat_long(info: &MediaFileInfo) -> Option<(f64, f64)> {
     use crate::util::non_zero_coords;
@@ -221,8 +200,8 @@ pub(crate) fn get_desired_media_path(
         match dt_r {
             Ok(dt) => {
                 date_dir = format!("{}/{:0>2}/{:0>2}", dt.year(), dt.month(), dt.day());
-                // A leap second reads as 1000-1999 sub-second milliseconds and
-                // would widen the fixed-width name by a digit; clamp it.
+                // A leap second reads as 1000-1999 ms and would widen the
+                // fixed-width name by a digit.
                 name = format!(
                     "{:0>2}{:0>2}-{:0>2}{:0>3}",
                     dt.hour(),
@@ -305,8 +284,7 @@ mod tests {
             best_guess_taken_dt(&info, tz()).ok_or_else(|| anyhow!("no date from modified"))?;
         assert_eq!(dt, AT_ZONE);
 
-        // When both are present, modified wins over created (created is the very
-        // last resort as it is unavailable in zips).
+        // Modified wins over created, which is unavailable in zips.
         info.modified = Some(ts);
         info.created = Some(1_600_000_000_000); // 2020-09-13T12:26:40Z
         let dt =
@@ -315,10 +293,8 @@ mod tests {
         Ok(())
     }
 
-    /// A filesystem stamp is an instant, and the archive is laid out on the
-    /// photographer's wall clock, so it is rendered in the output zone and bucketed
-    /// there. Rendered at UTC — which is what `DateTime::from_timestamp_millis`
-    /// gives unaided — this instant would be filed under the 9th at 01:46 instead.
+    /// Rendered at UTC — what `DateTime::from_timestamp_millis` gives unaided —
+    /// this instant would be filed under the 9th at 01:46 instead.
     #[test]
     fn test_filesystem_time_is_bucketed_in_the_output_tz() -> anyhow::Result<()> {
         use anyhow::anyhow;
@@ -352,7 +328,6 @@ mod tests {
             gps_iso_6709: None,
         };
 
-        // A video's embedded track creation time is used when present...
         let mut info = MediaFileInfo::new_for_test();
         info.track_info = Some(track("2024-04-18T11:24:26+00:00"));
         assert_eq!(
@@ -360,7 +335,7 @@ mod tests {
             Some("2024-04-18T11:24:26+00:00")
         );
 
-        // ...and is preferred over the file created/modified fallbacks.
+        // Preferred over the file created/modified fallbacks.
         info.created = Some(1_000_000_000_000);
         info.modified = Some(1_000_000_000_000);
         assert_eq!(
@@ -399,20 +374,18 @@ mod tests {
         info.supp_info = Some(supp(Some(geo(3.0, 4.0)), Some(geo(5.0, 6.0))));
         assert_eq!(best_guess_lat_long(&info), Some((1.0, 2.0)));
 
-        // No EXIF coords: geo_data_exif is preferred over geo_data.
+        // geo_data_exif over geo_data.
         info.exif_info = None;
         assert_eq!(best_guess_lat_long(&info), Some((3.0, 4.0)));
 
-        // Only geo_data present.
         info.supp_info = Some(supp(None, Some(geo(5.0, 6.0))));
         assert_eq!(best_guess_lat_long(&info), Some((5.0, 6.0)));
 
-        // (0, 0) EXIF is treated as absent, so we fall through to supplemental.
+        // (0, 0) is absent, so this falls through to supplemental.
         info.exif_info = Some(exif(Some(0.0), Some(0.0)));
         info.supp_info = Some(supp(Some(geo(7.0, 8.0)), None));
         assert_eq!(best_guess_lat_long(&info), Some((7.0, 8.0)));
 
-        // Nothing usable anywhere.
         info.exif_info = None;
         info.supp_info = Some(supp(Some(geo(0.0, 0.0)), None));
         assert_eq!(best_guess_lat_long(&info), None);
@@ -436,13 +409,12 @@ mod tests {
             gps_iso_6709: Some(gps.to_string()),
         };
 
-        // A video with only embedded track GPS: coordinates come from ISO 6709.
         let mut info = MediaFileInfo::new_for_test();
         info.exif_info = None;
         info.track_info = Some(track("+27.5916+086.5640/"));
         assert_eq!(best_guess_lat_long(&info), Some((27.5916, 86.5640)));
 
-        // Embedded EXIF still wins over the track string when both exist.
+        // EXIF still wins over the track string when both exist.
         info.exif_info = Some(PsExifInfo {
             tags: HashMap::new(),
             gps: None,

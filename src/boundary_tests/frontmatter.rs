@@ -32,9 +32,7 @@ fn split_frontmatter_never_panics_on_adversarial_input() {
         "---\n\u{0}\u{1}\u{2}\n---\nbody".to_string(),
     ];
     for text in cases {
-        // Contract: the two halves always reconstruct into the original text as
-        // far as the caller relies on. The only hard requirement is no panic;
-        // we additionally assert the pieces are the plain strings the type says.
+        // The hard requirement is no panic; the rest just pins the shape.
         let (fm, md) = split_frontmatter(&text);
         let _ = (fm.len(), md.len());
     }

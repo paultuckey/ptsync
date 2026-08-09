@@ -27,36 +27,30 @@ pub struct FileMetadata {
 pub trait FileSystem: Send + Sync {
     fn open(&self, path: &str) -> Result<Box<dyn ReadSeek>>;
     fn exists(&self, path: &str) -> bool;
-    // Walk returns all files recursively as relative paths
+    /// All files recursively, as `/`-separated relative paths.
     fn walk(&self) -> Vec<String>;
     fn metadata(&self, path: &str) -> Result<FileMetadata>;
 
-    /// A hex SHA-256 (see [`crate::util::HashInfo::long_checksum`])
-    /// already known for `path`, obtainable *without* reading the object body -
-    /// e.g. S3's native `x-amz-checksum-sha256` fetched via HeadObject. Returns
-    /// `None` when the backend has no such side-channel (local files, zips,
-    /// in-memory), in which case callers fall back to reading the bytes and
-    /// hashing.
+    /// A hex SHA-256 (see [`crate::util::HashInfo::long_checksum`]) already known
+    /// for `path` and obtainable *without* reading the object body — e.g. S3's
+    /// `x-amz-checksum-sha256` via HeadObject. `None` when the backend has no
+    /// such side-channel, leaving callers to read and hash the bytes.
     fn recorded_checksum(&self, _path: &str) -> Option<String> {
         None
     }
 }
 
-/// A [`FileSystem`] that can also be written to - kept separate because some
-/// backends are read-only (a zip source implements only `FileSystem`).
+/// Separate from [`FileSystem`] because some backends are read-only — a zip
+/// source implements only `FileSystem`.
 pub trait WritableFileSystem: FileSystem {
-    /// Write everything from `reader` to `path`, creating any parent directories.
-    /// Under `dry_run`, logs what it would do and writes nothing.
+    /// Creates any parent directories. Under `dry_run`, logs and writes nothing.
     fn write(&self, dry_run: bool, path: &str, reader: &mut dyn Read) -> Result<()>;
 
-    /// Write `bytes` to `path`, but only when they differ from what is already
-    /// stored there. Returns whether a write was performed - under `dry_run`,
-    /// whether one would have been.
+    /// Write only when `bytes` differ from what is already stored. Returns whether
+    /// a write happened — under `dry_run`, whether one would have.
     fn write_if_changed(&self, dry_run: bool, path: &str, bytes: &[u8]) -> Result<bool>;
 
-    /// Set the modified time on an already-written file when the backend supports
-    /// it. Backends without settable timestamps (e.g. object stores) may treat
-    /// this as a no-op.
+    /// A no-op on backends without settable timestamps, such as object stores.
     fn set_modified(&self, dry_run: bool, path: &str, modified_datetime: &Option<i64>);
 }
 
@@ -72,8 +66,8 @@ impl OsFileSystem {
         }
     }
 
-    /// True when `path` exists and its contents are exactly `bytes`. The length
-    /// is checked so an obviously different file is rejected without reading it all into memory.
+    /// The length is checked first so an obviously different file is rejected
+    /// without reading it all into memory.
     fn file_has_contents(&self, path: &str, bytes: &[u8]) -> bool {
         let p = self.root.join(path);
         let Ok(mut f) = File::open(&p) else {
@@ -198,10 +192,9 @@ fn scan_dir_recursively(files: &mut Vec<String>, dir_path: &Path, root_path: &Pa
         };
         let path = dir_entry.path();
         if path.is_file() {
-            // trim root path from the file path
             let relative_path = path.strip_prefix(root_path).unwrap_or(&path);
-            // Always record paths with `/` separators so a directory scan matches
-            // the zip scan (which uses `/`) and the output stays portable across Windows and Unix.
+            // `/` separators so a directory scan matches the zip scan and the
+            // output stays identical across Windows and Unix.
             let relative = relative_path
                 .to_string_lossy()
                 .replace(std::path::MAIN_SEPARATOR, "/");
@@ -238,17 +231,10 @@ impl ZipFileSystem {
             let Some(name) = enclosed_name.to_str() else {
                 continue;
             };
-            // `enclosed_name` on Windows comes back with `\` separators. Normalize to `/`
-            // keeping output identical across platforms. On Unix this is a no-op.
+            // `enclosed_name` comes back with `\` separators on Windows.
             let name_s = name.replace(std::path::MAIN_SEPARATOR, "/");
             file_names.push(name_s.clone());
 
-            // We only trust timestamps from the 0x5455 "extended timestamp" extra
-            // field, which records real UTC epoch seconds. The bare MS-DOS
-            // timestamp (`file.last_modified()`) carries no timezone, so we'd have
-            // to guess an offset to turn it into an instant - deliberately not
-            // done. A zip entry without the extra field therefore reports no
-            // times, and the date logic falls through to `undated/`.
             let (modified, created) = zip_extra_field_times(&file);
 
             metadata_cache.insert(
@@ -269,9 +255,11 @@ impl ZipFileSystem {
 }
 
 /// Modified and created times for a zip entry, in epoch milliseconds, taken only
-/// from the 0x5455 extended-timestamp extra field (UTC epoch seconds). Returns
-/// `(None, None)` when the entry carries no such field. Most archives only store
-/// the modification time there, so `created` is usually `None`.
+/// from the 0x5455 extended-timestamp extra field. The bare MS-DOS timestamp
+/// carries no timezone, so turning it into an instant would mean guessing an
+/// offset; an entry without the extra field reports no times at all and its date
+/// logic falls through to `undated/`. Most archives store only the modification
+/// time there, so `created` is usually `None`.
 fn zip_extra_field_times<R: std::io::Read>(
     file: &zip::read::ZipFile<'_, R>,
 ) -> (Option<i64>, Option<i64>) {
@@ -328,8 +316,7 @@ impl FileSystem for ZipFileSystem {
     }
 }
 
-/// Build a read-only input container from a path or an `s3://` URI: a local
-/// directory (`OsFileSystem`), a local zip (`ZipFileSystem`), or an S3 location.
+/// A local directory, a local zip, or an `s3://` location.
 pub fn open_input(input: &str) -> Result<Arc<dyn FileSystem>> {
     if is_s3_uri(input) {
         let uri = S3Uri::parse(input)
@@ -350,8 +337,7 @@ pub fn open_input(input: &str) -> Result<Arc<dyn FileSystem>> {
     }
 }
 
-/// Build a writable output container from a path or an `s3://` URI: a local
-/// directory (`OsFileSystem`) or an S3 location.
+/// A local directory or an `s3://` location.
 pub fn open_output(output: &str) -> Result<Arc<dyn WritableFileSystem>> {
     if is_s3_uri(output) {
         let uri = S3Uri::parse(output)
@@ -391,14 +377,14 @@ mod tests {
 
         let fs = ZipFileSystem::new(&temp_file.path().to_string_lossy())?;
 
-        // Over the streaming threshold, so the reader streams from the archive.
+        // Over the threshold, so the reader streams from the archive.
         let mut reader = fs.open("large.txt")?;
         let mut content = Vec::new();
         reader.read_to_end(&mut content)?;
         assert_eq!(content.len(), 200);
         assert_eq!(content, vec![b'a'; 200]);
 
-        // Under it, so the reader buffers the whole entry in memory.
+        // Under it, so the whole entry is buffered in memory.
         let mut reader = fs.open("small.txt")?;
         let mut content = Vec::new();
         reader.read_to_end(&mut content)?;
@@ -420,10 +406,10 @@ mod tests {
             zip_writer.finish()?;
         }
         let fs = ZipFileSystem::new(&temp_file.path().to_string_lossy())?;
-        // walk() must report `/`-separated names on every platform: `enclosed_name`
+        // walk() must report `/`-separated names on every platform, and every
+        // name it reports must round-trip back through open().
         let names = fs.walk();
         assert!(names.contains(&"Photos/Holiday/img.txt".to_string()));
-        // Every walked name must round-trip back through open().
         for name in &names {
             let mut reader = fs.open(name)?;
             let mut content = Vec::new();
@@ -441,16 +427,13 @@ mod tests {
         let path = "albums/trip.md";
         let on_disk = dir.path().join(path);
 
-        // First write creates the file and reports that it wrote.
         assert!(fs.write_if_changed(false, path, b"hello")?);
         let mtime_after_create = fs::metadata(&on_disk)?.modified()?;
 
-        // Re-writing identical bytes is a no-op: nothing is written and the
-        // file's modified time is untouched.
+        // Identical bytes leave even the modified time untouched.
         assert!(!fs.write_if_changed(false, path, b"hello")?);
         assert_eq!(mtime_after_create, fs::metadata(&on_disk)?.modified()?);
 
-        // Changed content is written through.
         assert!(fs.write_if_changed(false, path, b"hello world")?);
         assert_eq!(fs::read(&on_disk)?, b"hello world");
         Ok(())
@@ -461,8 +444,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let fs = OsFileSystem::new(&dir.path().to_string_lossy());
 
-        // A dry run reports it would write (content differs from the absent file)
-        // but must not actually create it.
+        // Reports it would write, but must not create the file.
         assert!(fs.write_if_changed(true, "albums/trip.md", b"hello")?);
         assert!(!dir.path().join("albums/trip.md").exists());
         Ok(())
@@ -470,8 +452,7 @@ mod tests {
 
     #[test]
     fn open_factories_route_scheme_and_reject_malformed_s3() {
-        // A malformed `s3://` URI is a hard error, never silently treated as a
-        // local path/zip.
+        // Never silently treated as a local path or zip.
         assert!(open_input("s3://").is_err());
         assert!(open_output("s3://").is_err());
         assert!(open_input("test").is_ok());

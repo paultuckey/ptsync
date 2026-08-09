@@ -17,10 +17,10 @@ pub(crate) struct HashInfo {
     pub(crate) long_checksum: String,
 }
 
-/// Similar to github generate a short and long hash from the bytes
+/// A short and long sha256 of the bytes, in the style of git.
 pub(crate) fn checksum_bytes<R: Read + Seek>(reader: &mut R) -> Result<HashInfo> {
     let mut hasher = Sha256::new();
-    let mut buffer = [0; 64 * 1024]; // Read in 64KB chunks
+    let mut buffer = [0; 64 * 1024];
     reader.seek(SeekFrom::Start(0))?;
     loop {
         let count = reader.read(&mut buffer)?;
@@ -41,9 +41,9 @@ pub(crate) fn checksum_bytes<R: Read + Seek>(reader: &mut R) -> Result<HashInfo>
 #[derive(Debug, Clone)]
 pub(crate) struct ScanInfo {
     pub(crate) file_path: String,
-    /// Unix Epoch time of last file modification
+    /// Unix milliseconds.
     pub(crate) modified_datetime: Option<i64>,
-    /// Unix Epoch time file creation
+    /// Unix milliseconds.
     pub(crate) created_datetime: Option<i64>,
     pub(crate) file_size: u64,
     pub(crate) quick_file_type: QuickFileType,
@@ -136,28 +136,24 @@ impl OutputTZ {
     /// The zone for this run: `--timezone` if given, else a UTC offset in
     /// [`TZ_ENV`], else the machine's own.
     ///
-    /// A flag exists at all because `TZ` is a Unix convention. On Windows chrono's
+    /// A flag exists at all because `TZ` is a Unix convention: on Windows chrono's
     /// [`Local`] reads the zone from the Win32 API and never looks at `TZ`, so
-    /// without one there is no way to ask for a particular zone — which broke the
-    /// snapshot test on a Windows runner, where every date silently came out at
-    /// UTC, and left Windows users with no knob at all.
+    /// there would otherwise be no way to ask for a particular zone.
     pub(crate) fn resolve(arg: Option<&str>) -> Result<Self> {
         Self::resolve_with(arg, std::env::var(TZ_ENV).ok().as_deref())
     }
 
     /// The environment is passed in rather than read here so the precedence rules
-    /// can be tested without touching the real one: tests share a process, so a
+    /// can be tested without touching the real one — tests share a process, so a
     /// test that set `TZ` would leak into whichever ran alongside it.
     fn resolve_with(arg: Option<&str>, tz_env: Option<&str>) -> Result<Self> {
-        // A malformed flag is an error rather than a warning-and-carry-on. Falling
-        // back to the machine's zone would put the whole archive somewhere other
-        // than asked for, and a typo in a CI environment would show up as a
-        // puzzling diff rather than as the mistake it is.
+        // A malformed flag is an error rather than a warning-and-carry-on: falling
+        // back to the machine's zone would file the whole archive somewhere other
+        // than asked for.
         //
-        // chrono does the parsing, so `±HH:MM` and `±HHMM` are the forms, and
-        // `UTC` is spelled `+00:00`. Two of its habits carry through: it reads an
-        // offset off the front and ignores the rest, so `+12:00junk` is twelve
-        // hours east, and only IANA names are ruled out for certain.
+        // chrono does the parsing, so the forms are `±HH:MM` and `±HHMM`, `UTC` is
+        // spelled `+00:00`, and `+12:00junk` is twelve hours east because it reads
+        // an offset off the front and ignores the rest.
         if let Some(raw) = arg.map(str::trim).filter(|raw| !raw.is_empty()) {
             let offset = FixedOffset::from_str(raw).map_err(|_| {
                 anyhow::anyhow!(
@@ -167,11 +163,9 @@ impl OutputTZ {
             })?;
             return Ok(OutputTZ::Fixed(offset));
         }
-        // `TZ` usually holds an IANA name (`Pacific/Auckland`) or a POSIX rule
-        // (`EST5EDT`), neither of which is an offset. That is not an error: on Unix
-        // [`Local`] resolves those itself, DST and all, so the machine zone already
-        // *is* what `TZ` asked for. Only Windows ignores it, and there an offset is
-        // the way to say it.
+        // `TZ` usually holds an IANA name or a POSIX rule, neither of which is an
+        // offset. Not an error: on Unix [`Local`] resolves those itself, DST and
+        // all, so the machine zone already *is* what `TZ` asked for.
         match tz_env.map(str::trim).filter(|raw| !raw.is_empty()) {
             Some(raw) => match FixedOffset::from_str(raw) {
                 Ok(offset) => Ok(OutputTZ::Fixed(offset)),
@@ -184,15 +178,13 @@ impl OutputTZ {
         }
     }
 
-    /// Render an absolute instant, as epoch milliseconds. `None` when the value is
-    /// out of the range chrono can represent, so an absurd timestamp becomes no
-    /// date at all rather than a plausible-looking wrong one.
+    /// Render an instant given as epoch milliseconds. `None` when it is out of
+    /// chrono's range, so an absurd timestamp becomes no date at all rather than a
+    /// plausible-looking wrong one.
     pub(crate) fn render_millis(&self, ts_millis: i64) -> Option<String> {
         Some(self.render(DateTime::from_timestamp_millis(ts_millis)?))
     }
 
-    /// Render an instant that has already been parsed — a GPS reading, which is
-    /// UTC by definition rather than by assumption.
     pub(crate) fn render(&self, instant: DateTime<Utc>) -> String {
         match self {
             OutputTZ::Machine => instant.with_timezone(&Local).to_rfc3339(),
@@ -201,9 +193,8 @@ impl OutputTZ {
     }
 }
 
-/// Pair up a latitude/longitude only when both are present and not the `(0, 0)`
-/// "null island" sentinel. EXIF and Google Takeout both emit zeros when they
-/// have no fix rather than omitting the value, so we treat that as absent.
+/// Pair up a latitude/longitude, treating the `(0, 0)` "null island" sentinel as
+/// absent — EXIF and Takeout both emit zeros when they have no fix.
 pub(crate) fn non_zero_coords(lat: Option<f64>, long: Option<f64>) -> Option<(f64, f64)> {
     match (lat, long) {
         (Some(lat), Some(long)) if lat != 0.0 || long != 0.0 => Some((lat, long)),
@@ -214,13 +205,13 @@ pub(crate) fn non_zero_coords(lat: Option<f64>, long: Option<f64>) -> Option<(f6
 /// Standard geohash base-32 alphabet (omits a, i, l, o).
 const GEOHASH_BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
 
-/// Geohash length stored per item; 12 chars preserves full source precision
-/// while still allowing coarser clustering via prefix matching.
+/// Preserves full source precision while still allowing coarser clustering by
+/// prefix.
 pub(crate) const GEOHASH_PRECISION: usize = 12;
 
-/// Encode a latitude/longitude as a geohash of `precision` base-32 characters.
-/// Nearby points share a common prefix, so a `geohash LIKE 'gcpv%'` query
-/// clusters photos by location without needing any geocoding.
+/// Encode a latitude/longitude as `precision` base-32 characters. Nearby points
+/// share a prefix, so `geohash LIKE 'gcpv%'` clusters photos by location without
+/// any geocoding.
 pub(crate) fn geohash_encode(lat: f64, lon: f64, precision: usize) -> String {
     let mut lat_range = (-90.0f64, 90.0f64);
     let mut lon_range = (-180.0f64, 180.0f64);
@@ -267,42 +258,35 @@ pub(crate) fn orientation(width: Option<i64>, height: Option<i64>) -> Option<&'s
     }
 }
 
-/// SHA-256 (first 16 hex chars) of a string — a short, stable, content-derived
-/// id that is the same on any machine or run.
+/// First 16 hex chars of the SHA-256 — the same on any machine or run.
 fn stable_hash16(s: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
     hex::encode(hasher.finalize()).chars().take(16).collect()
 }
 
-/// Stable identifier for a person from their name. The name is trimmed,
-/// lowercased, and Unicode-normalized (NFC) before hashing, so the same person
-/// resolves to the same id regardless of case or whether the source encoded
-/// accents/scripts as precomposed or combining characters (e.g. macOS NFD vs
-/// NFC). Works for any alphabet since `to_lowercase` is Unicode-aware and the
-/// hash is over UTF-8 bytes.
+/// Stable identifier for a person. Lowercasing and NFC normalisation mean the
+/// same person resolves to the same id whatever the case, and whether the source
+/// encoded accents precomposed or combining (macOS writes NFD).
 pub(crate) fn person_id_for(name: &str) -> String {
     let lowered = name.trim().to_lowercase();
     let normalized: String = lowered.nfc().collect();
     stable_hash16(&normalized)
 }
 
-/// Stable id derived from a path: trimmed and Unicode-normalized (NFC) before
-/// hashing. Paths are case-sensitive, so case is preserved. Reproducible across
-/// machines, runs, and database rebuilds for the same archive layout.
+/// Stable id derived from a path. NFC-normalised but not lowercased, since paths
+/// are case-sensitive.
 fn path_id(path: &str) -> String {
     let normalized: String = path.trim().nfc().collect();
     stable_hash16(&normalized)
 }
 
-/// Stable identifier for an album from its path (see [`path_id`]).
 pub(crate) fn album_id_for(album_path: &str) -> String {
     path_id(album_path)
 }
 
-/// Stable identifier for a media item from its path within the archive. Keyed on
-/// the path, not the content, so duplicate files (same bytes, different paths)
-/// stay as distinct rows (one row per file).
+/// Keyed on the path rather than the content, so duplicate files (same bytes,
+/// different paths) stay as distinct rows.
 pub(crate) fn media_item_id_for(media_path: &str) -> String {
     path_id(media_path)
 }
@@ -313,12 +297,8 @@ mod tests {
     use crate::fs::{FileMetadata, OsFileSystem, ReadSeek, ZipFileSystem};
     use anyhow::anyhow;
 
-    /// Which of `--timezone` and `TZ` wins, what a value neither of them can use
-    /// does, and the spellings the README and `--help` promise. Driven through
-    /// [`OutputTZ::resolve_with`] rather than [`OutputTZ::resolve`]: tests share
-    /// one process, so reading the real environment would make the result depend
-    /// on the developer's shell — the very thing the fixed test zone exists to
-    /// avoid — and writing it would leak into whichever test ran alongside.
+    /// Covers the precedence rules and the spellings the README and `--help`
+    /// promise.
     #[test]
     fn test_output_tz_prefers_the_flag_over_the_environment() -> Result<()> {
         let fixed = |secs: i32| -> Result<OutputTZ> {
@@ -336,41 +316,33 @@ mod tests {
         assert_eq!(resolve(Some("+0545"), None)?, fixed(5 * 3600 + 45 * 60)?);
         assert_eq!(resolve(Some("+00:00"), None)?, hours(0)?);
         assert_eq!(resolve(None, Some("+12:00"))?, hours(12)?);
-        // The flag is the more specific instruction, so it wins outright — it is
-        // not merely a default for an unset `TZ`.
+        // The flag wins outright; it is not merely a default for an unset `TZ`.
         assert_eq!(resolve(Some("-04:00"), Some("+12:00"))?, hours(-4)?);
 
-        // Nothing to go on, so the machine's own zone.
         assert_eq!(resolve(None, None)?, OutputTZ::Machine);
         assert_eq!(resolve(Some("  "), Some(""))?, OutputTZ::Machine);
-        // A `TZ` this cannot parse is the normal case on Unix, where `Local`
-        // resolves the name itself — the machine zone already is what was asked
-        // for, so it must not be an error.
+        // An unparseable `TZ` is the normal case on Unix, where `Local` resolves
+        // the name itself, so it must not be an error — nor shadow a good flag.
         assert_eq!(resolve(None, Some("Pacific/Auckland"))?, OutputTZ::Machine);
         assert_eq!(resolve(None, Some("EST5EDT"))?, OutputTZ::Machine);
-        // ...and an unparseable `TZ` must not shadow a good flag.
         assert_eq!(resolve(Some("+12:00"), Some("EST5EDT"))?, hours(12)?);
 
         // The flag is a direct instruction, so a name it cannot read stops the run
         // rather than quietly filing the archive somewhere else.
         assert!(resolve(Some("Pacific/Auckland"), None).is_err());
-        // `UTC` is one of those names: chrono takes offsets, so zero is `+00:00`.
         assert!(resolve(Some("UTC"), None).is_err());
         assert!(resolve(Some("Z"), None).is_err());
 
-        // chrono's own warts, inherited deliberately rather than papered over: it
-        // reads an offset off the front and ignores whatever follows, and it wants
-        // both fields padded.
+        // chrono's warts, inherited deliberately: an offset read off the front
+        // with the rest ignored, and both fields required to be padded.
         assert_eq!(resolve(Some("+12:00junk"), None)?, hours(12)?);
         assert!(resolve(Some("+12"), None).is_err());
         Ok(())
     }
 
-    /// An instant is rendered at the offset it is handed, and that offset decides
-    /// which `yyyy/mm/dd` directory the file lands in. Asserted against fixed
-    /// offsets rather than `Local`, so the expectations are the same everywhere —
-    /// reading `Local` here would only prove the machine agrees with itself, and
-    /// would pass on a UTC build agent no matter what the code did.
+    /// The offset an instant renders at decides which `yyyy/mm/dd` directory the
+    /// file lands in. Asserted against fixed offsets rather than `Local`, which
+    /// would only prove the machine agrees with itself.
     #[test]
     fn test_instant_renders_at_the_offset_it_is_given() -> Result<()> {
         use chrono::FixedOffset;
@@ -380,10 +352,9 @@ mod tests {
             OutputTZ::Fixed(FixedOffset::east_opt(hours * 3600)?).render_millis(ts)
         };
 
-        // Auckland reads that instant as lunchtime on the 22nd...
+        // Auckland reads that instant as lunchtime on the 22nd, New York as the
+        // evening of the 21st — a different directory.
         assert_eq!(at(12).as_deref(), Some("2024-05-22T12:17:51+12:00"));
-        // ...and New York as the evening of the 21st: a different directory, and
-        // the reason the archive layout depends on where it was built.
         assert_eq!(at(-4).as_deref(), Some("2024-05-21T20:17:51-04:00"));
         assert_eq!(at(0).as_deref(), Some("2024-05-22T00:17:51+00:00"));
 
@@ -406,9 +377,8 @@ mod tests {
         Ok(())
     }
 
-    /// A backend that reports a checksum from "metadata" but whose body read
-    /// always fails. It proves `is_existing_file_same` decides from the recorded
-    /// checksum alone and never touches the bytes - the S3 HeadObject fast path.
+    /// Reports a checksum from "metadata" but fails every body read, so
+    /// `is_existing_file_same` can only pass by using the recorded checksum.
     struct MetaOnlyFs {
         checksum: String,
     }
@@ -435,8 +405,6 @@ mod tests {
 
     #[test]
     fn is_existing_file_same_uses_recorded_checksum_without_reading_body() {
-        // A matching recorded checksum resolves to "same" without ever calling
-        // open() (which errors here); a mismatch resolves to "different".
         let fs = MetaOnlyFs {
             checksum: "abc123".to_string(),
         };
@@ -462,8 +430,8 @@ mod tests {
             .find(|i| i.file_path == "Canon_40D.jpg")
             .ok_or_else(|| anyhow!("Canon_40D.jpg not found in zip"))?;
         // The fixture's 0x5455 extended-timestamp field records the mtime as
-        // 2025-06-14T04:09:22Z; we read that UTC instant, not the zoneless DOS
-        // time. The field carries no creation time, so `created` stays absent.
+        // 2025-06-14T04:09:22Z, and that UTC instant is what is read rather than
+        // the zoneless DOS time. It carries no creation time.
         assert_eq!(si.modified_datetime, Some(1749874162000));
         assert_eq!(si.created_datetime, None);
         Ok(())
@@ -473,7 +441,6 @@ mod tests {
     fn test_geohash_encode() {
         // Canonical reference value from the geohash spec.
         assert_eq!(geohash_encode(42.6, -5.6, 5), "ezs42");
-        // Nearby points share a prefix; far-apart points do not.
         let sydney = geohash_encode(-33.8688, 151.2093, 9);
         let sydney_near = geohash_encode(-33.8689, 151.2094, 9);
         let london = geohash_encode(51.5074, -0.1278, 9);
@@ -494,28 +461,24 @@ mod tests {
     fn test_person_id_stable_and_case_insensitive() {
         let a = person_id_for("Tim Tam");
         assert_eq!(a.len(), 16);
-        // Case and surrounding whitespace do not change the id.
         assert_eq!(a, person_id_for("tim tam"));
         assert_eq!(a, person_id_for("  TIM TAM  "));
-        // Different names differ.
         assert_ne!(a, person_id_for("Ada Lovelace"));
     }
 
     #[test]
     fn test_person_id_non_ascii_and_normalization() {
-        // Non-Latin scripts hash fine and fold case (Cyrillic, Greek).
+        // Case folds in non-Latin scripts too.
         assert_eq!(person_id_for("Привет"), person_id_for("привет"));
         assert_eq!(person_id_for("ΑΘΗΝΑ"), person_id_for("αθηνα"));
-        // Same name, different Unicode forms: precomposed "é" (U+00E9) vs
-        // decomposed "e"+combining acute (U+0301) — must yield the same id.
+        // Precomposed "é" (U+00E9) vs decomposed "e" + combining acute (U+0301).
         let precomposed = "Jos\u{00e9}";
         let decomposed = "Jose\u{0301}";
         assert_ne!(precomposed.as_bytes(), decomposed.as_bytes());
         assert_eq!(person_id_for(precomposed), person_id_for(decomposed));
     }
 
-    /// Album and media ids share the same path-keyed derivation, so both are
-    /// checked here against the one set of rules.
+    /// Album and media ids share the one path-keyed derivation.
     #[test]
     fn test_path_ids_stable() {
         for id_for in [
@@ -523,12 +486,10 @@ mod tests {
             album_id_for as fn(&str) -> String,
         ] {
             let a = id_for("Google Photos/Holiday/IMG_0001.jpg");
-            // Deterministic, and surrounding whitespace does not change the id.
             assert_eq!(a, id_for("  Google Photos/Holiday/IMG_0001.jpg  "));
             assert_ne!(a, id_for("Google Photos/Holiday/IMG_0002.jpg"));
-            // Path-keyed, not content-keyed: two paths never share an id.
             assert_ne!(id_for("a/IMG.jpg"), id_for("b/IMG.jpg"));
-            // Paths are case-sensitive (unlike people).
+            // Paths are case-sensitive, unlike people.
             assert_ne!(a, id_for("google photos/holiday/img_0001.jpg"));
         }
     }

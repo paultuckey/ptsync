@@ -14,14 +14,12 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::sync::{Mutex, OnceLock};
 use tracing::debug;
 
-/// Objects larger than this are streamed to a temp file on `open` rather than
-/// buffered in memory, so a large video doesn't have to fit in RAM (mirrors
-/// `ZipFileSystem`).
-const MAX_MEM_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
+/// Objects above this are streamed to a temp file on `open` rather than buffered,
+/// so a large video need not fit in RAM. Mirrors `ZipFileSystem`.
+const MAX_MEM_THRESHOLD: u64 = 100 * 1024 * 1024;
 
-/// Region / endpoint / profile overrides for `s3://` access, from the CLI. A
-/// `None` field defers to the default AWS chain (env vars, `~/.aws`, SSO, IMDS),
-/// so these layer *over* it rather than replacing it.
+/// CLI overrides for `s3://` access. A `None` field defers to the default AWS
+/// chain (env vars, `~/.aws`, SSO, IMDS), so these layer over it.
 #[derive(Clone, Debug, Default)]
 pub struct S3Config {
     pub region: Option<String>,
@@ -53,8 +51,8 @@ async fn build_client(config: &S3Config) -> Client {
     }
     let sdk_config = loader.load().await;
     if config.endpoint_url.is_some() {
-        // Custom endpoints (MinIO, localstack, …) generally need path-style
-        // addressing - bucket-as-subdomain won't resolve there.
+        // Custom endpoints (MinIO, localstack, …) need path-style addressing;
+        // bucket-as-subdomain won't resolve there.
         let conf = aws_sdk_s3::config::Builder::from(&sdk_config)
             .force_path_style(true)
             .build();
@@ -64,28 +62,26 @@ async fn build_client(config: &S3Config) -> Client {
     }
 }
 
-/// The region a bucket actually lives in, when it differs from the one the
-/// client is pointed at - else `None`.
+/// The region a bucket actually lives in, when it differs from the one the client
+/// is pointed at.
 ///
-/// S3 signs per-region and a region-specific endpoint won't redirect: asking
-/// `ap-southeast-2` about a bucket in `ap-southeast-6` fails with
-/// `IllegalLocationConstraintException` rather than being routed. AWS does put
-/// the bucket's real region in `x-amz-bucket-region` on those failures, so a
-/// cheap `HeadBucket` probe is enough to learn it and rebuild the client - no
-/// need for the caller to know each bucket's region up front.
+/// S3 signs per-region and a region-specific endpoint won't redirect — asking the
+/// wrong one fails with `IllegalLocationConstraintException`. AWS puts the real
+/// region in `x-amz-bucket-region` on those failures, so a cheap `HeadBucket`
+/// probe saves the caller from knowing each bucket's region up front.
 async fn bucket_region_override(
     client: &Client,
     bucket: &str,
     config: &S3Config,
 ) -> Option<String> {
-    // S3-compatible stores (MinIO, localstack) serve every bucket from the one
-    // endpoint and don't set the header; skip the probe entirely.
+    // S3-compatible stores serve every bucket from the one endpoint and don't set
+    // the header.
     if config.endpoint_url.is_some() {
         return None;
     }
-    // Success means the region is already right. A failure for any *other*
-    // reason (missing bucket, no credentials) carries no region header, so this
-    // falls through to `None` and the real error surfaces from the listing.
+    // Success means the region is already right. A failure for any *other* reason
+    // carries no region header, so this falls through to `None` and the real error
+    // surfaces from the listing.
     let err = client.head_bucket().bucket(bucket).send().await.err()?;
     let actual = err.raw_response()?.headers().get("x-amz-bucket-region")?;
     let current = client.config().region().map(|r| r.as_ref());
@@ -97,16 +93,15 @@ async fn bucket_region_override(
 /// directory scanners.
 pub struct S3FileSystem {
     client: Client,
-    /// Owns the async runtime the blocking `FileSystem` methods drive. A
-    /// multi-thread runtime so concurrent `open` calls from the parallel
-    /// inspection stage can each `block_on` without contending.
+    /// Multi-thread so concurrent `open` calls from the parallel inspection stage
+    /// can each `block_on` without contending.
     rt: tokio::runtime::Runtime,
     uri: S3Uri,
-    /// The listing, filled at construction: the source of truth for
-    /// `walk`/`exists`/`metadata`, so no per-call network. Behind a `Mutex`
-    /// because writes insert into it - so `exists` sees objects written *earlier
-    /// in this same run* and same-instant collisions get suffixed instead of
-    /// overwriting. A `BTreeMap` keeps `walk` order stable (reproducibility).
+    /// Filled at construction and the source of truth for `walk`/`exists`/
+    /// `metadata`, so none of them hit the network. Writes insert into it, so
+    /// `exists` sees objects written earlier in this same run and same-instant
+    /// collisions get suffixed rather than overwriting. `BTreeMap` keeps `walk`
+    /// order stable.
     objects: Mutex<BTreeMap<String, FileMetadata>>,
 }
 
@@ -133,9 +128,8 @@ impl S3FileSystem {
         Self::from_client(client, uri, rt)
     }
 
-    /// Construct from an already-built client and runtime, running the initial
-    /// listing. `new` builds the default AWS client from the environment; tests
-    /// inject a mocked client so the real listing/read code runs offline.
+    /// Runs the initial listing. Tests inject a mocked client here so the real
+    /// listing and read code runs offline.
     fn from_client(client: Client, uri: S3Uri, rt: tokio::runtime::Runtime) -> Result<Self> {
         let objects = rt.block_on(list_objects(&client, &uri))?;
         debug!(
@@ -152,8 +146,8 @@ impl S3FileSystem {
         })
     }
 
-    /// Record an object we just uploaded in the cache, so `exists`/`metadata`
-    /// reflect this run's writes.
+    /// Cache a just-uploaded object so `exists`/`metadata` reflect this run's
+    /// writes.
     fn note_written(&self, path: &str, len: u64) {
         if let Ok(mut objects) = self.objects.lock() {
             objects.insert(
@@ -208,8 +202,7 @@ async fn list_objects(client: &Client, uri: &S3Uri) -> Result<BTreeMap<String, F
             if rel.is_empty() {
                 continue;
             }
-            // S3 LastModified is a wall-clock instant (second precision); there
-            // is no creation time.
+            // S3 has no creation time, and LastModified is second precision.
             let modified = obj.last_modified().map(|dt| dt.secs() * 1000);
             let len = obj.size().unwrap_or(0).max(0) as u64;
             objects.insert(
@@ -288,8 +281,7 @@ impl FileSystem for S3FileSystem {
     }
 
     fn recorded_checksum(&self, path: &str) -> Option<String> {
-        // Option A: read the object's native SHA-256 (x-amz-checksum-sha256) via
-        // a metadata-only HeadObject, so the dedup check can skip re-uploads
+        // A metadata-only HeadObject, so the dedup check can skip re-uploads
         // without downloading the body.
         let key = self.uri.key_for(path);
         self.rt.block_on(async {
@@ -304,7 +296,7 @@ impl FileSystem for S3FileSystem {
                 .ok()?;
             let b64 = head.checksum_sha256()?;
             // A multipart object's SHA-256 is composite ("base64-N"), not the
-            // whole-file hash, so it can't be compared to ptsync's checksum.
+            // whole-file hash, so it is not comparable.
             if b64.contains('-') {
                 return None;
             }
@@ -337,8 +329,8 @@ impl WritableFileSystem for S3FileSystem {
                 .bucket(&self.uri.bucket)
                 .key(&key)
                 .body(body)
-                // Store the native SHA-256 so a later run can dedup via HeadObject
-                // (Option A) instead of re-downloading.
+                // Stores the native SHA-256, so a later run can dedup via
+                // HeadObject instead of re-downloading.
                 .checksum_algorithm(ChecksumAlgorithm::Sha256)
                 .send()
                 .await
@@ -355,8 +347,8 @@ impl WritableFileSystem for S3FileSystem {
             let new_hash = crate::util::checksum_bytes(&mut Cursor::new(bytes))
                 .ok()
                 .map(|h| h.long_checksum);
-            // Prefer the native checksum (no download); fall back to fetching and
-            // comparing bytes when the object has no comparable checksum.
+            // The native checksum needs no download; fetching and comparing bytes
+            // is the fallback when the object has no comparable one.
             let same = match (self.recorded_checksum(path), new_hash) {
                 (Some(existing), Some(new)) => existing == new,
                 _ => self.object_bytes(path).map(|b| b == bytes).unwrap_or(false),
@@ -392,14 +384,14 @@ impl WritableFileSystem for S3FileSystem {
 
     fn set_modified(&self, _dry_run: bool, _path: &str, _modified_datetime: &Option<i64>) {
         // S3 objects carry no settable mtime; the authoritative time lives in the
-        // sidecar's frontmatter (consistent with FakeS3FileSystem).
+        // sidecar's frontmatter.
     }
 }
 
-/// An in-memory fake of an S3 bucket for tests. The real `S3FileSystem` needs
-/// exhaustive per-operation SDK mocks, so the sync-level test drives the write
-/// path against this lighter double instead. It models what matters: a flat
-/// key→bytes namespace, no mtime, and a native checksum via `recorded_checksum`.
+/// In-memory fake of an S3 bucket, modelling what matters: a flat key→bytes
+/// namespace, no mtime, and a native checksum via `recorded_checksum`. Lighter
+/// than the per-operation SDK mocks the real `S3FileSystem` needs, so the
+/// sync-level tests drive the write path against this instead.
 #[cfg(test)]
 pub(crate) struct FakeS3FileSystem {
     objects: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
@@ -459,9 +451,8 @@ impl crate::fs::FileSystem for FakeS3FileSystem {
     }
 
     fn recorded_checksum(&self, path: &str) -> Option<String> {
-        // Mirrors S3's native x-amz-checksum-sha256: the object's SHA-256 is
-        // available without downloading the body, so `is_existing_file_same`
-        // takes its fast path (Option A) instead of GET+rehash.
+        // Mirrors S3's native x-amz-checksum-sha256, so `is_existing_file_same`
+        // takes its no-download path here too.
         let objects = self.objects.lock().ok()?;
         let bytes = objects.get(path)?;
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
@@ -519,10 +510,8 @@ impl crate::fs::WritableFileSystem for FakeS3FileSystem {
     }
 }
 
-// Offline unit tests that drive the *real* `S3FileSystem` (listing, pagination,
-// prefix mapping, GetObject) against a mocked AWS SDK - no network, no
-// credentials. The mock intercepts at the SDK operation layer, so the actual
-// `list_objects`/`open` code runs.
+// The mock intercepts at the SDK operation layer, so the real `S3FileSystem`
+// listing and read code runs offline with no credentials.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,7 +533,6 @@ mod tests {
             .build()
     }
 
-    /// Build an `S3FileSystem` over a mock client, running the real listing.
     fn mock_fs(uri: &str, client: aws_sdk_s3::Client) -> anyhow::Result<S3FileSystem> {
         let uri = S3Uri::parse(uri).ok_or_else(|| anyhow!("bad test uri {uri}"))?;
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -607,8 +595,7 @@ mod tests {
     #[test]
     fn lists_paginates_across_pages() -> anyhow::Result<()> {
         crate::test_util::setup_log();
-        // Page 1 is truncated with a continuation token, so the paginator must
-        // issue a second call to collect page 2.
+        // Page 1 is truncated, so the paginator must issue a second call.
         let list = mock!(aws_sdk_s3::Client::list_objects_v2)
             .sequence()
             .output(|| {
@@ -636,8 +623,7 @@ mod tests {
         crate::test_util::setup_log();
         let list = mock!(aws_sdk_s3::Client::list_objects_v2)
             .then_output(|| ListObjectsV2Output::builder().is_truncated(false).build());
-        // The upload must target the prefix-rejoined key and request the SHA-256
-        // checksum (Option A).
+        // The upload must target the prefix-rejoined key and request the SHA-256.
         let put = mock!(aws_sdk_s3::Client::put_object)
             .match_requests(|req| {
                 req.key() == Some("out/2024/x.jpg")
@@ -681,7 +667,6 @@ mod tests {
         crate::test_util::setup_log();
         let list = mock!(aws_sdk_s3::Client::list_objects_v2)
             .then_output(|| ListObjectsV2Output::builder().is_truncated(false).build());
-        // A multipart object's checksum is composite ("base64-N") - not comparable.
         let head = mock!(aws_sdk_s3::Client::head_object).then_output(|| {
             HeadObjectOutput::builder()
                 .checksum_sha256("YWJjZA==-3")
@@ -711,8 +696,8 @@ mod tests {
                 .checksum_sha256(b64.clone())
                 .build()
         });
-        // No put_object rule on purpose: a skip must not upload anything (a stray
-        // PutObject would have no matching rule and fail the test).
+        // No put_object rule on purpose: a stray PutObject would match nothing and
+        // fail the test.
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &head]);
         let fs = mock_fs("s3://bucket/out", client)?;
 

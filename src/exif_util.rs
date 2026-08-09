@@ -1,3 +1,5 @@
+//! EXIF parsing. Parses as best it can and leaves judging validity to callers.
+
 use crate::util::OutputTZ;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use nom_exif::{EntryValue, ExifIter, ExifIterEntry, ExifTag, MediaKind, MediaParser, MediaSource};
@@ -6,23 +8,12 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use tracing::debug;
 
-/*
-
-Util file to help with exif parsing.
-
-it's not the responsibility of this module to decide if exif data is valid or not, just to
-parse it best as possible.
-
-store in db as json
-
- */
-
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all(serialize = "camelCase"))]
 pub(crate) struct PsExifInfo {
-    // dates as ISO 8601
+    /// Dates are ISO 8601.
     pub(crate) tags: HashMap<String, String>,
-    // as iso6709
+    /// ISO 6709.
     pub(crate) gps: Option<String>,
     pub(crate) latitude: Option<f64>,
     pub(crate) longitude: Option<f64>,
@@ -54,10 +45,10 @@ pub(crate) fn parse_exif_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<O
                 let tag_name = tag_enum.to_string();
                 let s_o = field_to_opt_string(tag_enum, &entry);
                 let Some(s) = s_o else {
-                    continue; // only support tags with value
+                    continue;
                 };
                 if s.len() > 1024 {
-                    continue; // skip large values
+                    continue;
                 }
                 m.insert(tag_name, s);
             }
@@ -87,34 +78,25 @@ pub(crate) fn parse_exif_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<O
 fn field_to_opt_string(tag: ExifTag, field: &ExifIterEntry) -> Option<String> {
     let value = field.clone().into_result().ok()?;
     if matches!(value, EntryValue::Undefined(_)) {
-        return None; // skip undefined values
+        return None;
     }
     if tag == ExifTag::GPSTimeStamp {
-        // Not a string at all, and the generic rendering of it is unusable.
-        // Falls back to that rendering rather than dropping a tag we cannot
-        // make sense of - deciding what is valid is not this module's job.
         return gps_time_of_day(&value).or_else(|| Some(value.to_string()));
     }
-    // dates are returned as a ISO 8601 string with no timezone
     Some(value.to_string())
 }
 
 /// Render `GPSTimeStamp` as `hh:mm:ss`, with a fraction only when there is one.
 ///
-/// The tag is three rationals — hour, minute, second — not a string, and the
-/// seconds one is a rational precisely so it can carry a fraction. Rendered
-/// generically it comes out as `URationalArray[19/1 (19.0000), …]`, which is no
-/// use to a date parser and no use to a human reading the stored metadata, so it
-/// is normalised here on the way in.
-///
-/// Values outside the ranges a clock can hold are rejected; a receiver with
-/// nothing to report writes zeros, which are a legitimate midnight and kept.
+/// The tag is three rationals, not a string; rendered generically it comes out
+/// as `URationalArray[19/1 (19.0000), …]`, useless to a date parser. All-zeros
+/// is a legitimate midnight and is kept.
 fn gps_time_of_day(value: &EntryValue) -> Option<String> {
     let [hours, minutes, seconds] = value.as_urational_slice()? else {
         return None;
     };
     let (hours, minutes, seconds) = (hours.to_f64()?, minutes.to_f64()?, seconds.to_f64()?);
-    // Seconds allow 60 for a leap second; the date parser is the final judge.
+    // Seconds allow 60 for a leap second.
     if !(0.0..24.0).contains(&hours)
         || !(0.0..60.0).contains(&minutes)
         || !(0.0..61.0).contains(&seconds)
@@ -135,81 +117,64 @@ fn field_value(exif: &PsExifInfo, code: ExifTag) -> Option<String> {
     exif.tags.get(code.name()).cloned()
 }
 
-/// Camera manufacturer (EXIF `Make`), e.g. `Canon`.
 pub(crate) fn camera_make(exif: &PsExifInfo) -> Option<String> {
     field_value(exif, ExifTag::Make)
 }
 
-/// Camera model (EXIF `Model`), e.g. `Canon EOS 40D`.
 pub(crate) fn camera_model(exif: &PsExifInfo) -> Option<String> {
     field_value(exif, ExifTag::Model)
 }
 
-/// Image width in pixels. Prefers the Exif-IFD pixel dimension, falling back to
-/// the IFD0 `ImageWidth`. `None` when neither is present or numeric.
 pub(crate) fn image_width(exif: &PsExifInfo) -> Option<i64> {
     field_value(exif, ExifTag::ExifImageWidth)
         .or_else(|| field_value(exif, ExifTag::ImageWidth))
         .and_then(|s| s.trim().parse::<i64>().ok())
 }
 
-/// Image height in pixels. Prefers the Exif-IFD pixel dimension, falling back to
-/// the IFD0 `ImageHeight`. `None` when neither is present or numeric.
 pub(crate) fn image_height(exif: &PsExifInfo) -> Option<i64> {
     field_value(exif, ExifTag::ExifImageHeight)
         .or_else(|| field_value(exif, ExifTag::ImageHeight))
         .and_then(|s| s.trim().parse::<i64>().ok())
 }
 
-/// The display transform implied by the EXIF `Orientation` tag, decomposed into
-/// `(mirrored, rotate)`: a horizontal flip applied *before* a clockwise rotation
-/// of `rotate` degrees (one of `-90`, `0`, `90`, `180`). `None` when the tag is
-/// absent (e.g. videos) — nothing to apply. Orientation `1` yields
-/// `(false, 0)`. Distinct from the derived aspect orientation. The raw numeric
-/// tag is still available in `media_info`.
+/// The display transform implied by EXIF `Orientation`. `None` when the tag is
+/// absent (e.g. videos). Distinct from the derived aspect orientation.
 pub(crate) fn exif_display_transform(exif: &PsExifInfo) -> Option<(bool, i32)> {
     let raw = field_value(exif, ExifTag::Orientation)?;
     Some(orientation_transform(raw.trim()))
 }
 
-/// Decompose the raw EXIF `Orientation` value (`1`–`8`) into `(mirrored, rotate)`,
-/// where a horizontal mirror is applied before a clockwise `rotate` (degrees).
-/// `1` and any unrecognised value mean "no transform".
+/// `Orientation` (`1`–`8`) as `(mirrored, rotate)`: a horizontal mirror applied
+/// before a clockwise rotation of `rotate` degrees. Unrecognised means no
+/// transform.
 fn orientation_transform(raw: &str) -> (bool, i32) {
     match raw {
         "2" => (true, 0),
         "3" => (false, 180),
         "4" => (true, 180),
-        "5" => (true, -90), // mirror horizontal + rotate 270 CW
+        "5" => (true, -90),
         "6" => (false, 90),
-        "7" => (true, 90),   // mirror horizontal + rotate 90 CW
-        "8" => (false, -90), // rotate 270 CW
+        "7" => (true, 90),
+        "8" => (false, -90),
         _ => (false, 0),
     }
 }
 
-/// Read an EXIF date/time tag. Rendering it gives RFC 3339, the form every other
-/// date source in [`crate::media::best_guess_taken_dt`] returns and the only one
-/// [`crate::media::get_desired_media_path`] can parse; it stays a chrono value
-/// until then so a `SubSecTime*` tag can still be folded in.
+/// Parse any of EXIF's date spellings: a full RFC 3339 instant (only when the
+/// file carries an `OffsetTime` tag), a bare wall-clock reading with either `-`
+/// or EXIF's `:` date separators, or a `GPSDateStamp` date with no time.
 ///
-/// EXIF has no single spelling. Depending on whether the file carries an
-/// `OffsetTime` tag, the parser hands back either a full RFC 3339 instant
-/// (`2023-08-05T19:59:55+12:00`) or a bare local wall-clock reading
-/// (`2015-04-18 11:10:44`); the raw tag form separates the date with colons
-/// (`2015:04:18 11:10:44`), and `GPSDateStamp` is a date with no time at all
-/// (`2015:04:17`). None of them spell out a fraction of a second — that is
-/// always a separate tag, which is what [`sub_sec_millis`] is for.
+/// A reading with no offset is taken as UTC. The camera's real zone is unknowable
+/// from the file, and this keeps the wall-clock reading — what the photographer
+/// saw, and what the `yyyy/mm/dd` bucketing is for — intact.
 ///
-/// A reading with no offset is taken as UTC. The camera's real zone is unknown
-/// and unknowable from the file, and this keeps the wall-clock reading — which is
-/// what the photographer saw and what the `yyyy/mm/dd` bucketing is for — intact.
+/// Stays a chrono value rather than a string so [`sub_sec_millis`] can still be
+/// folded in; no EXIF date tag spells out its own fraction of a second.
 fn exif_datetime_parse(raw: &str) -> Option<DateTime<FixedOffset>> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
-    // Already carries an offset: keep the recorded instant exactly as it stands.
     if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
         return Some(dt);
     }
@@ -219,7 +184,7 @@ fn exif_datetime_parse(raw: &str) -> Option<DateTime<FixedOffset>> {
             return Some(naive.and_utc().fixed_offset());
         }
     }
-    // `GPSDateStamp` pins down a day and nothing finer; midnight is the only
+    // A date alone pins down a day and nothing finer; midnight is the only
     // instant it justifies.
     if let Ok(date) = NaiveDate::parse_from_str(&normalised, "%Y-%m-%d") {
         return Some(date.and_time(NaiveTime::MIN).and_utc().fixed_offset());
@@ -229,16 +194,13 @@ fn exif_datetime_parse(raw: &str) -> Option<DateTime<FixedOffset>> {
 
 /// Read an EXIF `SubSecTime*` value as whole milliseconds.
 ///
-/// The tag holds the digits that follow the decimal point, not a count of
-/// anything: `"07"` is 0.07s (70 ms) and `"9"` is 0.9s (900 ms). Reading it with
-/// an integer parse — the obvious thing, and the thing that was missing here —
-/// turns those into 7 ms and 9 ms, so the value is read positionally and padded
-/// out to three places instead. Precision finer than a millisecond is dropped,
-/// as that is all the output path carries.
+/// The tag holds the digits that follow the decimal point, not a count: `"07"`
+/// is 70 ms and `"9"` is 900 ms, so it is read positionally rather than parsed
+/// as an integer. Anything finer than a millisecond is dropped, as that is all
+/// the output path carries.
 ///
-/// Cameras pad the field with spaces or NULs, and some write nothing usable at
-/// all. A non-numeric value is *no* sub-second reading rather than a zero one,
-/// so it leaves whatever the date tag itself carried alone.
+/// Cameras pad the field with spaces or NULs. A non-numeric value is *no*
+/// reading rather than a zero one, leaving whatever the date tag itself carried.
 fn sub_sec_millis(raw: &str) -> Option<u32> {
     let digits = raw.trim_matches(|c: char| c.is_whitespace() || c == '\0');
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -251,8 +213,8 @@ fn sub_sec_millis(raw: &str) -> Option<u32> {
 }
 
 /// Rewrite EXIF's `YYYY:MM:DD` date separators as dashes so one set of chrono
-/// patterns covers both spellings. Only touches a leading date that is already
-/// all ASCII digits and colons, so byte offsets are safe here.
+/// patterns covers both spellings. Only touches a leading date that is all ASCII
+/// digits and colons, so the byte offsets below are safe.
 fn dashed_date_separators(s: &str) -> String {
     let b = s.as_bytes();
     let is_exif_date = b.len() >= 10
@@ -274,37 +236,20 @@ fn dashed_date_separators(s: &str) -> String {
 /// Best guess at when an image was taken, from EXIF alone, as RFC 3339.
 ///
 /// Tags are tried in descending order of trust, and one that is present but
-/// unparseable is skipped rather than returned — an unusable string here would
-/// otherwise mask a perfectly good date in a later tag.
+/// unparseable is skipped rather than returned, so it cannot mask a good date
+/// further down. `DateTimeOriginal` (shutter) and `CreateDate` are the same
+/// instant on a digital camera; `ModifyDate` is only the last time the file was
+/// *changed*, so an edit moves it years past the capture. GPS is the last
+/// resort, still well above the file's mtime.
 ///
-/// `DateTimeOriginal` is when the shutter fired and `CreateDate`
-/// (`DateTimeDigitized`) when the image was written, the same instant on a
-/// digital camera. `ModifyDate` (`DateTime`) is only the last time the file was
-/// *changed*, so an edit in any photo tool moves it years past the capture — it
-/// ranks below both. The GPS receiver's own reading is the last resort, below
-/// every reading of the camera's clock but well above the file's mtime, which on
-/// a copied archive is when the file was copied.
+/// Each date tag carries whole seconds and has its own fraction tag. The pairing
+/// reads wrong because `nom_exif` uses ExifTool's names rather than the spec's;
+/// the IDs settle it, as Exif 2.32 defines `0x9290`–`0x9292` consecutively as
+/// the fractions for DateTime / DateTimeOriginal / DateTimeDigitized. So the
+/// bare `SubSecTime` belongs to `ModifyDate` — it is not a catch-all.
 ///
-/// Each of the camera-clock tags carries its seconds whole; the fraction lives
-/// in a separate tag, and each has its own. Pairing them up is the only way the
-/// sub-second precision reaches the output path.
-///
-/// The pairing below reads wrong and is right — `nom_exif` uses ExifTool's
-/// names, which are not the spec's, so only the tag IDs make it obvious:
-///
-/// | date tag                         | fraction tag                |
-/// |----------------------------------|-----------------------------|
-/// | `DateTimeOriginal`      `0x9003` | `SubSecTimeOriginal`  `0x9291` |
-/// | `CreateDate`  (DateTimeDigitized, `0x9004`) | `SubSecTimeDigitized` `0x9292` |
-/// | `ModifyDate`  (DateTime, `0x0132`)          | `SubSecTime`          `0x9290` |
-///
-/// Exif 2.32 defines `0x9290`–`0x9292` consecutively as "fractions of seconds
-/// for the DateTime / DateTimeOriginal / DateTimeDigitized tag" respectively, so
-/// the bare `SubSecTime` belongs to the bare `DateTime` — the tag ExifTool calls
-/// `ModifyDate`. It is not a default or a catch-all for the other two.
-///
-/// GPS is not in that table because it is a different shape: its reading is
-/// split date-and-time rather than seconds-and-fraction. See [`gps_datetime`].
+/// GPS is absent from the pairing because its reading is split date-and-time
+/// rather than seconds-and-fraction. See [`gps_datetime`].
 pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>, tz: OutputTZ) -> Option<String> {
     let exif = exif.as_ref()?;
     let from_camera_clock = [
@@ -320,9 +265,8 @@ pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>, tz: OutputTZ) -> 
         let dt = field_value(exif, date_tag)
             .as_deref()
             .and_then(exif_datetime_parse)?;
-        // Sub-second precision has exactly one source, so this replaces rather
-        // than adds. No usable sub-second tag leaves the reading as it stands,
-        // which keeps any fraction the date tag itself spelled out.
+        // Replaces rather than adds: no usable sub-second tag keeps any fraction
+        // the date tag itself spelled out.
         let dt = field_value(exif, sub_sec_tag)
             .as_deref()
             .and_then(sub_sec_millis)
@@ -334,37 +278,22 @@ pub(crate) fn best_guess_taken_exif(exif: &Option<PsExifInfo>, tz: OutputTZ) -> 
 }
 
 /// The GPS receiver's reading of when the shutter fired, from the
-/// `GPSDateStamp` (`0x001d`) / `GPSTimeStamp` (`0x0007`) pair.
+/// `GPSDateStamp` / `GPSTimeStamp` pair — one reading split across two tags.
 ///
-/// These two are one reading split across two tags, and they differ from the
-/// camera's own clock in a way that matters: they are UTC by definition, not by
-/// the assumption made for an offset-less reading. That makes a full reading a
-/// true instant, so it is converted to this machine's zone before it goes out —
-/// the same treatment every other instant gets, and for the same reason: the
-/// `yyyy/mm/dd` bucket is meant to be the photographer's wall clock, and UTC is
-/// not it. See [`crate::util::OutputTZ`].
+/// Unlike the camera's clock these are UTC by definition, so a full reading is a
+/// true instant and gets converted to the output zone like any other. See
+/// [`crate::util::OutputTZ`].
 ///
-/// Taking the date alone and calling it midnight — which is what this did before
-/// the time tag was read — is the worst available answer, not a conservative
-/// one. Midnight UTC sits exactly on the day boundary, so every photographer
-/// west of UTC gets filed a day early, systematically. The time tag is right
-/// there in the same IFD.
-///
-/// That failure is also why the date-only fallback is deliberately *not*
-/// converted. `GPSDateStamp` alone pins down a UTC day and nothing finer, and the
-/// local day it covers is that day for most of its span and the neighbouring one
-/// for the rest. Shifting an assumed midnight by the local offset does not
-/// recover the missing information; it just picks the less likely of the two days
-/// for everyone west of UTC — reintroducing, through the fix, the exact bug the
-/// paragraph above describes.
+/// The date-only fallback is deliberately *not* converted. `GPSDateStamp` alone
+/// pins down a UTC day and nothing finer; shifting an assumed midnight by the
+/// local offset recovers no information and just files everyone west of UTC on
+/// the less likely of the two days it could be.
 fn gps_datetime(exif: &PsExifInfo, tz: OutputTZ) -> Option<String> {
     let date = field_value(exif, ExifTag::GPSDateStamp)?;
     let date = date.trim();
-    // A time that will not parse must not cost us the date it came with. An empty
-    // tag is one of those, and it needs excluding by hand rather than by letting
-    // the parse fail: `"2015-04-17 "` still parses — as a bare date — so it would
-    // otherwise reach the conversion below and be shifted as though a real time
-    // had been read, landing on midnight's neighbouring day.
+    // The empty time tag needs excluding by hand rather than by letting the parse
+    // fail: `"2015-04-17 "` still parses — as a bare date — so it would reach the
+    // conversion below and be shifted onto midnight's neighbouring day.
     let full_reading = field_value(exif, ExifTag::GPSTimeStamp)
         .map(|time| time.trim().to_string())
         .filter(|time| !time.is_empty())
@@ -477,20 +406,17 @@ mod tests {
         assert_eq!(camera_model(&info).as_deref(), Some("Canon EOS 40D"));
         assert!(image_width(&info).is_some_and(|w| w > 0), "width parsed");
         assert!(image_height(&info).is_some_and(|h| h > 0), "height parsed");
-        // EXIF Orientation "1" decodes to the no-op transform.
+        // Orientation "1" is the no-op transform.
         assert_eq!(exif_display_transform(&info), Some((false, 0)));
         Ok(())
     }
 
-    /// Render a parsed EXIF date the way `best_guess_taken_exif` eventually
-    /// does, so a test can assert on the string rather than a chrono value.
     fn exif_datetime_to_rfc3339(raw: &str) -> Option<String> {
         exif_datetime_parse(raw).map(|dt| dt.to_rfc3339())
     }
 
-    /// Every spelling of an EXIF date this codebase has seen must come back as
-    /// RFC 3339, because that is the only form `get_desired_media_path` parses -
-    /// anything else lands the file in `undated/`.
+    /// RFC 3339 is the only form `get_desired_media_path` parses — anything else
+    /// lands the file in `undated/`.
     #[test]
     fn test_exif_datetime_to_rfc3339() {
         for (raw, expected) in [
@@ -500,14 +426,12 @@ mod tests {
             // Bare wall-clock reading, the common case: read as UTC.
             ("2015-04-18 11:10:44", "2015-04-18T11:10:44+00:00"),
             ("2015-04-18T11:10:44", "2015-04-18T11:10:44+00:00"),
-            // Raw EXIF colon-separated date.
             ("2015:04:18 11:10:44", "2015-04-18T11:10:44+00:00"),
-            // Sub-second precision.
             ("2015-04-18 11:10:44.939", "2015-04-18T11:10:44.939+00:00"),
             // GPSDateStamp: a day and nothing finer.
             ("2015:04:17", "2015-04-17T00:00:00+00:00"),
             ("2015-04-17", "2015-04-17T00:00:00+00:00"),
-            // Surrounding whitespace, as EXIF strings are often space-padded.
+            // EXIF strings are often space-padded.
             ("  2015:04:18 11:10:44 ", "2015-04-18T11:10:44+00:00"),
         ] {
             assert_eq!(
@@ -520,9 +444,9 @@ mod tests {
 
     #[test]
     fn test_exif_datetime_rejects_unusable() {
-        // Cameras with a dead clock write zeroes; a blank or nonsense tag is no
-        // better. None of these is a date, and returning one would date the photo
-        // to the year 0 rather than falling through to the next source.
+        // Cameras with a dead clock write zeroes. Returning one of these would
+        // date the photo to the year 0 rather than fall through to the next
+        // source.
         for raw in [
             "",
             "   ",
@@ -535,8 +459,6 @@ mod tests {
         }
     }
 
-    /// Build an EXIF record from `(tag, value)` pairs, so a test can state just
-    /// the tags it is about.
     fn exif_with(pairs: &[(ExifTag, &str)]) -> Option<PsExifInfo> {
         let mut tags = HashMap::new();
         for (tag, value) in pairs {
@@ -550,7 +472,6 @@ mod tests {
         })
     }
 
-    /// An unparseable tag must not shadow a good one further down the list.
     #[test]
     fn test_best_guess_falls_through_unparseable_tag() {
         let exif = exif_with(&[
@@ -563,9 +484,6 @@ mod tests {
         );
     }
 
-    /// `SubSecTime*` holds the digits after the decimal point, so it has to be
-    /// read positionally. An integer parse makes `"07"` seven milliseconds when
-    /// it means seventy, and `"9"` nine when it means nine hundred.
     #[test]
     fn test_sub_sec_millis_reads_a_fraction_not_an_integer() {
         for (raw, expected) in [
@@ -575,8 +493,7 @@ mod tests {
             ("939", Some(939)),
             ("00", Some(0)),
             ("0", Some(0)),
-            // Finer than a millisecond: truncated, never rounded up into the
-            // next millisecond.
+            // Truncated, never rounded up into the next millisecond.
             ("9399", Some(939)),
             ("000123", Some(0)),
             // Cameras pad the fixed-width field with spaces or NULs.
@@ -593,9 +510,6 @@ mod tests {
         }
     }
 
-    /// The reported bug: EXIF records the seconds and their fraction in two
-    /// separate tags, and only the first was ever read, so every EXIF-dated file
-    /// came out on a whole second.
     #[test]
     fn test_best_guess_applies_sub_second_tag() {
         let exif = exif_with(&[
@@ -608,8 +522,8 @@ mod tests {
         );
     }
 
-    /// Each date tag has its own sub-second tag; crossing them would stamp one
-    /// reading's fraction onto another's seconds.
+    /// Crossing the pairs would stamp one reading's fraction onto another's
+    /// seconds.
     #[test]
     fn test_sub_second_tags_pair_with_their_own_date() {
         // SubSecTime belongs to ModifyDate, not to DateTimeOriginal.
@@ -623,7 +537,6 @@ mod tests {
             "SubSecTime must not refine DateTimeOriginal"
         );
 
-        // CreateDate is refined by SubSecTimeDigitized.
         let exif = exif_with(&[
             (ExifTag::CreateDate, "2015:04:18 11:10:44"),
             (ExifTag::SubSecTimeDigitized, "5"),
@@ -634,7 +547,6 @@ mod tests {
             Some("2015-04-18T11:10:44.500+00:00")
         );
 
-        // ModifyDate is refined by SubSecTime.
         let exif = exif_with(&[
             (ExifTag::ModifyDate, "2015:04:18 11:10:44"),
             (ExifTag::SubSecTime, "07"),
@@ -645,8 +557,7 @@ mod tests {
         );
     }
 
-    /// An offset-carrying reading keeps its offset when the fraction is folded
-    /// in — the sub-second tag says nothing about the zone.
+    /// The sub-second tag says nothing about the zone.
     #[test]
     fn test_sub_second_keeps_recorded_offset() {
         let exif = exif_with(&[
@@ -659,9 +570,6 @@ mod tests {
         );
     }
 
-    /// A dead-clock date is still rejected even when a perfectly good
-    /// sub-second tag sits beside it, and the fraction does not follow the
-    /// fall-through to the next tag.
     #[test]
     fn test_sub_second_does_not_rescue_or_follow_a_rejected_date() {
         let exif = exif_with(&[
@@ -675,8 +583,7 @@ mod tests {
         );
     }
 
-    /// The GPS reading has no sub-second tag of its own; nothing must leak into
-    /// it from the ones that do.
+    /// The GPS reading has no sub-second tag of its own.
     #[test]
     fn test_gps_date_stamp_takes_no_sub_second() {
         let exif = exif_with(&[
@@ -692,10 +599,8 @@ mod tests {
         );
     }
 
-    /// `GPSDateStamp` and `GPSTimeStamp` are one reading in two tags. Reading
-    /// only the first buckets every GPS-dated file at midnight UTC — which is
-    /// exactly the day boundary, so photographers west of UTC get filed a day
-    /// early.
+    /// Reading only `GPSDateStamp` buckets every GPS-dated file at midnight UTC
+    /// — exactly the day boundary, so photographers west of UTC file a day early.
     #[test]
     fn test_gps_date_and_time_are_read_as_one_reading() {
         let exif = exif_with(&[
@@ -718,11 +623,9 @@ mod tests {
         );
     }
 
-    /// A full GPS reading is UTC by definition — a real instant — so it is
-    /// converted to the output zone on the way out, like every other instant. The
-    /// instant survives; only its spelling moves. 19:30 on the 17th in Greenwich
-    /// is 07:30 on the *18th* at +12:00, so a regression to rendering at UTC shows
-    /// up as a different day and not merely a different offset.
+    /// 19:30 on the 17th in Greenwich is 07:30 on the *18th* at +12:00, so a
+    /// regression to rendering at UTC shows up as a different day, not merely a
+    /// different offset.
     #[test]
     fn test_gps_reading_is_converted_to_the_output_tz() {
         let exif = exif_with(&[
@@ -735,7 +638,6 @@ mod tests {
         );
     }
 
-    /// Any camera-clock reading outranks the GPS one, which is the last resort.
     #[test]
     fn test_camera_clock_outranks_gps() {
         let exif = exif_with(&[
@@ -749,9 +651,8 @@ mod tests {
         );
     }
 
-    /// A time tag that will not parse must not cost us the date it came with —
-    /// midnight is worse than the real time, but far better than no date at all,
-    /// which would drop the file through to its mtime.
+    /// Midnight is worse than the real time but far better than no date, which
+    /// would drop the file through to its mtime.
     #[test]
     fn test_unusable_gps_time_falls_back_to_the_date() {
         for time in ["", "   ", "not a time", "URationalArray[19/1 (19.0000)]"] {
@@ -766,7 +667,6 @@ mod tests {
             );
         }
 
-        // And a date with no time tag at all is still a date.
         let exif = exif_with(&[(ExifTag::GPSDateStamp, "2015:04:17")]);
         assert_eq!(
             best_guess_taken_exif(&exif, tz()).as_deref(),
@@ -774,8 +674,6 @@ mod tests {
         );
     }
 
-    /// `GPSTimeStamp` is three rationals, not a string. The generic rendering is
-    /// unusable, so it is normalised on the way into the tag map.
     #[test]
     fn test_gps_time_of_day_renders_rationals() {
         let time = |h: (u32, u32), m: (u32, u32), s: (u32, u32)| {
@@ -791,7 +689,7 @@ mod tests {
             gps_time_of_day(&whole(19, 30, 45)).as_deref(),
             Some("19:30:45")
         );
-        // Zero-padded, and all-zeros is a legitimate midnight rather than absence.
+        // All-zeros is a legitimate midnight rather than absence.
         assert_eq!(
             gps_time_of_day(&whole(0, 0, 0)).as_deref(),
             Some("00:00:00")
@@ -800,7 +698,6 @@ mod tests {
             gps_time_of_day(&whole(9, 5, 3)).as_deref(),
             Some("09:05:03")
         );
-        // A fractional second, rendered only because there is one.
         assert_eq!(
             gps_time_of_day(&time((19, 1), (30, 1), (455, 10))).as_deref(),
             Some("19:30:45.500")
@@ -808,7 +705,7 @@ mod tests {
         // Out of range for a clock.
         assert_eq!(gps_time_of_day(&whole(24, 0, 0)), None);
         assert_eq!(gps_time_of_day(&whole(0, 60, 0)), None);
-        // A zero denominator has no value, and neither does the wrong shape.
+        // Zero denominator, then the wrong shape entirely.
         assert_eq!(gps_time_of_day(&time((19, 0), (30, 1), (45, 1))), None);
         assert_eq!(
             gps_time_of_day(&EntryValue::URationalArray(vec![URational::new(19, 1)])),
@@ -817,9 +714,7 @@ mod tests {
         assert_eq!(gps_time_of_day(&EntryValue::Text("19:30:45".into())), None);
     }
 
-    /// End to end on a real file whose only date is the GPS pair: no
-    /// `DateTimeOriginal`, no `CreateDate`, no `ModifyDate`. This is the branch
-    /// that had no real-file coverage at all.
+    /// End to end on a real file whose only date is the GPS pair.
     #[test]
     fn test_gps_only_file_is_dated_from_the_gps_pair() -> anyhow::Result<()> {
         use anyhow::anyhow;
@@ -849,8 +744,8 @@ mod tests {
         let taken = best_guess_taken_exif(&Some(info), tz());
         assert_eq!(taken.as_deref(), Some("2015-04-18T07:30:45+12:00"));
 
-        // ...and reaches a real dated path rather than `undated/`, bucketed on the
-        // converted reading: 19:30 on the 17th in Greenwich is the 18th at +12:00.
+        // Bucketed on the converted reading: 19:30 on the 17th in Greenwich is
+        // the 18th at +12:00.
         assert_eq!(
             crate::media::get_desired_media_path("abc1234", &taken),
             "2015/04/18/0730-45000"
@@ -858,9 +753,6 @@ mod tests {
         Ok(())
     }
 
-    /// `ModifyDate` is the last time the file was *changed*, so an edit pushes it
-    /// well past the capture. `CreateDate` records when the image was digitised
-    /// and must be preferred over it.
     #[test]
     fn test_create_date_preferred_over_modify_date() {
         let exif = exif_with(&[
@@ -873,8 +765,7 @@ mod tests {
         );
     }
 
-    /// The sub-second reading has to survive all the way to the name of the
-    /// written file, which is the only place a user sees it.
+    /// The written filename is the only place a user sees the sub-second reading.
     #[test]
     fn test_sub_second_reaches_the_output_path() {
         let exif = exif_with(&[
@@ -888,8 +779,6 @@ mod tests {
         );
     }
 
-    /// The whole point of the conversion: what comes out must survive the parse
-    /// that decides the output path.
     #[test]
     fn test_converted_dates_produce_a_dated_path() -> anyhow::Result<()> {
         use anyhow::anyhow;
@@ -914,7 +803,6 @@ mod tests {
         assert_eq!(orientation_transform("6"), (false, 90));
         assert_eq!(orientation_transform("7"), (true, 90));
         assert_eq!(orientation_transform("8"), (false, -90));
-        // Unknown/out-of-range values are treated as no transform.
         assert_eq!(orientation_transform("9"), (false, 0));
     }
 
@@ -922,8 +810,7 @@ mod tests {
     fn test_gps_version_only_yields_no_coords() -> anyhow::Result<()> {
         use anyhow::anyhow;
         crate::test_util::setup_log();
-        // Canon_40D.jpg has a GPS sub-IFD with only GPSVersionID (no
-        // GPSLatitude/GPSLongitude)
+        // Canon_40D.jpg has a GPS sub-IFD with only GPSVersionID.
         let c = OsFileSystem::new("test");
         let reader = c.open("Canon_40D.jpg")?;
         let info = parse_exif_info(reader)?.ok_or_else(|| anyhow!("Failed to parse exif"))?;

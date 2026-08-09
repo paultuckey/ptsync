@@ -1,11 +1,9 @@
-//! Parsing for `s3://bucket/prefix` locations, used by the input/output
-//! factories to tell an S3 URI apart from a local path or zip. Pure string
-//! logic - no AWS, no I/O.
+//! Parsing for `s3://bucket/prefix` locations. Pure string logic — no AWS, no
+//! I/O.
 
-/// True when `s` uses the `s3://` scheme and is therefore *intended* as an S3
-/// location. The factories branch on this before parsing, so a malformed
-/// `s3://…` is reported as a bad URI rather than silently treated as a local
-/// path.
+/// True when `s` is *intended* as an S3 location. The factories branch on this
+/// before parsing, so a malformed `s3://…` is reported as a bad URI rather than
+/// silently treated as a local path.
 pub(crate) fn is_s3_uri(s: &str) -> bool {
     s.starts_with("s3://")
 }
@@ -13,15 +11,13 @@ pub(crate) fn is_s3_uri(s: &str) -> bool {
 #[derive(Debug, PartialEq)]
 pub(crate) struct S3Uri {
     pub(crate) bucket: String,
-    /// Key prefix with no leading or trailing slash; empty means the bucket
-    /// root. Kept slash-free at the ends so a relative path joins cleanly as
-    /// `{prefix}/{rel}`.
+    /// No leading or trailing slash, so a relative path joins as
+    /// `{prefix}/{rel}`. Empty means the bucket root.
     pub(crate) prefix: String,
 }
 
 impl S3Uri {
-    /// Parse `s3://bucket[/prefix...]`. Returns `None` for a non-`s3://` string
-    /// or an `s3://` URI with no bucket.
+    /// `None` for a non-`s3://` string or an `s3://` URI with no bucket.
     pub(crate) fn parse(s: &str) -> Option<S3Uri> {
         let rest = s.strip_prefix("s3://")?;
         let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
@@ -34,8 +30,7 @@ impl S3Uri {
         })
     }
 
-    /// The full object key for a path relative to this location's prefix. The
-    /// inverse of [`S3Uri::relative_of`].
+    /// The inverse of [`S3Uri::relative_of`].
     pub(crate) fn key_for(&self, rel: &str) -> String {
         if self.prefix.is_empty() {
             rel.to_string()
@@ -44,11 +39,10 @@ impl S3Uri {
         }
     }
 
-    /// The path relative to this location's prefix for a full object key, or
-    /// `None` when the key does not sit *under* the prefix (a near-miss that only
-    /// shares leading characters, or the bare prefix marker itself). This is how
-    /// `walk` turns bucket keys into the `/`-separated relative paths the rest of
-    /// the tool expects, matching the zip and directory scanners.
+    /// How `walk` turns bucket keys into the `/`-separated relative paths the
+    /// zip and directory scanners also produce. `None` when the key does not sit
+    /// *under* the prefix — a near-miss sharing only leading characters, or the
+    /// bare prefix marker itself.
     pub(crate) fn relative_of(&self, key: &str) -> Option<String> {
         if self.prefix.is_empty() {
             return Some(key.to_string());
@@ -115,8 +109,8 @@ mod tests {
             u.relative_of("photos/2024/05/22/x.jpg"),
             Some("05/22/x.jpg".to_string())
         );
-        // Keys outside the prefix, the bare prefix marker, and textual near-misses
-        // that don't fall on a path boundary are all rejected.
+        // Outside the prefix, the bare prefix marker, and a near-miss that does
+        // not fall on a path boundary.
         assert_eq!(u.relative_of("other/x.jpg"), None);
         assert_eq!(u.relative_of("photos/2024"), None);
         assert_eq!(u.relative_of("photos/2024x/y.jpg"), None);

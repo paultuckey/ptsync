@@ -14,27 +14,24 @@ use tracing::debug;
 /// Hash and parse media files in parallel, yielding a [`MediaFileInfo`] as each
 /// one finishes.
 ///
-/// A pool of rayon workers inspect the files concurrently and push results
-/// through a bounded channel; the returned iterator drains that channel on the
-/// calling thread. Streaming results (rather than collecting them) lets the
-/// caller fold each item straight into sqlite or a dedup map without holding the
-/// whole library in memory.
+/// Rayon workers push results through a bounded channel that the returned
+/// iterator drains on the calling thread. Streaming rather than collecting lets
+/// the caller fold each item straight into sqlite or a dedup map without holding
+/// the whole library in memory.
 ///
-/// `container` and `prog` are taken as [`Arc`]s because the worker thread
-/// outlives this call (it is owned by the returned iterator), so they can't be
-/// borrowed from the caller's stack.
+/// `container` and `prog` are [`Arc`]s because the worker thread is owned by the
+/// returned iterator and so outlives this call.
 ///
-/// Files that were classified as media but produce no [`MediaFileInfo`] (they
-/// turned out not to be valid media, or could not be read or hashed) are dropped
-/// from the stream but counted; read the total back with
-/// [`InspectMediaIter::skipped_count`] once the iterator is drained.
+/// Files that yield no [`MediaFileInfo`] — not valid media, or unreadable — are
+/// dropped from the stream but counted in
+/// [`InspectMediaIter::skipped_count`].
 pub(crate) fn inspect_media_files(
     container: Arc<dyn FileSystem>,
     media_si_files: Vec<ScanInfo>,
     prog: Arc<Progress>,
 ) -> InspectMediaIter {
-    // Bound the channel so fast parallel producers can't outrun the single
-    // consumer and pile up in memory.
+    // Bounded so the parallel producers can't outrun the single consumer and pile
+    // up in memory.
     let channel_capacity = rayon::current_num_threads().saturating_mul(4).max(1);
     let (tx, rx) = std::sync::mpsc::sync_channel(channel_capacity);
 
@@ -70,10 +67,8 @@ pub(crate) struct InspectMediaIter {
 }
 
 impl InspectMediaIter {
-    /// Number of media-classified files that yielded no [`MediaFileInfo`] and so
-    /// were dropped from the output. Only final once the iterator is fully
-    /// drained — the producer thread is joined on the last `next`, which
-    /// publishes every worker's increment to this thread.
+    /// Only final once the iterator is fully drained: the last `next` joins the
+    /// producer thread, which is what publishes every worker's increment here.
     pub(crate) fn skipped_count(&self) -> usize {
         self.skipped.load(Ordering::Relaxed)
     }
@@ -86,9 +81,8 @@ impl Iterator for InspectMediaIter {
         if let Ok(info) = self.rx.recv() {
             return Some(info);
         }
-        // Channel closed: the producer dropped its sender, so it is done. Join
-        // to reclaim the thread and re-raise any worker panic, matching the
-        // previous scoped-thread behavior where a panic aborted the run.
+        // Channel closed, so the producer is done. Joining reclaims the thread and
+        // re-raises any worker panic rather than swallowing it.
         if let Some(handle) = self.handle.take()
             && let Err(panic) = handle.join()
         {
@@ -103,18 +97,16 @@ impl Drop for InspectMediaIter {
         let Some(handle) = self.handle.take() else {
             return;
         };
-        // The consumer stopped early. Drain so a producer parked on the full
-        // bounded channel can finish and drop its sender, then join rather than
-        // leaving the worker detached. Don't re-raise a panic here: a drop may
-        // run while already unwinding, and a double panic aborts the process.
+        // The consumer stopped early, so drain to unpark a producer blocked on the
+        // full channel. Unlike `next`, a panic is not re-raised: a drop can run
+        // while already unwinding, and a double panic aborts the process.
         for _ in self.rx.iter() {}
         let _ = handle.join();
     }
 }
 
-/// Inspect a single media file: load any supplemental info, checksum the bytes,
-/// then derive its type and metadata. Returns `Ok(None)` when the file isn't a
-/// supported media type, and `Err` when it can't be read or hashed.
+/// `Ok(None)` when the file isn't a supported media type, `Err` when it can't be
+/// read or hashed.
 pub(crate) fn analyze_file(
     root: &dyn FileSystem,
     media_si: &ScanInfo,
@@ -185,16 +177,15 @@ mod tests {
         use std::io::Write;
         crate::test_util::setup_log();
 
-        // Isolated input dir so the skipped count is deterministic: one valid
-        // media file plus one that looks like media by extension but isn't.
+        // Isolated input dir so the skipped count is deterministic.
         let test_dir = std::path::Path::new("target/test_inspect_skipped");
         if test_dir.exists() {
             fs::remove_dir_all(test_dir)?;
         }
         fs::create_dir_all(test_dir)?;
         fs::copy("test/Canon_40D.jpg", test_dir.join("good.jpg"))?;
-        // A .jpg extension over plain-text bytes: classified as media, but not a
-        // valid image, so inspection drops it rather than emitting a MediaFileInfo.
+        // A .jpg extension over plain text: classifies as media, but is not a
+        // valid image.
         let mut bad = fs::File::create(test_dir.join("bad.jpg"))?;
         bad.write_all(b"this is not an image")?;
 

@@ -45,16 +45,15 @@ pub(crate) enum AccurateFileType {
     Gif,
     Mp4,
     Mov,
-    /// Apple's iTunes video container: an MP4 with an `M4V ` major brand.
+    /// An MP4 with an `M4V ` major brand.
     M4v,
-    /// RIFF container, typically Motion JPEG from a compact camera of the
-    /// `MVI_1234.AVI` era.
+    /// RIFF container, typically Motion JPEG from a compact camera.
     Avi,
     /// MPEG-1/2 elementary or program stream, as ripped from a DVD or camcorder.
     Mpg,
-    /// Windows Media Video: an ASF container that carries a video stream. ASF is
-    /// the container alone and holds audio (`.wma`) just as happily, so only the
-    /// ones with video reach this type — see [`file_type_from_content_type`].
+    /// An ASF container carrying a video stream. ASF holds `.wma` audio just as
+    /// happily, so only the ones with video reach this type — see
+    /// [`file_type_from_content_type`].
     Wmv,
     Json,
     Csv,
@@ -79,9 +78,8 @@ pub(crate) fn file_ext_from_file_type(ff: &AccurateFileType) -> String {
     }
 }
 
-/// Coarse photo/video classification for the `media_item.kind` column:
-/// `Some("p")` for images, `Some("v")` for videos, and `None` for anything that
-/// is neither (e.g. an unidentifiable file that slipped through the media filter).
+/// The `media_item.kind` column: `"p"` for images, `"v"` for videos, `None` for
+/// anything that is neither.
 pub(crate) fn media_kind(ff: &AccurateFileType) -> Option<&'static str> {
     match ff {
         AccurateFileType::Jpg
@@ -113,10 +111,9 @@ pub(crate) fn metadata_type(ff: &AccurateFileType) -> MetadataType {
         AccurateFileType::Mp4 | AccurateFileType::Mov | AccurateFileType::M4v => {
             MetadataType::Track
         }
-        // AVI (RIFF), MPEG-1/2 program streams and WMV (ASF) are videos, but they
-        // are not ISO base media files, so the track parser cannot read them —
-        // asking it to try only produces a warning per file. Their capture time has
-        // to come from supplemental metadata or the filesystem instead.
+        // Videos, but not ISO base media files, so the track parser cannot read
+        // them — asking it to try only produces a warning per file. Their capture
+        // time comes from supplemental metadata or the filesystem instead.
         AccurateFileType::Avi | AccurateFileType::Mpg | AccurateFileType::Wmv => {
             MetadataType::NoMetadata
         }
@@ -139,9 +136,9 @@ pub(crate) fn file_type_from_content_type(ct: &str) -> AccurateFileType {
         "video/x-msvideo" => AccurateFileType::Avi,
         "video/mpeg" => AccurateFileType::Mpg,
         "video/x-ms-wmv" => AccurateFileType::Wmv,
-        // The other two ASF outcomes are deliberately not media: `.wma` is an
-        // audio track, and the bare container turns up when the header declares
-        // neither stream. Both would otherwise be filed as videos with no picture.
+        // The other two ASF outcomes — `.wma` audio, and the bare container when
+        // the header declares neither stream — would otherwise be filed as videos
+        // with no picture.
         "audio/x-ms-wma" => AccurateFileType::Unsupported,
         "application/vnd.ms-asf" => AccurateFileType::Unsupported,
         "application/octet-stream" => AccurateFileType::Unsupported,
@@ -155,7 +152,7 @@ pub(crate) fn determine_file_type<R: Read + Seek>(
     mut reader: R,
     name: &String,
 ) -> anyhow::Result<AccurateFileType> {
-    // take json files at face value
+    // JSON is taken at face value rather than sniffed.
     if name.to_lowercase().ends_with(".json") {
         return Ok(AccurateFileType::Json);
     }
@@ -234,9 +231,8 @@ mod tests {
         assert_eq!(find_quick_file_type("test/Hello.asf"), QuickFileType::Media);
     }
 
-    /// QuickTime is a container in its own right. Takeout exports plenty of them,
-    /// often under a `.mp4` name, so the type has to come from the `qt  ` brand in
-    /// the bytes — otherwise they are written back out mislabelled.
+    /// Takeout exports plenty of QuickTime files, often under a `.mp4` name, so
+    /// the type comes from the `qt  ` brand in the bytes.
     #[test]
     fn test_mov_is_a_supported_video() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -252,8 +248,6 @@ mod tests {
         Ok(())
     }
 
-    /// The brand decides, not the filename: a QuickTime file Google named `.mp4`
-    /// is still a QuickTime file, and an MP4 named `.mov` is still an MP4.
     #[test]
     fn test_video_type_follows_content_not_extension() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -275,10 +269,8 @@ mod tests {
         Ok(())
     }
 
-    /// An `.m4v` is an MP4 with an `M4V ` major brand. It must be sniffed as its
-    /// own type rather than falling through to `Unsupported`, keep its extension
-    /// on the way out, and be read for track metadata like any other video —
-    /// otherwise its capture time never reaches the date logic.
+    /// Falling through to `Unsupported` would keep an `.m4v`'s capture time out
+    /// of the date logic entirely.
     #[test]
     fn test_m4v_is_a_supported_video() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -294,10 +286,8 @@ mod tests {
         Ok(())
     }
 
-    /// A compact camera's `MVI_1234.AVI` is a RIFF file, not an ISO base media
-    /// file. It has to sniff as its own type, keep its extension, and count as a
-    /// video — but it carries no track metadata, so the date logic must fall back
-    /// to supplemental info or the filesystem rather than warn on every file.
+    /// A video, but RIFF rather than ISO base media, so it must report no track
+    /// metadata rather than have the parser warn on every file.
     #[test]
     fn test_avi_is_a_supported_video() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -313,9 +303,8 @@ mod tests {
         Ok(())
     }
 
-    /// MPEG-1/2 program streams — DVD and camcorder rips — are identified by a
-    /// start-code prefix rather than a container brand, and like AVI they have no
-    /// track metadata the parser can reach.
+    /// Identified by a start-code prefix rather than a container brand, and like
+    /// AVI carrying no track metadata.
     #[test]
     fn test_mpg_is_a_supported_video() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -331,8 +320,7 @@ mod tests {
         Ok(())
     }
 
-    /// `.mpeg` is accepted on the way in but normalises to `.mpg` on the way out,
-    /// so one format does not produce two extensions in the archive.
+    /// So one format does not produce two extensions in the archive.
     #[test]
     fn test_mpeg_extension_normalises_to_mpg() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -345,10 +333,8 @@ mod tests {
         Ok(())
     }
 
-    /// A `.wmv` off an old Windows camcorder or Movie Maker export is an ASF
-    /// container. Sniffing has to reach past the container to the stream list —
-    /// the same bytes hold `.wma` audio — then keep the extension and count as a
-    /// video with no track metadata, like AVI and MPG.
+    /// Sniffing has to reach past the ASF container to the stream list, since the
+    /// same bytes hold `.wma` audio.
     #[test]
     fn test_wmv_is_a_supported_video() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -364,9 +350,8 @@ mod tests {
         Ok(())
     }
 
-    /// The other side of that coin: a `.wma` is the same ASF container with an
-    /// audio stream in place of the video one. Sniffing must reject it, or a music
-    /// file lands in the archive as a video with nothing to show.
+    /// The other side of that coin: rejected, or a music file lands in the archive
+    /// as a video with nothing to show.
     #[test]
     fn test_wma_audio_is_not_a_video() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -377,7 +362,7 @@ mod tests {
             determine_file_type(root.open(&name)?, &name)?,
             AccurateFileType::Unsupported
         );
-        // Even renamed to a video extension, so the bytes decide and not the name.
+        // Even renamed to a video extension: the bytes decide, not the name.
         assert_eq!(
             determine_file_type(root.open(&name)?, &"Hello.wmv".to_string())?,
             AccurateFileType::Unsupported
@@ -385,10 +370,8 @@ mod tests {
         Ok(())
     }
 
-    /// `.asf` is the container's own extension and is accepted on the way in,
-    /// because plenty of Windows Media videos are named that way. Like `.mpeg`
-    /// it normalises on the way out, so one format is not filed under two
-    /// extensions.
+    /// `.asf` is accepted on the way in, since plenty of Windows Media videos are
+    /// named that way, then normalised like `.mpeg`.
     #[test]
     fn test_asf_extension_normalises_to_wmv() -> anyhow::Result<()> {
         crate::test_util::setup_log();
@@ -432,8 +415,8 @@ mod tests {
             file_type_from_content_type("audio/mpeg"),
             AccurateFileType::Unsupported
         );
-        // Nor may the audio and stream-less halves of ASF: they share the
-        // container with WMV but hold no picture.
+        // Nor the audio and stream-less halves of ASF, which share the container
+        // with WMV but hold no picture.
         assert_eq!(
             file_type_from_content_type("audio/x-ms-wma"),
             AccurateFileType::Unsupported
