@@ -266,6 +266,20 @@ pub(crate) struct SupplementalInfoGeoData {
     pub(crate) latitude: Option<f64>,
     pub(crate) longitude: Option<f64>,
 }
+
+impl SupplementalInfoGeoData {
+    /// The recorded fix, treating the `(0, 0)` sentinel as absent — Takeout
+    /// writes zeros rather than omitting the field when it has no location.
+    ///
+    /// Filtered here rather than at parse, unlike the EXIF equivalent: these
+    /// fields are both the decoded value *and* the only record of what Google
+    /// wrote, since they are serialized straight back out into
+    /// `media_item.media_info`. `PsExifInfo` can filter early because its raw
+    /// tags survive separately.
+    pub(crate) fn lat_long(&self) -> Option<(f64, f64)> {
+        crate::util::non_zero_coords(self.latitude, self.longitude)
+    }
+}
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "camelCase", serialize = "camelCase"))]
 pub(crate) struct SupplementalInfoPerson {

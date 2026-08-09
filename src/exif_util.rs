@@ -8,6 +8,10 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use tracing::debug;
 
+/// `tags` is the faithful record of what the file said; the three GPS fields
+/// below are decoded from it for convenience and are free to drop a reading the
+/// raw tags still carry. A null-island fix is exactly that case — it is filtered
+/// out of all three at parse, while `GPSLatitude`/`GPSLongitude` stay in `tags`.
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all(serialize = "camelCase"))]
 pub(crate) struct PsExifInfo {
@@ -17,6 +21,14 @@ pub(crate) struct PsExifInfo {
     pub(crate) gps: Option<String>,
     pub(crate) latitude: Option<f64>,
     pub(crate) longitude: Option<f64>,
+}
+
+impl PsExifInfo {
+    /// The GPS fix, treating the `(0, 0)` sentinel as absent. [`parse_exif_info`]
+    /// already drops such a fix, so this only bites on a record built by hand.
+    pub(crate) fn lat_long(&self) -> Option<(f64, f64)> {
+        crate::util::non_zero_coords(self.latitude, self.longitude)
+    }
 }
 
 pub(crate) fn parse_exif_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<Option<PsExifInfo>> {

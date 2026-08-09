@@ -1,5 +1,5 @@
 use crate::fs::WritableFileSystem;
-use crate::media::{MediaFileInfo, best_guess_taken_dt};
+use crate::media::{MediaFileInfo, best_guess_lat_long, best_guess_taken_dt};
 use crate::util::{OutputTZ, name_part};
 use anyhow::anyhow;
 use std::io::{Cursor, Read};
@@ -13,7 +13,7 @@ pub(crate) fn mfm_from_media_file_info(
     tz: OutputTZ,
 ) -> PhotoSorterFrontMatter {
     let guessed_datetime = best_guess_taken_dt(media_info, tz);
-    let (latitude, longitude) = best_guess_coords(media_info);
+    let (latitude, longitude) = best_guess_lat_long(media_info).unzip();
     PhotoSorterFrontMatter {
         path_original: media_info.original_path.clone(),
         checksum: media_info.hash_info.long_checksum.clone(),
@@ -22,31 +22,6 @@ pub(crate) fn mfm_from_media_file_info(
         longitude,
         people: people_links(media_info),
         albums: album_names.iter().map(|n| as_wikilink(n)).collect(),
-    }
-}
-
-/// Embedded EXIF first, then Google's supplemental metadata — Takeout often
-/// strips EXIF GPS but keeps it in the metadata JSON.
-fn best_guess_coords(media_info: &MediaFileInfo) -> (Option<f64>, Option<f64>) {
-    if let Some(exif) = &media_info.exif_info
-        && let Some(coords) = non_null_island(exif.latitude, exif.longitude)
-    {
-        return (Some(coords.0), Some(coords.1));
-    }
-    if let Some(supp) = &media_info.supp_info {
-        for geo in [&supp.geo_data, &supp.geo_data_exif].into_iter().flatten() {
-            if let Some(coords) = non_null_island(geo.latitude, geo.longitude) {
-                return (Some(coords.0), Some(coords.1));
-            }
-        }
-    }
-    (None, None)
-}
-
-fn non_null_island(lat: Option<f64>, long: Option<f64>) -> Option<(f64, f64)> {
-    match (lat, long) {
-        (Some(lat), Some(long)) if lat != 0.0 || long != 0.0 => Some((lat, long)),
-        _ => None,
     }
 }
 
@@ -598,6 +573,28 @@ checksum: abcdefg
         assert_eq!(mfm.albums, vec!["[[Holiday]]"]);
         assert_eq!(mfm.latitude, Some(-21.6303));
         assert_eq!(mfm.longitude, Some(152.2605));
+    }
+
+    /// The sidecar shares [`best_guess_lat_long`] with the database, so a video's
+    /// embedded track GPS reaches it too — it has no EXIF to fall back on.
+    #[test]
+    fn test_mfm_gps_from_video_track() {
+        use crate::track_util::PsTrackInfo;
+        let mut m = MediaFileInfo::new_for_test();
+        m.track_info = Some(PsTrackInfo {
+            width: None,
+            height: None,
+            creation_time: None,
+            duration_ms: None,
+            make: None,
+            model: None,
+            software: None,
+            author: None,
+            gps_iso_6709: Some("+27.5916+086.5640/".to_string()),
+        });
+        let mfm = mfm_from_media_file_info(&m, &[], crate::test_util::tz());
+        assert_eq!(mfm.latitude, Some(27.5916));
+        assert_eq!(mfm.longitude, Some(86.5640));
     }
 
     #[test]

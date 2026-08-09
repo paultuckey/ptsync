@@ -159,32 +159,24 @@ pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo, tz: OutputTZ) -> Option<
 
 /// Best guess at `(latitude, longitude)`. Embedded metadata — EXIF for images,
 /// ISO 6709 track data for videos — is preferred over Google's supplemental
-/// copies, of which `geo_data_exif` is the more trustworthy.
+/// copies, and `geo_data` over `geo_data_exif`.
 ///
-/// `(0, 0)` is treated as absent everywhere: EXIF and Takeout both write zeros
-/// when they have no fix rather than omitting the value.
+/// That last order only matters when both are present and disagree, since a
+/// missing or `(0, 0)` pair falls through either way. When they do disagree,
+/// `geo_data` is Google Photos' current location — including any the user
+/// corrected by hand — while `geo_data_exif` is a copy of the file's own EXIF,
+/// the source already tried and preferred above.
+///
+/// Each source states the `(0, 0)`-is-absent rule in its own `lat_long`, so this
+/// is only the precedence between them.
 pub(crate) fn best_guess_lat_long(info: &MediaFileInfo) -> Option<(f64, f64)> {
-    use crate::util::non_zero_coords;
-    if let Some(exif) = &info.exif_info
-        && let Some(coords) = non_zero_coords(exif.latitude, exif.longitude)
-    {
-        return Some(coords);
-    }
-    if let Some(track) = &info.track_info
-        && let Some(coords) = track.lat_long()
-    {
-        return Some(coords);
-    }
-    if let Some(supp) = &info.supp_info {
-        for geo in [supp.geo_data_exif.as_ref(), supp.geo_data.as_ref()] {
-            if let Some(geo) = geo
-                && let Some(coords) = non_zero_coords(geo.latitude, geo.longitude)
-            {
-                return Some(coords);
-            }
-        }
-    }
-    None
+    let supp = info.supp_info.as_ref();
+    info.exif_info
+        .as_ref()
+        .and_then(PsExifInfo::lat_long)
+        .or_else(|| info.track_info.as_ref().and_then(PsTrackInfo::lat_long))
+        .or_else(|| supp.and_then(|s| s.geo_data.as_ref()?.lat_long()))
+        .or_else(|| supp.and_then(|s| s.geo_data_exif.as_ref()?.lat_long()))
 }
 
 /// `yyyy/mm/dd/hhmm-ssms`
@@ -374,12 +366,19 @@ mod tests {
         info.supp_info = Some(supp(Some(geo(3.0, 4.0)), Some(geo(5.0, 6.0))));
         assert_eq!(best_guess_lat_long(&info), Some((1.0, 2.0)));
 
-        // geo_data_exif over geo_data.
+        // geo_data over geo_data_exif when the two disagree.
         info.exif_info = None;
-        assert_eq!(best_guess_lat_long(&info), Some((3.0, 4.0)));
+        assert_eq!(best_guess_lat_long(&info), Some((5.0, 6.0)));
 
+        // Either one alone is used, so the order above is unobservable here.
         info.supp_info = Some(supp(None, Some(geo(5.0, 6.0))));
         assert_eq!(best_guess_lat_long(&info), Some((5.0, 6.0)));
+        info.supp_info = Some(supp(Some(geo(3.0, 4.0)), None));
+        assert_eq!(best_guess_lat_long(&info), Some((3.0, 4.0)));
+
+        // A (0, 0) geo_data is absent, so geo_data_exif still answers.
+        info.supp_info = Some(supp(Some(geo(3.0, 4.0)), Some(geo(0.0, 0.0))));
+        assert_eq!(best_guess_lat_long(&info), Some((3.0, 4.0)));
 
         // (0, 0) is absent, so this falls through to supplemental.
         info.exif_info = Some(exif(Some(0.0), Some(0.0)));

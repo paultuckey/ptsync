@@ -15,10 +15,7 @@ pub(super) async fn db_record(
     let media_info_json = serde_json::to_string(&info)?;
     let guessed_datetime = best_guess_taken_dt(info, tz);
     let lat_long = best_guess_lat_long(info);
-    let (latitude, longitude) = match lat_long {
-        Some((lat, long)) => (Some(lat), Some(long)),
-        None => (None, None),
-    };
+    let (latitude, longitude) = lat_long.unzip();
     let geohash = lat_long.map(|(lat, long)| geohash_encode(lat, long, GEOHASH_PRECISION));
     // Videos have no EXIF, so camera and dimensions fall back to track metadata.
     let exif = info.exif_info.as_ref();
