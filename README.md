@@ -154,10 +154,10 @@ ptsync only ever **adds** objects — it never deletes.
 
 ## Commands
 
-| Command | What it does                                                                                                                                          |
-| --- |-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Command       | What it does                                                                                                                                          |
+|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ptsync sync` | The main command - syncs photos, videos and albums into a standardized directory.                                                                     |
-| `ptsync info` | Inspect the metadata ptsync would extract from a single photo, video or album.                                                                        |
+| `ptsync info` | Inspect the metadata ptsync would extract from a single photo, video or album, as Markdown.                                                           |
 | `ptsync db`   | Scan an archive into a SQLite [database](docs/db-schema.md) of file metadata (helpful for inspection). [Example queries](docs/db-example-queries.md). |
 
 `sync` also accepts `--skip-markdown`, `--skip-media` and `--skip-albums` to process only

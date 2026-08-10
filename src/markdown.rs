@@ -355,7 +355,7 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
 /// viewer shows the photo. Relative rather than a `![[wikilink]]` so it renders
 /// in plain markdown viewers too, and unambiguous because the photo sits in the
 /// same directory.
-fn new_note_body(resolved_media_path: &str) -> String {
+pub(crate) fn new_note_body(resolved_media_path: &str) -> String {
     let file_name = name_part(&resolved_media_path.to_string());
     format!("\n![]({file_name})\n")
 }
