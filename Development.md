@@ -93,25 +93,25 @@ cargo run -- --help
 Test a single photo file:
 
 ```shell
-cargo run -- info --debug --root "test" --input "Canon_40D.jpg"
+cargo run -- --debug info --root "test" --input "Canon_40D.jpg"
 ```
 
 Test a single album file:
 
 ```shell
-cargo run -- info --debug --root "test/takeout1" --input "Google Photos/album1/metadata.json"
+cargo run -- --debug info --root "test/takeout1" --input "Google Photos/album1/metadata.json"
 ```
 
 Make a database for takeout:
 
 ```shell
-cargo run -- db --debug --input "input/Takeout"
+cargo run -- --debug db --input "input/Takeout"
 ```
 
 Make a database for iCloud:
 
 ```shell
-cargo run -- db --debug --input "input/iCloud Photos"
+cargo run -- --debug db --input "input/iCloud Photos"
 ```
 
 
@@ -119,8 +119,8 @@ cargo run -- db --debug --input "input/iCloud Photos"
 Dry run a sync operation:
 
 ```shell
-cargo run -- \
-  sync --debug --dry-run \
+cargo run -- --debug \
+  sync --dry-run \
     --input "input/takeout-20250614T030613Z-1-001.zip" \
     --output "output/archive"
 ```
@@ -128,7 +128,7 @@ cargo run -- \
 Sync a directory:
 
 ```shell
-cargo run -- sync --debug --input "input/Takeout-small" --output "output/archive-small"
+cargo run -- --debug sync --input "input/Takeout-small" --output "output/archive-small"
 ```
 
 ```shell
