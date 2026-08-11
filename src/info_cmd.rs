@@ -4,7 +4,8 @@ use crate::file_type::QuickFileType;
 use crate::fs::{FileSystem, OsFileSystem};
 use crate::inspect::analyze_file;
 use crate::markdown::{
-    assemble_markdown, get_desired_markdown_path, mfm_from_media_file_info, new_note_body,
+    NoteLinks, assemble_markdown, get_desired_markdown_path, mfm_from_media_file_info,
+    new_note_body,
 };
 use crate::media::{MediaFileInfo, media_file_derived_from_media_info};
 use crate::supplemental_info::{
@@ -49,22 +50,22 @@ pub(crate) fn media(si: &ScanInfo, root: &dyn FileSystem, tz: OutputTZ) -> anyho
         debug!("Not a valid media file: {}", si.file_path);
         return Ok(String::new());
     };
-
     let derived = media_file_derived_from_media_info(&media_file_info, tz)?;
     let media_path = derived
         .desired_media_path
         .as_ref()
         .map(|p| format!("{p}.{}", derived.desired_media_extension));
 
-    let mfm = mfm_from_media_file_info(&media_file_info, &[], tz);
+    let mfm = mfm_from_media_file_info(&media_file_info, &NoteLinks::default(), tz);
     let body = match &media_path {
-        Some(p) => new_note_body(p),
+        Some(p) => new_note_body(p, &None),
         None => String::new(),
     };
     let mut out = assemble_markdown(&mfm, &None, &body)?.into_string();
 
     source_section(&mut out, si, &media_file_info, tz)?;
     output_section(&mut out, &media_path)?;
+    live_photo_section(&mut out, &media_file_info)?;
     supplemental_section(&mut out, si, root, &media_file_info, tz)?;
     track_section(&mut out, &media_file_info)?;
     exif_section(&mut out, &media_file_info)?;
@@ -109,6 +110,11 @@ fn source_section(
 }
 
 /// Where `sync` would file this photo, relative to its output directory.
+///
+/// Reported for the file on its own. A Live Photo's video is written under its
+/// still's name instead, but finding that still means reading every other file
+/// in the directory — work `sync` does once for the whole archive and this
+/// command deliberately does not.
 fn output_section(out: &mut String, media_path: &Option<String>) -> anyhow::Result<()> {
     let Some(media_path) = media_path else {
         return Ok(());
@@ -121,6 +127,18 @@ fn output_section(out: &mut String, media_path: &Option<String>) -> anyhow::Resu
         ),
     ];
     section(out, "Output paths", ("Field", "Value"), rows)
+}
+
+/// The identifier a Live Photo's still and video share, from whichever half
+/// this file is. Absent on everything that is not one.
+fn live_photo_section(out: &mut String, media_file_info: &MediaFileInfo) -> anyhow::Result<()> {
+    let rows = vec![(
+        "Content identifier",
+        crate::media::content_identifier(media_file_info)
+            .as_deref()
+            .map(code),
+    )];
+    section(out, "Live Photo", ("Field", "Value"), rows)
 }
 
 /// The Takeout sidecar, reported even when it failed to parse — a sidecar that is
@@ -390,6 +408,42 @@ mod tests {
         assert!(out.contains("| Width | "));
         // Videos carry no EXIF.
         assert!(!out.contains("## EXIF"));
+        Ok(())
+    }
+
+    /// Both halves of a Live Photo report the identifier that links them, read
+    /// from two different places: the still's Apple maker note and the video's
+    /// QuickTime metadata.
+    #[test]
+    fn test_info_reports_the_live_photo_content_identifier() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let root = OsFileSystem::new("test/live_photo");
+        let identifier = "| Content identifier | `11111111-2222-3333-4444-555555555555` |";
+
+        for (input, media_path) in [
+            ("still.jpg", "| Media | `2008/05/30/1556-01000.jpg` |"),
+            // Its own capture time, since nothing here knows of the still it
+            // would be filed beside.
+            ("clip.mov", "| Media | `1904/01/01/0000-00000.mov` |"),
+        ] {
+            let si = ScanInfo::new(input.to_string(), None, None, 0);
+            let out = media(&si, &root, crate::test_util::tz())?;
+            assert!(out.contains("## Live Photo"), "{input}:\n{out}");
+            assert!(out.contains(identifier), "{input}:\n{out}");
+            assert!(out.contains(media_path), "{input}:\n{out}");
+        }
+        Ok(())
+    }
+
+    /// A photo carrying no content identifier is not a Live Photo, so the
+    /// section is absent rather than empty.
+    #[test]
+    fn test_info_without_a_content_identifier_has_no_live_photo_section() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let root = OsFileSystem::new("test");
+        let si = ScanInfo::new("Canon_40D.jpg".to_string(), None, None, 0);
+        let out = media(&si, &root, crate::test_util::tz())?;
+        assert!(!out.contains("## Live Photo"));
         Ok(())
     }
 

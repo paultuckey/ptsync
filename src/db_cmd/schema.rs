@@ -29,7 +29,8 @@ const DB_MEDIA_ITEM_CREATE: &str = "
         display_mirrored INTEGER NOT NULL DEFAULT 0, -- 1 if the image must be flipped horizontally for display
         display_rotate INTEGER NOT NULL DEFAULT 0, -- clockwise degrees to rotate for display (-90/0/90/180)
         geohash TEXT, -- geohash of the coordinates, NULL if no location
-        kind TEXT -- 'p' for photo, 'v' for video, NULL if neither
+        kind TEXT, -- 'p' for photo, 'v' for video, NULL if neither
+        content_identifier TEXT -- Apple UUID shared by a Live Photo's still and video, NULL if none
     )
 ";
 
@@ -40,8 +41,9 @@ pub(super) const DB_MEDIA_ITEM_INSERT: &str = "
     INSERT OR REPLACE INTO media_item (media_path, long_hash, short_hash, quick_file_type,
         accurate_file_type, media_info, guessed_datetime, modified_at, created_at, file_size,
         latitude, longitude, camera_make, camera_model, width, height,
-        duration_ms, orientation, display_mirrored, display_rotate, geohash, kind, media_item_id)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+        duration_ms, orientation, display_mirrored, display_rotate, geohash, kind,
+        content_identifier, media_item_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
 ";
 pub(super) const DB_MEDIA_ITEM_ID_BY_PATH: &str =
     "SELECT media_item_id FROM media_item WHERE media_path = ?1";
@@ -52,6 +54,9 @@ pub(super) const DB_MEDIA_ITEM_LOAD_RECORDED: &str =
 // Album building and many info queries look media rows up by `media_path`.
 const DB_MEDIA_ITEM_PATH_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_media_item_media_path ON media_item (media_path)";
+// Finding a Live Photo's other half means grouping on this column.
+const DB_MEDIA_ITEM_CONTENT_IDENTIFIER_INDEX: &str = "CREATE INDEX IF NOT EXISTS \
+     idx_media_item_content_identifier ON media_item (content_identifier)";
 const DB_MEDIA_ITEM_DELETE_ALL: &str = "
     DELETE FROM media_item
 ";
@@ -176,7 +181,7 @@ pub(super) const DB_CLASSIFIED_DIR_DELETE_BY_RUN: &str =
 // Bump whenever a CREATE TABLE statement changes, and consider migrating existing
 // databases. `schema_hash_is_current` fails on any schema change to force this;
 // read it before editing.
-const DB_SCHEMA_VERSION: i64 = 3;
+const DB_SCHEMA_VERSION: i64 = 4;
 
 // The single source of truth for the schema: `db_prepare` builds from these, the
 // docs generator reads them, and `schema_hash_is_current` hashes them. Ordered
@@ -191,7 +196,10 @@ pub(crate) const SCHEMA_TABLE_STATEMENTS: [&str; 8] = [
     DB_CLASSIFIED_FILE_CREATE,
     DB_CLASSIFIED_DIR_CREATE,
 ];
-const SCHEMA_INDEX_STATEMENTS: [&str; 1] = [DB_MEDIA_ITEM_PATH_INDEX];
+const SCHEMA_INDEX_STATEMENTS: [&str; 2] = [
+    DB_MEDIA_ITEM_PATH_INDEX,
+    DB_MEDIA_ITEM_CONTENT_IDENTIFIER_INDEX,
+];
 
 pub(super) async fn db_prepare(conn: &Connection, clear: bool) -> anyhow::Result<()> {
     let version = query_one(conn, "PRAGMA user_version", ())
@@ -297,9 +305,9 @@ mod tests {
     #[test]
     fn schema_hash_is_current() {
         const EXPECTED_SCHEMA_HASH: &str =
-            "9fd9349c863b762b7926e2f205c1f47b7686f9f674c369b1e0726b416299f030";
+            "b901b598869c1c5ffc3996169bca2589fc6b78149e9c1817412ea0c40854f4d0";
         let actual = schema_hash();
-        assert_eq!(DB_SCHEMA_VERSION, 3);
+        assert_eq!(DB_SCHEMA_VERSION, 4);
         assert_eq!(
             actual, EXPECTED_SCHEMA_HASH,
             "\n\nDatabase schema changed (hash is now {actual}).\n\

@@ -37,6 +37,7 @@ pub(super) async fn db_record(
         .and_then(crate::exif_util::image_height)
         .or_else(|| track.and_then(|t| t.height).map(|h| h as i64));
 
+    let content_identifier = crate::media::content_identifier(info);
     let duration_ms = track.and_then(|t| t.duration_ms).map(|d| d as i64);
     let kind = crate::file_type::media_kind(&info.accurate_file_type);
     let orientation = orientation(width, height).map(str::to_string);
@@ -72,6 +73,7 @@ pub(super) async fn db_record(
         display_rotate,
         geohash,
         kind,
+        content_identifier,
     };
 
     let mut stmt = conn.prepare_cached(DB_MEDIA_ITEM_INSERT).await?;
@@ -98,6 +100,7 @@ pub(super) async fn db_record(
         item.display_rotate,
         item.geohash.as_deref(),
         item.kind,
+        item.content_identifier.as_deref(),
         item.media_item_id.as_str(),
     ])
     .await?;
@@ -157,4 +160,6 @@ struct DbMediaItem {
     geohash: Option<String>,
     /// `p` for photo, `v` for video, `None` for neither.
     kind: Option<&'static str>,
+    /// The Apple UUID linking a Live Photo's still to its video.
+    content_identifier: Option<String>,
 }

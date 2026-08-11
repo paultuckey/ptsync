@@ -123,6 +123,20 @@ pub(crate) fn name_part(file_path_s: &String) -> String {
     file_name_str.to_string_lossy().to_string()
 }
 
+/// The path with the extension dropped from its final component
+/// (`2025/02/09/1818-44000.jpg` -> `2025/02/09/1818-44000`), so a sibling file
+/// can be named after it.
+///
+/// Date names, checksums and `undated` contain no dots, so a dot in the file
+/// name is always the extension separator.
+pub(crate) fn strip_extension(path: &str) -> String {
+    let last_slash = path.rfind('/').map_or(0, |i| i + 1);
+    match path[last_slash..].rfind('.') {
+        Some(dot) => path[..last_slash + dot].to_string(),
+        None => path.to_string(),
+    }
+}
+
 /// Name of the environment variable consulted when `--timezone` is not given.
 pub(crate) const TZ_ENV: &str = "TZ";
 

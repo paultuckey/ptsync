@@ -1,4 +1,5 @@
 mod album;
+mod apple_maker_note;
 mod classify;
 mod db_cmd;
 mod dedup;
@@ -9,9 +10,11 @@ mod file_type;
 mod fs;
 mod info_cmd;
 mod inspect;
+mod live_photo;
 mod markdown;
 mod media;
 mod progress;
+mod quicktime_meta;
 mod s3_fs;
 mod s3_uri;
 mod supplemental_info;

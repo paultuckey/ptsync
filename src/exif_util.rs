@@ -17,6 +17,9 @@ pub(crate) struct PsExifInfo {
     pub(crate) gps: Option<String>,
     pub(crate) latitude: Option<f64>,
     pub(crate) longitude: Option<f64>,
+    /// From an Apple maker note: the UUID this still shares with its Live Photo
+    /// video. See [`crate::apple_maker_note`].
+    pub(crate) content_identifier: Option<String>,
 }
 
 pub(crate) fn parse_exif_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<Option<PsExifInfo>> {
@@ -36,12 +39,25 @@ pub(crate) fn parse_exif_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<O
     let mut ps_gps_info = None;
     let mut lat = None;
     let mut long = None;
+    let mut content_identifier = None;
     match exif_iter_r {
         Ok(exif_iter) => {
             for entry in exif_iter.clone() {
                 let Some(tag_enum) = entry.tag().tag() else {
                     continue; // skip unrecognised tags
                 };
+                // A vendor blob rather than a value, so it is read on its own
+                // terms rather than rendered into `tags`.
+                if tag_enum == ExifTag::MakerNote {
+                    content_identifier = entry
+                        .clone()
+                        .into_result()
+                        .ok()
+                        .as_ref()
+                        .and_then(EntryValue::as_undefined)
+                        .and_then(crate::apple_maker_note::content_identifier);
+                    continue;
+                }
                 let tag_name = tag_enum.to_string();
                 let s_o = field_to_opt_string(tag_enum, &entry);
                 let Some(s) = s_o else {
@@ -72,6 +88,7 @@ pub(crate) fn parse_exif_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<O
         gps: ps_gps_info,
         latitude: lat,
         longitude: long,
+        content_identifier,
     }))
 }
 
@@ -394,6 +411,29 @@ mod tests {
         Ok(())
     }
 
+    /// The Apple maker note is a vendor blob, so it never lands in `tags` — the
+    /// identifier is read out of it separately.
+    #[test]
+    fn test_content_identifier_from_an_apple_maker_note() -> anyhow::Result<()> {
+        use anyhow::anyhow;
+        crate::test_util::setup_log();
+        let c = OsFileSystem::new("test/live_photo");
+        let info = parse_exif_info(c.open("still.jpg")?)?
+            .ok_or_else(|| anyhow!("Failed to parse exif"))?;
+        assert_eq!(
+            info.content_identifier.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert!(!info.tags.contains_key(&ExifTag::MakerNote.to_string()));
+
+        // A photo from a camera that writes no Apple maker note.
+        let c = OsFileSystem::new("test");
+        let info = parse_exif_info(c.open("Canon_40D.jpg")?)?
+            .ok_or_else(|| anyhow!("Failed to parse exif"))?;
+        assert_eq!(info.content_identifier, None);
+        Ok(())
+    }
+
     /// The accessors the db columns are filled from, over the one real file
     /// that has every tag they read.
     #[test]
@@ -473,6 +513,7 @@ mod tests {
             gps: None,
             latitude: None,
             longitude: None,
+            content_identifier: None,
         })
     }
 

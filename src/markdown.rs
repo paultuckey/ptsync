@@ -1,15 +1,25 @@
 use crate::fs::WritableFileSystem;
 use crate::media::{MediaFileInfo, best_guess_taken_dt};
-use crate::util::{OutputTZ, name_part};
+use crate::util::{OutputTZ, name_part, strip_extension};
 use anyhow::anyhow;
 use std::io::{Cursor, Read};
 use tracing::{debug, warn};
 use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 
+/// What a note points at that the media file itself cannot say: both come from
+/// the rest of the archive rather than from the photo's own metadata.
+#[derive(Default)]
+pub(crate) struct NoteLinks {
+    /// Album names, not yet wikilinked.
+    pub(crate) albums: Vec<String>,
+    /// File name of the Live Photo video written beside this still.
+    pub(crate) live_photo_video: Option<String>,
+}
+
 pub(crate) fn mfm_from_media_file_info(
     media_info: &MediaFileInfo,
-    album_names: &[String],
+    links: &NoteLinks,
     tz: OutputTZ,
 ) -> PhotoSorterFrontMatter {
     let guessed_datetime = best_guess_taken_dt(media_info, tz);
@@ -21,7 +31,8 @@ pub(crate) fn mfm_from_media_file_info(
         latitude,
         longitude,
         people: people_links(media_info),
-        albums: album_names.iter().map(|n| as_wikilink(n)).collect(),
+        albums: links.albums.iter().map(|n| as_wikilink(n)).collect(),
+        live_photo_video: links.live_photo_video.clone(),
     }
 }
 
@@ -78,13 +89,15 @@ pub(crate) struct PhotoSorterFrontMatter {
     pub(crate) people: Vec<String>,
     /// As wikilinks, pointing at the album files under `albums/`.
     pub(crate) albums: Vec<String>,
+    /// File name of the sibling Live Photo video, which has no note of its own.
+    pub(crate) live_photo_video: Option<String>,
 }
 
 pub(crate) fn sync_markdown(
     dry_run: bool,
     media_file: &MediaFileInfo,
     resolved_media_path: &str,
-    album_names: &[String],
+    links: &NoteLinks,
     output_c: &dyn WritableFileSystem,
     tz: OutputTZ,
 ) -> anyhow::Result<()> {
@@ -92,10 +105,10 @@ pub(crate) fn sync_markdown(
     // same-instant photos — which all but the first carry a checksum suffix — get
     // a note each instead of clobbering one shared `2213-20000.md`.
     let output_path = get_desired_markdown_path(resolved_media_path)?;
-    let mfm = mfm_from_media_file_info(media_file, album_names, tz);
+    let mfm = mfm_from_media_file_info(media_file, links, tz);
     // Only used on first creation; an existing body is preserved verbatim so
     // user notes are never clobbered.
-    let mut e_md = new_note_body(resolved_media_path);
+    let mut e_md = new_note_body(resolved_media_path, &links.live_photo_video);
     let mut e_yaml = None;
 
     if output_c.exists(&output_path) {
@@ -275,6 +288,15 @@ fn merge_yaml(s: &Option<String>, fm: &PhotoSorterFrontMatter) -> anyhow::Result
     if let Some(long) = fm.longitude {
         set_scalar(&mut root, "longitude", Yaml::Real(long.to_string()));
     }
+    // The video has no note of its own, so this line is the archive's only
+    // record that the two files are one Live Photo.
+    if let Some(video) = &fm.live_photo_video {
+        set_scalar(
+            &mut root,
+            "live-photo-video",
+            Yaml::String(video.to_string()),
+        );
+    }
 
     let changed = root != original;
     let merged = emit_yaml(&root)?;
@@ -355,9 +377,21 @@ fn yaml_array_merge(root: &mut Hash, key: &String, arr: &Vec<String>) {
 /// viewer shows the photo. Relative rather than a `![[wikilink]]` so it renders
 /// in plain markdown viewers too, and unambiguous because the photo sits in the
 /// same directory.
-pub(crate) fn new_note_body(resolved_media_path: &str) -> String {
+///
+/// A Live Photo's video is linked rather than embedded, since a viewer that
+/// cannot play it shows a working link instead of a broken image. The body is
+/// only written when the note is created, so `live-photo-video` in the
+/// frontmatter — which is merged on every run — is the authoritative reference.
+pub(crate) fn new_note_body(
+    resolved_media_path: &str,
+    live_photo_video: &Option<String>,
+) -> String {
     let file_name = name_part(&resolved_media_path.to_string());
-    format!("\n![]({file_name})\n")
+    let mut body = format!("\n![]({file_name})\n");
+    if let Some(video) = live_photo_video {
+        body.push_str(&format!("\n[Live Photo video]({video})\n"));
+    }
+    body
 }
 
 /// The media path with its extension swapped for `.md`, keeping the note a
@@ -367,13 +401,7 @@ pub(crate) fn get_desired_markdown_path(resolved_media_path: &str) -> anyhow::Re
     if resolved_media_path.is_empty() {
         return Err(anyhow!("Resolved media path is empty"));
     }
-    // Date names, checksums and `undated` contain no dots, so a dot in the file
-    // name is always the extension separator.
-    let last_slash = resolved_media_path.rfind('/').map_or(0, |i| i + 1);
-    match resolved_media_path[last_slash..].rfind('.') {
-        Some(dot) => Ok(format!("{}.md", &resolved_media_path[..last_slash + dot])),
-        None => Ok(format!("{resolved_media_path}.md")),
-    }
+    Ok(format!("{}.md", strip_extension(resolved_media_path)))
 }
 
 #[cfg(test)]
@@ -389,6 +417,7 @@ mod tests {
             longitude: None,
             people: vec![],
             albums: vec![],
+            live_photo_video: None,
         }
     }
 
@@ -557,13 +586,21 @@ checksum: abcdefg
     #[test]
     fn test_new_note_body_embeds_sibling_photo() {
         assert_eq!(
-            new_note_body("2025/02/09/1818-44000.jpg"),
+            new_note_body("2025/02/09/1818-44000.jpg", &None),
             "\n![](1818-44000.jpg)\n"
         );
         // The resolved (suffixed) name, not the bare date name.
         assert_eq!(
-            new_note_body("2025/02/09/1818-44000-ccf63c8.jpg"),
+            new_note_body("2025/02/09/1818-44000-ccf63c8.jpg", &None),
             "\n![](1818-44000-ccf63c8.jpg)\n"
+        );
+        // A Live Photo's video is linked, since it has no note of its own.
+        assert_eq!(
+            new_note_body(
+                "2025/02/09/1818-44000.heic",
+                &Some("1818-44000.mov".to_string())
+            ),
+            "\n![](1818-44000.heic)\n\n[Live Photo video](1818-44000.mov)\n"
         );
     }
 
@@ -597,7 +634,11 @@ checksum: abcdefg
             longitude: Some(152.2605),
         };
         let m = mfi_with_supp(Some(geo), &["Tim Tam", "  ", "Nandor"]);
-        let mfm = mfm_from_media_file_info(&m, &["Holiday".to_string()], crate::test_util::tz());
+        let links = NoteLinks {
+            albums: vec!["Holiday".to_string()],
+            live_photo_video: None,
+        };
+        let mfm = mfm_from_media_file_info(&m, &links, crate::test_util::tz());
         assert_eq!(mfm.people, vec!["[[Tim Tam]]", "[[Nandor]]"]);
         assert_eq!(mfm.albums, vec!["[[Holiday]]"]);
         assert_eq!(mfm.latitude, Some(-21.6303));
@@ -613,7 +654,7 @@ checksum: abcdefg
             longitude: Some(0.0),
         };
         let m = mfi_with_supp(Some(geo), &[]);
-        let mfm = mfm_from_media_file_info(&m, &[], crate::test_util::tz());
+        let mfm = mfm_from_media_file_info(&m, &NoteLinks::default(), crate::test_util::tz());
         assert_eq!(mfm.latitude, None);
         assert_eq!(mfm.longitude, None);
     }

@@ -31,6 +31,8 @@ app-independent archive you can back up anywhere, this is for you.
   editor and friendly to tools like [Obsidian](https://obsidian.md/).
 - **Albums travel with you** - Google (JSON) and iCloud (CSV) albums become Markdown files
   under `albums/`.
+- **Live Photos stay together** - an iPhone's still and its video are recognized as one
+  thing and filed under one name, with the video referenced from the still's note.
 - **Non-destructive & repeatable** - additive only, and idempotent: running it again
   produces no changes.
 

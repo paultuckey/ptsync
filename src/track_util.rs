@@ -16,6 +16,9 @@ pub(crate) struct PsTrackInfo {
     pub software: Option<String>,
     pub author: Option<String>,
     pub gps_iso_6709: Option<String>,
+    /// The UUID this video shares with its Live Photo still. See
+    /// [`crate::quicktime_meta`].
+    pub content_identifier: Option<String>,
 }
 
 impl PsTrackInfo {
@@ -55,7 +58,10 @@ fn parse_iso6709(s: &str) -> Option<(f64, f64)> {
     Some((lat, long))
 }
 
-pub fn parse_track_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<Option<PsTrackInfo>> {
+pub fn parse_track_info<R: Read + Seek>(reader: &mut R) -> anyhow::Result<Option<PsTrackInfo>> {
+    // Read before nom_exif is handed the reader, since it takes it by value.
+    let content_identifier = crate::quicktime_meta::content_identifier(reader);
+
     reader.seek(SeekFrom::Start(0))?;
     let ms_r = MediaSource::seekable(reader);
     let Ok(ms) = ms_r else {
@@ -84,6 +90,7 @@ pub fn parse_track_info<R: Read + Seek>(mut reader: R) -> anyhow::Result<Option<
                 software: parse_to_o_s(&info.get(TrackInfoTag::Software)),
                 author: parse_to_o_s(&info.get(TrackInfoTag::Author)),
                 gps_iso_6709: parse_to_o_s(&info.get(TrackInfoTag::GpsIso6709)),
+                content_identifier,
             };
             info.iter()
                 // The tags promoted into fields above; the rest are kept as-is.
@@ -135,15 +142,33 @@ mod tests {
         use anyhow::anyhow;
         crate::test_util::setup_log();
         let c = OsFileSystem::new("test");
-        let reader = c.open("Hello.mp4")?;
+        let mut reader = c.open("Hello.mp4")?;
         let meta =
-            parse_track_info(reader)?.ok_or_else(|| anyhow!("Failed to parse track info"))?;
+            parse_track_info(&mut reader)?.ok_or_else(|| anyhow!("Failed to parse track info"))?;
         assert_eq!(meta.width, Some(854));
         assert_eq!(meta.height, Some(480));
         assert_eq!(meta.duration_ms, Some(5000));
         assert_eq!(
             meta.creation_time,
             Some("2024-04-18T11:24:26+00:00".to_string())
+        );
+        assert_eq!(meta.content_identifier, None);
+        Ok(())
+    }
+
+    /// A Live Photo's video carries the still's identifier in QuickTime
+    /// metadata, which is not part of what nom_exif reports as track info.
+    #[test]
+    fn test_parse_track_reads_the_content_identifier() -> anyhow::Result<()> {
+        use anyhow::anyhow;
+        crate::test_util::setup_log();
+        let c = OsFileSystem::new("test/live_photo");
+        let mut reader = c.open("clip.mov")?;
+        let meta =
+            parse_track_info(&mut reader)?.ok_or_else(|| anyhow!("Failed to parse track info"))?;
+        assert_eq!(
+            meta.content_identifier.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
         );
         Ok(())
     }
@@ -159,6 +184,7 @@ mod tests {
             software: None,
             author: None,
             gps_iso_6709: gps.map(str::to_string),
+            content_identifier: None,
         }
     }
 

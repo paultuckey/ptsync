@@ -187,6 +187,23 @@ pub(crate) fn best_guess_lat_long(info: &MediaFileInfo) -> Option<(f64, f64)> {
     None
 }
 
+/// The Apple *content identifier* this file carries, if any: a UUID an iPhone
+/// writes into both halves of a Live Photo, so the still and its video can be
+/// recognised as one thing. It lives in the still's maker note and in the
+/// video's QuickTime metadata, and never in both places on one file.
+///
+/// See [`crate::live_photo`] for what is done with it.
+pub(crate) fn content_identifier(info: &MediaFileInfo) -> Option<String> {
+    if let Some(exif) = &info.exif_info
+        && let Some(id) = &exif.content_identifier
+    {
+        return Some(id.clone());
+    }
+    info.track_info
+        .as_ref()
+        .and_then(|track| track.content_identifier.clone())
+}
+
 /// `yyyy/mm/dd/hhmm-ssms`
 /// OR `undated/checksum`
 pub(crate) fn get_desired_media_path(
@@ -315,6 +332,7 @@ mod tests {
             software: None,
             author: None,
             gps_iso_6709: None,
+            content_identifier: None,
         };
 
         let mut info = MediaFileInfo::new_for_test();
@@ -347,6 +365,7 @@ mod tests {
             gps: None,
             latitude: lat,
             longitude: long,
+            content_identifier: None,
         };
         let geo = |lat: f64, long: f64| SupplementalInfoGeoData {
             latitude: Some(lat),
@@ -369,6 +388,7 @@ mod tests {
             software: None,
             author: None,
             gps_iso_6709: Some(gps.to_string()),
+            content_identifier: None,
         };
 
         // EXIF wins over both the track string and supplemental data.

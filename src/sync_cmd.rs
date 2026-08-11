@@ -1,12 +1,13 @@
 use crate::album::{Album, build_album_md, parse_album, split_album_notes};
 use crate::dedup::{DeDuplicationResult, Deduplicator};
-use crate::file_type::QuickFileType;
+use crate::file_type::{QuickFileType, file_ext_from_file_type};
 use crate::fs::{FileSystem, WritableFileSystem, open_input, open_output};
 use crate::inspect::inspect_media_files;
-use crate::markdown::sync_markdown;
+use crate::live_photo::LivePhotos;
+use crate::markdown::{NoteLinks, sync_markdown};
 use crate::media::{MediaFileDerivedInfo, MediaFileInfo, media_file_derived_from_media_info};
 use crate::progress::Progress;
-use crate::util::{OutputTZ, ScanInfo, scan_fs};
+use crate::util::{OutputTZ, ScanInfo, name_part, scan_fs, strip_extension};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
@@ -65,11 +66,20 @@ pub(crate) fn main(
         if let Some(output_container) = &output_container_o {
             let output_container: &dyn WritableFileSystem = output_container.as_ref();
             let media_to_write = deduper.sorted_media();
+            let live_photos = LivePhotos::build(&media_to_write);
             info!("Outputting {} photo and video files", media_to_write.len());
             let prog = Progress::new(media_to_write.len() as u64);
-            for media in media_to_write {
+
+            // A Live Photo's video is named after wherever its still landed, so
+            // the stills have to be written and resolved first.
+            let (primaries, sidecar_videos): (Vec<&MediaFileInfo>, Vec<&MediaFileInfo>) =
+                media_to_write
+                    .iter()
+                    .partition(|m| !live_photos.is_sidecar_video(&m.hash_info.long_checksum));
+
+            for media in primaries.iter().chain(sidecar_videos.iter()) {
                 prog.inc();
-                let derived = media_file_derived_from_media_info(media, tz)?;
+                let derived = desired_output(media, &live_photos, &final_path_by_checksum, tz)?;
                 let write_r = write_media(
                     media,
                     &derived,
@@ -80,22 +90,7 @@ pub(crate) fn main(
                 match write_r {
                     Ok(final_path) => {
                         let long_checksum = &media.hash_info.long_checksum;
-                        final_path_by_checksum.insert(long_checksum.clone(), final_path.clone());
-                        if !skip_markdown {
-                            let album_names =
-                                album_names_for(&album_names_by_path, &media.original_path);
-                            let sync_md_r = sync_markdown(
-                                dry_run,
-                                media,
-                                &final_path,
-                                &album_names,
-                                output_container,
-                                tz,
-                            );
-                            if let Err(e) = sync_md_r {
-                                warn!("Error writing markdown file beside {final_path:?}: {e}");
-                            }
-                        }
+                        final_path_by_checksum.insert(long_checksum.clone(), final_path);
                     }
                     Err(e) => {
                         warn!(
@@ -106,6 +101,37 @@ pub(crate) fn main(
                 }
             }
             drop(prog);
+
+            // Written last so a still's note can name the video that ended up
+            // beside it.
+            if !skip_markdown {
+                for media in &media_to_write {
+                    let Some(final_path) =
+                        final_path_by_checksum.get(&media.hash_info.long_checksum)
+                    else {
+                        continue; // the media file itself failed to write
+                    };
+                    // A video that took its still's name is covered by that
+                    // still's note. One whose still never got written was filed
+                    // under its own date, so it still needs a note of its own.
+                    if still_path_of(media, &live_photos, &final_path_by_checksum).is_some() {
+                        continue;
+                    }
+                    let links = NoteLinks {
+                        albums: album_names_for(&album_names_by_path, &media.original_path),
+                        live_photo_video: live_photo_video_name(
+                            media,
+                            &live_photos,
+                            &final_path_by_checksum,
+                        ),
+                    };
+                    let sync_md_r =
+                        sync_markdown(dry_run, media, final_path, &links, output_container, tz);
+                    if let Err(e) = sync_md_r {
+                        warn!("Error writing markdown file beside {final_path:?}: {e}");
+                    }
+                }
+            }
         }
     }
 
@@ -136,6 +162,52 @@ pub(crate) fn main(
     }
 
     Ok(())
+}
+
+/// Where this file's Live Photo still was written, if it is a video that has
+/// one and that still made it to disk.
+///
+/// Being able to answer is what makes a file a sidecar: it takes that name, and
+/// is covered by that still's note. A video whose still failed to write is not
+/// one, and is filed and noted in its own right instead — better a video under
+/// its own date than a video nobody wrote down.
+fn still_path_of(
+    media: &MediaFileInfo,
+    live_photos: &LivePhotos,
+    final_path_by_checksum: &HashMap<String, String>,
+) -> Option<String> {
+    let still = live_photos.still_for_video(&media.hash_info.long_checksum)?;
+    final_path_by_checksum.get(still).cloned()
+}
+
+/// Where a media file wants to go: its own date-derived path, or — for a Live
+/// Photo's video — the name its still was written under, so the pair sits side
+/// by side under one name.
+fn desired_output(
+    media: &MediaFileInfo,
+    live_photos: &LivePhotos,
+    final_path_by_checksum: &HashMap<String, String>,
+    tz: OutputTZ,
+) -> anyhow::Result<MediaFileDerivedInfo> {
+    match still_path_of(media, live_photos, final_path_by_checksum) {
+        Some(still_path) => Ok(MediaFileDerivedInfo {
+            desired_media_path: Some(strip_extension(&still_path)),
+            desired_media_extension: file_ext_from_file_type(&media.accurate_file_type),
+        }),
+        None => media_file_derived_from_media_info(media, tz),
+    }
+}
+
+/// The file name of the Live Photo video written beside this still, for the
+/// still's note to point at.
+fn live_photo_video_name(
+    still: &MediaFileInfo,
+    live_photos: &LivePhotos,
+    final_path_by_checksum: &HashMap<String, String>,
+) -> Option<String> {
+    let video = live_photos.video_for_still(&still.hash_info.long_checksum)?;
+    let video_path = final_path_by_checksum.get(video)?;
+    Some(name_part(video_path))
 }
 
 /// Parse all album files in the scan into `Album`s, logging progress.
@@ -502,6 +574,105 @@ mod tests {
         Ok(())
     }
 
+    /// A still and video sharing a content identifier are written as one item:
+    /// the video takes the still's name and gets no note, and the still's note
+    /// is the only thing that records the pairing.
+    ///
+    /// The fixture's video has no usable capture time of its own — left to
+    /// itself it lands under 1904 — so the date here can only have come from
+    /// the still.
+    #[test]
+    fn sync_writes_a_live_photo_video_beside_its_still() -> anyhow::Result<()> {
+        const LIVE_PHOTO: &str = "test/live_photo";
+        const STEM: &str = "2008/05/30/1556-01000";
+        let (_temp, archive) = run_sync(LIVE_PHOTO)?;
+
+        assert!(archive.join(format!("{STEM}.jpg")).exists());
+        assert!(
+            archive.join(format!("{STEM}.mov")).exists(),
+            "the video should be filed under the still's name"
+        );
+        assert!(!archive.join("1904").exists());
+
+        let notes: Vec<PathBuf> = files_under(&archive)?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+            .collect();
+        assert_eq!(
+            notes,
+            vec![archive.join(format!("{STEM}.md"))],
+            "only the still should have a note"
+        );
+
+        // Both spellings of the link: the frontmatter key, which is rewritten
+        // every run, and the body line, which is only written on creation.
+        let md = read_to_string(archive.join(format!("{STEM}.md")))?;
+        assert!(md.contains("live-photo-video: 1556-01000.mov"), "{md}");
+        assert!(md.contains("[Live Photo video](1556-01000.mov)"), "{md}");
+        // The note is the still's, so it records the still's checksum and path.
+        assert!(md.contains("- still.jpg"), "{md}");
+        assert!(!md.contains("clip.mov"), "{md}");
+        Ok(())
+    }
+
+    /// A Live Photo whose still collides with another photo takes a suffixed
+    /// name, and the video has to follow it there rather than to the bare one.
+    #[test]
+    fn sync_live_photo_video_follows_a_suffixed_still() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input)?;
+
+        // A second photo already occupying the name the Live Photo's still
+        // wants, with the same date fixed by a sidecar.
+        fs::copy("test/live_photo/still.jpg", input.join("still.jpg"))?;
+        fs::copy("test/live_photo/clip.mov", input.join("clip.mov"))?;
+        let mut other = fs::read("test/Canon_40D.jpg")?;
+        other.extend_from_slice(b"other");
+        fs::write(input.join("other.jpg"), &other)?;
+
+        main(
+            false,
+            &input.to_string_lossy(),
+            &Some(output.to_string_lossy().to_string()),
+            false,
+            false,
+            false,
+            tz(),
+        )?;
+
+        // Whichever of the two photos took a suffix, the video sits beside the
+        // one carrying the Live Photo's identifier and its note points at it.
+        let videos: Vec<PathBuf> = files_under(&output)?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "mov"))
+            .collect();
+        assert_eq!(videos.len(), 1);
+        let video = videos
+            .first()
+            .ok_or_else(|| anyhow!("no video written"))?
+            .clone();
+        let note = video.with_extension("md");
+        assert!(
+            note.is_file(),
+            "the video should sit beside its still's note, got {video:?}"
+        );
+        let file_name = video
+            .file_name()
+            .ok_or_else(|| anyhow!("video path has no file name"))?
+            .to_string_lossy()
+            .to_string();
+        let md = read_to_string(&note)?;
+        assert!(
+            md.contains(&format!("live-photo-video: {file_name}")),
+            "{md}"
+        );
+        assert!(md.contains("- still.jpg"), "{md}");
+        Ok(())
+    }
+
     /// Derived names are date and checksum based, so nothing an input name says
     /// can reach the output tree — and nothing may panic on the way.
     #[test]
@@ -602,7 +773,7 @@ mod tests {
         for media in deduper.sorted_media() {
             let derived = media_file_derived_from_media_info(media, tz())?;
             let final_path = write_media(media, &derived, false, input.as_ref(), &out)?;
-            sync_markdown(false, media, &final_path, &[], &out, tz())?;
+            sync_markdown(false, media, &final_path, &NoteLinks::default(), &out, tz())?;
         }
         let stem = FIXTURE_JPG_STEM;
         assert!(out.exists(&format!("{stem}.jpg")));
