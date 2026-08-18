@@ -22,7 +22,12 @@ db.sqlite-journal
 db.sqlite-wal
 db.sqlite-shm
 
-# Thumbnail cache built by expiremental/ui-axum-htmx; rebuildable from db.sqlite
-thumbs.db
-thumbs.db-wal
-thumbs.db-shm
+# Databases written by `ptsync db` take their name from whatever the run was called
+# with, so they cannot be listed individually — and one over a personal archive
+# reaches hundreds of MB. Untracked, they would otherwise be swept into a
+# `cargo package` tarball, which crates.io caps at 10 MiB. Covers thumbs.db too,
+# the thumbnail cache built by expiremental/ui-axum-htmx and rebuildable from
+# db.sqlite.
+*.db
+*.db-wal
+*.db-shm

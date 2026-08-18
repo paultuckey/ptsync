@@ -5,7 +5,7 @@ date-organized archive - stored as ordinary files plus Markdown notes that you f
 own, with no database or proprietary app needed to read it later.
 
 ![A Google Takeout zip going in; a date-sorted archive of ordinary files and Markdown
-notes coming out, with a photo that arrived twice stored once](docs/demo.gif)
+notes coming out, with a photo that arrived twice stored once](https://raw.githubusercontent.com/paultuckey/ptsync/main/docs/demo.gif)
 
 ## The problem
 
@@ -98,7 +98,7 @@ Add your own notes here - they survive every later run.
    ([installation instructions](https://www.rust-lang.org/tools/install)), then:
 
    ```shell
-   cargo install --git https://github.com/paultuckey/ptsync.git ptsync
+   cargo install ptsync
    ```
 
 3. **Preview the sync** with `--dry-run` - this writes nothing, it just prints what would
