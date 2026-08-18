@@ -104,7 +104,7 @@ async fn test_db_scan() -> anyhow::Result<()> {
     // track creation time rather than the file timestamps.
     assert_eq!(
         row.get::<Option<String>>(7)?.as_deref(),
-        Some("2024-04-18T11:24:26+00:00")
+        Some("2024-04-18T23:24:26+12:00")
     );
 
     let row = one_row(

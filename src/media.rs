@@ -1,4 +1,6 @@
-use crate::exif_util::{PsExifInfo, best_guess_taken_exif, parse_exif_info};
+use crate::exif_util::{
+    PsExifInfo, capture_reading, exif_datetime_parse, fallback_taken_exif, parse_exif_info,
+};
 use crate::file_type::{
     AccurateFileType, MetadataType, QuickFileType, determine_file_type, file_ext_from_file_type,
     metadata_type,
@@ -58,7 +60,7 @@ pub(crate) fn media_file_info_from_readable<R: Read + Seek>(
             exif_o = parse_exif_info(&mut *reader)?;
         }
         MetadataType::Track => {
-            track_o = parse_track_info(&mut *reader)?;
+            track_o = parse_track_info(&mut *reader, name)?;
         }
         MetadataType::NoMetadata => {}
     }
@@ -95,25 +97,53 @@ pub(crate) fn media_file_derived_from_media_info(
     Ok(media_file_info)
 }
 
-/// Best guess at when the photo was taken, from messy optional data, in order of
-/// preference:
-/// 1. SupplementalInfo `photo_taken_time`
-/// 2. EXIF, ranked within [`best_guess_taken_exif`]
-/// 3. Track `creation_time` — the embedded capture time for videos
-/// 4. SupplementalInfo `creation_time`
-/// 5. File modified time, then created time — no zone, unreliable in zips and
+/// Best guess at when the photo was taken: the camera's own reading of when the
+/// shutter fired, and failing that the best substitute the file offers.
+///
+/// 1. EXIF capture clock — see [`capture_reading`]
+/// 2. Track `creation_time` — a video's own capture time, which is an instant
+///    rather than a reading; see [`track_instant`]
+/// 3. SupplementalInfo `photo_taken_time` — Google's record of the capture
+/// 4. The remaining EXIF dates, ranked within [`fallback_taken_exif`]
+/// 5. SupplementalInfo `creation_time` — when Google received the upload
+/// 6. File modified time, then created time — no zone, unreliable in zips and
 ///    not preserved by copying, so both are last resorts
 ///
 /// Returned as RFC 3339, since [`get_desired_media_path`] parses it back and
 /// files anything it cannot read under `undated/`.
 ///
-/// The offset on that string decides the output directory, and the sources reach
-/// it by opposite routes: wall-clock readings (2, 3) are the numbers the camera
-/// showed with the zone unrecorded, so `+00:00` is a placeholder and the digits
-/// pass through unshifted; instants (1, 4, 5) are converted to `tz` first — see
-/// [`crate::util::OutputTZ`]. Nothing downstream can tell the two apart once they
-/// are strings, so the conversion belongs here rather than at the bucketing.
+/// The archive is laid out on the photographer's wall clock, and source 1 is the
+/// only one that *is* one: the numbers the camera showed. It is filed unshifted,
+/// which is what keeps a photo's path the same wherever the sync is run. Every
+/// other source is an instant with no zone of its own and can only be converted
+/// into `tz` — see [`crate::util::OutputTZ`] — filing the file where the archive
+/// was built rather than where it was taken. That is the compromise this order
+/// exists to minimise, and it is why a reading outranks an instant however
+/// authoritative the instant's source.
+///
+/// Video is the exception that proves the rule: no container records the offset
+/// the camera was set to, so even a video's own capture time has to be converted
+/// like any other instant.
+///
+/// The cost is that a date corrected in the Google Photos UI does not move the
+/// file, because such a correction is written only to `photo_taken_time` and
+/// never back into the image. It stays visible in the note and the database. The
+/// name is meant to be durable for decades, so it is built from the file's own
+/// bytes rather than from a database that can be re-exported differently
+/// tomorrow — and that also makes the path independent of the machine the sync
+/// runs on.
 pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo, tz: OutputTZ) -> Option<String> {
+    if let Some(reading) = capture_reading(&info.exif_info) {
+        return Some(reading.to_rfc3339());
+    }
+    if let Some(dt) = info
+        .track_info
+        .as_ref()
+        .and_then(|ti| ti.creation_time.as_deref())
+        .and_then(|raw| track_instant(raw, tz))
+    {
+        return Some(dt);
+    }
     if let Some(dt) = info
         .supp_info
         .as_ref()
@@ -122,16 +152,7 @@ pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo, tz: OutputTZ) -> Option<
     {
         return Some(dt);
     }
-    let time_taken_from_exif = best_guess_taken_exif(&info.exif_info, tz);
-    if let Some(dt) = time_taken_from_exif {
-        return Some(dt);
-    }
-    // Videos have no EXIF; their capture time lives in the track metadata.
-    if let Some(dt) = info
-        .track_info
-        .as_ref()
-        .and_then(|ti| ti.creation_time.clone())
-    {
+    if let Some(dt) = fallback_taken_exif(&info.exif_info, tz) {
         return Some(dt);
     }
     if let Some(dt) = info
@@ -155,6 +176,27 @@ pub(crate) fn best_guess_taken_dt(info: &MediaFileInfo, tz: OutputTZ) -> Option<
         }
     }
     None
+}
+
+/// A video's embedded capture time, converted into the output zone.
+///
+/// Unlike EXIF, MP4 and QuickTime define `creation_time` as seconds from an
+/// epoch in **UTC**, so it is an instant and not the reading the videographer
+/// saw. Filing it unshifted puts an evening video 12 or 13 hours out and often
+/// on the wrong day — `VID_20190101_124352.mp4` records `2018:12:31 23:44:02`,
+/// which is a quarter to one on New Year's Day at +13:00, one year later than
+/// the digits alone suggest.
+///
+/// `nom_exif` returns the value either way round: naive for MP4, and for some
+/// QuickTime files already localized to *this machine*. Both are put back on a
+/// common footing here — read as an instant, rendered in `tz` — so the answer
+/// depends on the output zone rather than on which spelling the container used.
+///
+/// The zone dependence is unavoidable: no video container records the offset the
+/// camera was set to, so unlike a shutter reading there is nothing to file it by
+/// except a zone chosen from outside the file.
+fn track_instant(raw: &str, tz: OutputTZ) -> Option<String> {
+    Some(tz.render(exif_datetime_parse(raw)?.to_utc()))
 }
 
 /// Best guess at `(latitude, longitude)`. Embedded metadata — EXIF for images,
@@ -318,6 +360,182 @@ mod tests {
         Ok(())
     }
 
+    /// Fixtures for the precedence cases below.
+    ///
+    /// `1739078221` is 2025-02-09T05:17:01Z: 18:17:01 where the photo was taken
+    /// (+13:00), and 17:17:01 at the tests' own +12:00. Those three readings
+    /// being different is the point — each assertion below says which one the
+    /// output path should be built from.
+    fn info_with(
+        tags: &[(nom_exif::ExifTag, &str)],
+        track_creation_time: Option<&str>,
+        photo_taken_time: Option<i64>,
+    ) -> MediaFileInfo {
+        use crate::exif_util::PsExifInfo;
+        use crate::supplemental_info::PsSupplementalInfo;
+        use crate::track_util::PsTrackInfo;
+        use std::collections::HashMap;
+
+        let mut info = MediaFileInfo::new_for_test();
+        if !tags.is_empty() {
+            let mut map = HashMap::new();
+            for (tag, value) in tags {
+                map.insert(tag.to_string(), (*value).to_string());
+            }
+            info.exif_info = Some(PsExifInfo {
+                tags: map,
+                gps: None,
+                latitude: None,
+                longitude: None,
+                content_identifier: None,
+            });
+        }
+        info.track_info = track_creation_time.map(|ct| PsTrackInfo {
+            width: None,
+            height: None,
+            creation_time: Some(ct.to_string()),
+            duration_ms: None,
+            make: None,
+            model: None,
+            software: None,
+            author: None,
+            gps_iso_6709: None,
+            content_identifier: None,
+        });
+        info.supp_info = photo_taken_time.map(|ts| {
+            let json = format!(r#"{{"photoTakenTime":{{"timestamp":"{ts}"}}}}"#);
+            serde_json::from_str::<PsSupplementalInfo>(&json)
+                .unwrap_or_else(|e| panic!("fixture sidecar should parse: {e}"))
+        });
+        info
+    }
+
+    /// The whole order in one table. The archive is laid out on the
+    /// photographer's wall clock, so the shutter reading wins wherever there is
+    /// one and is filed exactly as the camera wrote it — never shifted into the
+    /// zone the sync happens to run in.
+    #[test]
+    fn test_best_guess_taken_dt_precedence() {
+        use nom_exif::ExifTag::{
+            CreateDate, DateTimeOriginal, ModifyDate, OffsetTimeOriginal, SubSecTimeDigitized,
+            SubSecTimeOriginal,
+        };
+        const TAKEN: i64 = 1739078221;
+        const TRACK: &str = "2024-04-18T23:24:26+12:00";
+
+        // (why it matters, EXIF tags, track time, sidecar timestamp, reading, path)
+        let cases = vec![
+            (
+                "the shutter outranks the sidecar and keeps its own zone, so the \
+                 photo is filed at the hour the photographer saw",
+                vec![
+                    (DateTimeOriginal, "2025-02-09T18:17:01+13:00"),
+                    (OffsetTimeOriginal, "+13:00"),
+                    (SubSecTimeOriginal, "183"),
+                ],
+                None,
+                Some(TAKEN),
+                "2025-02-09T18:17:01.183+13:00",
+                "2025/02/09/1817-01183",
+            ),
+            // The reading is the numbers the camera showed. Without an offset tag
+            // there is no zone to record, but the digits are no less the
+            // photographer's wall clock — and filing them unshifted is what keeps
+            // the path independent of the machine the sync runs on.
+            (
+                "a shutter reading with no recorded zone is still a wall clock and \
+                 still wins, unshifted",
+                vec![
+                    (DateTimeOriginal, "2025:02:09 18:17:01"),
+                    (SubSecTimeOriginal, "183"),
+                ],
+                None,
+                Some(TAKEN),
+                "2025-02-09T18:17:01.183+00:00",
+                "2025/02/09/1817-01183",
+            ),
+            // A date fixed in the Google Photos UI lives only in the sidecar, and
+            // no longer moves the file: the name is built from the image's own
+            // bytes so it stays put across re-exports. The corrected time is still
+            // recorded in the note and the database.
+            (
+                "the shutter wins even when the sidecar disagrees wholesale",
+                vec![
+                    (DateTimeOriginal, "2016:01:09 10:51:31"),
+                    (SubSecTimeOriginal, "500"),
+                ],
+                None,
+                Some(1_589_687_970),
+                "2016-01-09T10:51:31.500+00:00",
+                "2016/01/09/1051-31500",
+            ),
+            (
+                "CreateDate carries the same authority as DateTimeOriginal",
+                vec![
+                    (CreateDate, "2025:02:09 18:17:01"),
+                    (SubSecTimeDigitized, "5"),
+                ],
+                None,
+                Some(TAKEN),
+                "2025-02-09T18:17:01.500+00:00",
+                "2025/02/09/1817-01500",
+            ),
+            (
+                "a video has no EXIF, and its track time is the same kind of \
+                 reading, so it outranks the sidecar too",
+                vec![],
+                Some(TRACK),
+                Some(TAKEN),
+                TRACK,
+                "2024/04/18/2324-26000",
+            ),
+            (
+                "the shutter still beats the track when a file somehow has both",
+                vec![(DateTimeOriginal, "2025:02:09 18:17:01")],
+                Some(TRACK),
+                Some(TAKEN),
+                "2025-02-09T18:17:01+00:00",
+                "2025/02/09/1817-01000",
+            ),
+            (
+                "with neither reading, the sidecar is the best available and is \
+                 converted into the output zone",
+                vec![],
+                None,
+                Some(TAKEN),
+                "2025-02-09T17:17:01+12:00",
+                "2025/02/09/1717-01000",
+            ),
+            (
+                "ModifyDate is an edit, not a capture, so it stays below the sidecar",
+                vec![(ModifyDate, "2008:07:31 10:38:11")],
+                None,
+                Some(TAKEN),
+                "2025-02-09T17:17:01+12:00",
+                "2025/02/09/1717-01000",
+            ),
+            (
+                "but it is still far better than nothing once the sidecar is gone",
+                vec![(ModifyDate, "2008:07:31 10:38:11")],
+                None,
+                None,
+                "2008-07-31T10:38:11+00:00",
+                "2008/07/31/1038-11000",
+            ),
+        ];
+
+        for (why, tags, track, taken, expected_dt, expected_path) in cases {
+            let info = info_with(&tags, track, taken);
+            let dt = best_guess_taken_dt(&info, tz());
+            assert_eq!(dt.as_deref(), Some(expected_dt), "{why}");
+            assert_eq!(
+                get_desired_media_path("abc1234", &dt),
+                expected_path,
+                "{why}"
+            );
+        }
+    }
+
     #[test]
     fn test_best_guess_taken_dt_video_track() {
         use crate::track_util::PsTrackInfo;
@@ -336,10 +554,10 @@ mod tests {
         };
 
         let mut info = MediaFileInfo::new_for_test();
-        info.track_info = Some(track("2024-04-18T11:24:26+00:00"));
+        info.track_info = Some(track("2024-04-18T23:24:26+12:00"));
         assert_eq!(
             best_guess_taken_dt(&info, tz()).as_deref(),
-            Some("2024-04-18T11:24:26+00:00")
+            Some("2024-04-18T23:24:26+12:00")
         );
 
         // Preferred over the file created/modified fallbacks.
@@ -347,7 +565,7 @@ mod tests {
         info.modified = Some(1_000_000_000_000);
         assert_eq!(
             best_guess_taken_dt(&info, tz()).as_deref(),
-            Some("2024-04-18T11:24:26+00:00")
+            Some("2024-04-18T23:24:26+12:00")
         );
     }
 

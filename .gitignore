@@ -21,3 +21,8 @@ db.sqlite
 db.sqlite-journal
 db.sqlite-wal
 db.sqlite-shm
+
+# Thumbnail cache built by expiremental/ui-axum-htmx; rebuildable from db.sqlite
+thumbs.db
+thumbs.db-wal
+thumbs.db-shm

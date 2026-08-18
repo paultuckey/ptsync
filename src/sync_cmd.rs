@@ -316,23 +316,28 @@ mod tests {
     use std::fs::read_to_string;
     use std::path::{Path, PathBuf};
 
-    /// Tiny Google Takeout. Every media file has a `.supplemental-metadata.json`
-    /// with a fixed `photoTakenTime`, so dates come from the sidecar rather than
-    /// from whatever mtime the checkout happens to have.
+    /// Tiny Google Takeout. Every media file also has a
+    /// `.supplemental-metadata.json`, so these fixtures exercise a capture
+    /// reading and a sidecar disagreeing rather than either alone.
     const TAKEOUT_BASIC: &str = "test/takeout_basic";
 
     /// Where the fixture's two media files land, minus the extension.
     ///
-    /// These can be literals because every test here runs at
-    /// [`crate::test_util::tz`]'s fixed `+12:00`. The jpg's instant is a quarter
-    /// past midnight in Greenwich and a quarter past noon at +12:00, so a
-    /// regression to rendering at UTC changes the name rather than quietly
-    /// agreeing with itself.
-    const FIXTURE_JPG_STEM: &str = "2024/05/22/1217-51000";
-    const FIXTURE_MP4_STEM: &str = "2023/11/02/2130-00000";
+    /// Both come from the file's own capture reading, which outranks the
+    /// sidecar: the jpg from EXIF `DateTimeOriginal`, the mp4 — which has no
+    /// EXIF — from its track `creation_time`. Both sidecars say something else
+    /// entirely (2024-05-22 and 2023-11-02), so a regression to sidecar-first
+    /// shows up here as a different year rather than a subtly different hour.
+    ///
+    /// Neither reading records a zone, so neither shifts with the output zone.
+    /// That is the property these literals pin: every test here runs at
+    /// [`crate::test_util::tz`]'s fixed `+12:00`, and the names must not depend
+    /// on it.
+    const FIXTURE_JPG_STEM: &str = "2008/05/30/1556-01000";
+    const FIXTURE_MP4_STEM: &str = "2024/04/18/2324-26000";
 
-    /// The instant behind [`FIXTURE_JPG_STEM`].
-    const FIXTURE_JPG_EPOCH: i64 = 1716337071;
+    /// The wall clock behind [`FIXTURE_JPG_STEM`], as the note spells it.
+    const FIXTURE_JPG_READING: &str = "2008-05-30T15:56:01+00:00";
 
     fn run_sync(input: &str) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
         crate::test_util::setup_log();
@@ -410,17 +415,17 @@ mod tests {
         assert!(!archive.join("undated").exists());
 
         let md = read_to_string(archive.join(format!("{stem}.md")))?;
-        // Compared as an instant rather than a string: the sidecar's offset is
-        // this machine's, so the two only spell the same on a UTC machine.
+        // Compared verbatim: this is a wall-clock reading, not an instant, so
+        // there is nothing to convert and the note must spell it exactly as the
+        // camera wrote it.
         let recorded = md
             .lines()
             .find_map(|l| l.strip_prefix("datetime: "))
             .ok_or_else(|| anyhow!("sidecar has no datetime line:\n{md}"))?
             .trim_matches('"');
         assert_eq!(
-            chrono::DateTime::parse_from_rfc3339(recorded)?.timestamp(),
-            FIXTURE_JPG_EPOCH,
-            "sidecar datetime {recorded:?} is not the instant the metadata recorded"
+            recorded, FIXTURE_JPG_READING,
+            "note datetime {recorded:?} is not the reading the camera recorded"
         );
 
         // The same photo sits in two source directories, so it is written once
@@ -510,8 +515,10 @@ mod tests {
         let output = temp.path().join("output");
         fs::create_dir_all(&input)?;
 
-        // Two distinct photos sharing a photoTakenTime, so both want one name.
-        const SAME_INSTANT_STEM: &str = "2023/11/15/1013-20000";
+        // Two distinct photos cut from one source image, so they share a capture
+        // reading and both want one name. Their sidecars name a different time
+        // again, which the reading outranks.
+        const SAME_INSTANT_STEM: &str = "2008/05/30/1556-01000";
         let base = fs::read("test/Canon_40D.jpg")?;
         for (name, marker) in [("a.jpg", "X"), ("b.jpg", "YY")] {
             let mut bytes = base.clone();

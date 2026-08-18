@@ -28,6 +28,7 @@ use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;
 use tracing::{Level, debug, error, info};
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -218,7 +219,7 @@ fn enable_debug(debug: bool) {
     let filter = tracing_subscriber::filter::Targets::new()
         .with_default(Level::INFO)
         .with_target("ptsync", if debug { Level::DEBUG } else { Level::INFO })
-        .with_target("nom_exif", Level::ERROR)
+        .with_target("nom_exif", LevelFilter::OFF)
         .with_target("turso_core", Level::ERROR)
         .with_target("turso_sdk_kit", Level::ERROR)
         .with_target("turso_sync_engine", Level::ERROR)

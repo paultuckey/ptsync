@@ -14,7 +14,7 @@ const DEMO_DIR: &str = "target/demo";
 const SNAPSHOT_PATH: &str = "tests/snapshots/sync.txt";
 const TAPE_PATH: &str = "docs/demo.tape";
 
-const DEMO_NOTE: &str = "photo-archive/2024/05/22/1217-51000.md";
+const DEMO_NOTE: &str = "photo-archive/2008/05/30/1556-01000.md";
 
 /// The `TZ` both this snapshot and `docs/demo.tape` are recorded in, fixed so the
 /// output doesn't differ by machine.

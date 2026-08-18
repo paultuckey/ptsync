@@ -392,8 +392,9 @@ mod tests {
         assert!(out.contains(
             "| Photo taken time | 2024-05-22T12:17:51+12:00 (22 May 2024, 00:17:51 UTC) |"
         ));
-        // And it outranks EXIF, so it decides the output path.
-        assert!(out.contains("| Media | `2024/05/22/1217-51000.jpg` |"));
+        // But the camera's own capture reading outranks it, so the path is dated
+        // 2008 from EXIF rather than 2024 from Google.
+        assert!(out.contains("| Media | `2008/05/30/1556-01000.jpg` |"));
         Ok(())
     }
 
@@ -423,8 +424,9 @@ mod tests {
         for (input, media_path) in [
             ("still.jpg", "| Media | `2008/05/30/1556-01000.jpg` |"),
             // Its own capture time, since nothing here knows of the still it
-            // would be filed beside.
-            ("clip.mov", "| Media | `1904/01/01/0000-00000.mov` |"),
+            // would be filed beside. The fixture's track time sits at the
+            // QuickTime epoch, which is UTC, so it lands at noon at `+12:00`.
+            ("clip.mov", "| Media | `1904/01/01/1200-00000.mov` |"),
         ] {
             let si = ScanInfo::new(input.to_string(), None, None, 0);
             let out = media(&si, &root, crate::test_util::tz())?;

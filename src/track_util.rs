@@ -58,14 +58,17 @@ fn parse_iso6709(s: &str) -> Option<(f64, f64)> {
     Some((lat, long))
 }
 
-pub fn parse_track_info<R: Read + Seek>(reader: &mut R) -> anyhow::Result<Option<PsTrackInfo>> {
+pub fn parse_track_info<R: Read + Seek>(
+    reader: &mut R,
+    name: &str,
+) -> anyhow::Result<Option<PsTrackInfo>> {
     // Read before nom_exif is handed the reader, since it takes it by value.
     let content_identifier = crate::quicktime_meta::content_identifier(reader);
 
     reader.seek(SeekFrom::Start(0))?;
     let ms_r = MediaSource::seekable(reader);
     let Ok(ms) = ms_r else {
-        warn!("Failed to read track media source");
+        warn!("Failed to read track media source {name:?}");
         return Ok(None);
     };
     if ms.kind() != MediaKind::Track {
@@ -76,7 +79,7 @@ pub fn parse_track_info<R: Read + Seek>(reader: &mut R) -> anyhow::Result<Option
 
     match info {
         Err(e) => {
-            warn!("Failed to parse track metadata: {:?}", e);
+            warn!("Failed to parse track metadata {name:?}: {e:?}");
             Ok(None)
         }
         Ok(info) => {
@@ -143,8 +146,8 @@ mod tests {
         crate::test_util::setup_log();
         let c = OsFileSystem::new("test");
         let mut reader = c.open("Hello.mp4")?;
-        let meta =
-            parse_track_info(&mut reader)?.ok_or_else(|| anyhow!("Failed to parse track info"))?;
+        let meta = parse_track_info(&mut reader, "Hello.mp4")?
+            .ok_or_else(|| anyhow!("Failed to parse track info"))?;
         assert_eq!(meta.width, Some(854));
         assert_eq!(meta.height, Some(480));
         assert_eq!(meta.duration_ms, Some(5000));
@@ -164,8 +167,8 @@ mod tests {
         crate::test_util::setup_log();
         let c = OsFileSystem::new("test/live_photo");
         let mut reader = c.open("clip.mov")?;
-        let meta =
-            parse_track_info(&mut reader)?.ok_or_else(|| anyhow!("Failed to parse track info"))?;
+        let meta = parse_track_info(&mut reader, "clip.mov")?
+            .ok_or_else(|| anyhow!("Failed to parse track info"))?;
         assert_eq!(
             meta.content_identifier.as_deref(),
             Some("11111111-2222-3333-4444-555555555555")
