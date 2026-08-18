@@ -15,4 +15,4 @@ updates:
         patterns:
           - "*"
     schedule:
-      interval: monthly
+      interval: quarterly
