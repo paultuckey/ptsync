@@ -29,8 +29,16 @@ pub(crate) fn find_quick_file_type(file_path: &str) -> QuickFileType {
         .map(|s| s.to_lowercase())
         .unwrap_or_default();
     match lowercase_file_ext.as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "heic" | "mp4" | "m4v" | "mov" | "avi" | "mpg"
-        | "mpeg" | "wmv" | "asf" => QuickFileType::Media,
+        // Stills. `jfif` and `jpe` are JPEG under another name, which Windows
+        // and Outlook both still hand out.
+        "jpg" | "jpeg" | "jfif" | "jpe" | "png" | "gif" | "webp" | "heic" | "heif" | "avif"
+        | "tif" | "tiff" | "bmp"
+        // Camera raw. Every one of these is a container the sniffer knows by
+        // signature, so the extension only decides whether to look.
+        | "cr2" | "cr3" | "nef" | "arw" | "orf" | "raf" | "rw2"
+        // Video.
+        | "mp4" | "m4v" | "mov" | "avi" | "mpg" | "mpeg" | "wmv" | "asf" | "mts" | "m2ts"
+        | "3gp" | "3g2" | "mkv" | "webm" => QuickFileType::Media,
         "csv" => QuickFileType::AlbumCsv,
         _ => QuickFileType::Unknown,
     }
@@ -43,6 +51,24 @@ pub(crate) enum AccurateFileType {
     Png,
     Heic,
     Gif,
+    /// Google exports plenty of these, and a phone screenshot saved from the web
+    /// is often one too.
+    Webp,
+    Avif,
+    /// Also `.tiff`. What a flatbed scanner produces, so it is most of what a
+    /// digitised pre-digital archive is made of.
+    Tif,
+    Bmp,
+    /// Camera raw. Each vendor gets its own variant because the extension has
+    /// to survive the round trip — a `.cr2` written back out as `.raw` would
+    /// open in nothing.
+    Cr2,
+    Cr3,
+    Nef,
+    Arw,
+    Orf,
+    Raf,
+    Rw2,
     Mp4,
     Mov,
     /// An MP4 with an `M4V ` major brand.
@@ -55,6 +81,16 @@ pub(crate) enum AccurateFileType {
     /// happily, so only the ones with video reach this type — see
     /// [`file_type_from_content_type`].
     Wmv,
+    /// MPEG-2 transport stream: AVCHD camcorder footage, named `.mts` or
+    /// `.m2ts`. Both spellings share one media type, so both land here.
+    Mts,
+    /// Also `.3g2`. What a camera phone recorded before phones shot MP4.
+    ThreeGpp,
+    /// A Matroska container carrying video. Matroska holds `.mka` audio and
+    /// `.mks` subtitles just as happily, so only the ones with a picture reach
+    /// this type — the same split as ASF above.
+    Mkv,
+    Webm,
     Json,
     Csv,
     Unsupported,
@@ -64,6 +100,21 @@ pub(crate) fn file_ext_from_file_type(ff: &AccurateFileType) -> String {
     match ff {
         AccurateFileType::Jpg => "jpg".to_string(),
         AccurateFileType::Gif => "gif".to_string(),
+        AccurateFileType::Webp => "webp".to_string(),
+        AccurateFileType::Avif => "avif".to_string(),
+        AccurateFileType::Tif => "tif".to_string(),
+        AccurateFileType::Bmp => "bmp".to_string(),
+        AccurateFileType::Cr2 => "cr2".to_string(),
+        AccurateFileType::Cr3 => "cr3".to_string(),
+        AccurateFileType::Nef => "nef".to_string(),
+        AccurateFileType::Arw => "arw".to_string(),
+        AccurateFileType::Orf => "orf".to_string(),
+        AccurateFileType::Raf => "raf".to_string(),
+        AccurateFileType::Rw2 => "rw2".to_string(),
+        AccurateFileType::Mts => "mts".to_string(),
+        AccurateFileType::ThreeGpp => "3gp".to_string(),
+        AccurateFileType::Mkv => "mkv".to_string(),
+        AccurateFileType::Webm => "webm".to_string(),
         AccurateFileType::Png => "png".to_string(),
         AccurateFileType::Heic => "heic".to_string(),
         AccurateFileType::Mp4 => "mp4".to_string(),
@@ -85,13 +136,28 @@ pub(crate) fn media_kind(ff: &AccurateFileType) -> Option<&'static str> {
         AccurateFileType::Jpg
         | AccurateFileType::Png
         | AccurateFileType::Heic
-        | AccurateFileType::Gif => Some("p"),
+        | AccurateFileType::Gif
+        | AccurateFileType::Webp
+        | AccurateFileType::Avif
+        | AccurateFileType::Tif
+        | AccurateFileType::Bmp
+        | AccurateFileType::Cr2
+        | AccurateFileType::Cr3
+        | AccurateFileType::Nef
+        | AccurateFileType::Arw
+        | AccurateFileType::Orf
+        | AccurateFileType::Raf
+        | AccurateFileType::Rw2 => Some("p"),
         AccurateFileType::Mp4
         | AccurateFileType::Mov
         | AccurateFileType::M4v
         | AccurateFileType::Avi
         | AccurateFileType::Mpg
-        | AccurateFileType::Wmv => Some("v"),
+        | AccurateFileType::Wmv
+        | AccurateFileType::Mts
+        | AccurateFileType::ThreeGpp
+        | AccurateFileType::Mkv
+        | AccurateFileType::Webm => Some("v"),
         AccurateFileType::Json | AccurateFileType::Csv | AccurateFileType::Unsupported => None,
     }
 }
@@ -108,16 +174,40 @@ pub(crate) fn metadata_type(ff: &AccurateFileType) -> MetadataType {
         AccurateFileType::Jpg
         | AccurateFileType::Png
         | AccurateFileType::Heic
-        | AccurateFileType::Gif => MetadataType::ExifTags,
-        AccurateFileType::Mp4 | AccurateFileType::Mov | AccurateFileType::M4v => {
-            MetadataType::Track
-        }
+        | AccurateFileType::Gif
+        | AccurateFileType::Avif
+        // Raw is TIFF underneath, apart from RAF and CR3, and `nom-exif` reads
+        // all three shapes — so raw arrives with the richest EXIF of anything
+        // here: capture clock, lens, and usually GPS.
+        | AccurateFileType::Tif
+        | AccurateFileType::Cr2
+        | AccurateFileType::Cr3
+        | AccurateFileType::Nef
+        | AccurateFileType::Arw
+        | AccurateFileType::Orf
+        | AccurateFileType::Raf
+        | AccurateFileType::Rw2 => MetadataType::ExifTags,
+        // A WebP does carry EXIF, in an `EXIF` RIFF chunk, but `nom-exif` reads
+        // only JPEG/PNG/HEIF/TIFF/RAF/CR3 stills and returns nothing for this
+        // container — so a WebP's capture time comes from supplemental metadata
+        // or the filesystem until that support lands upstream.
+        AccurateFileType::Webp => MetadataType::NoMetadata,
+        AccurateFileType::Mp4
+        | AccurateFileType::Mov
+        | AccurateFileType::M4v
+        | AccurateFileType::ThreeGpp
+        | AccurateFileType::Mkv
+        | AccurateFileType::Webm => MetadataType::Track,
         // Videos, but not ISO base media files, so the track parser cannot read
         // them — asking it to try only produces a warning per file. Their capture
         // time comes from supplemental metadata or the filesystem instead.
-        AccurateFileType::Avi | AccurateFileType::Mpg | AccurateFileType::Wmv => {
-            MetadataType::NoMetadata
-        }
+        // BMP has nowhere to put EXIF, and a transport stream is a muxed
+        // broadcast format rather than a container with a header to read.
+        AccurateFileType::Avi
+        | AccurateFileType::Mpg
+        | AccurateFileType::Wmv
+        | AccurateFileType::Bmp
+        | AccurateFileType::Mts => MetadataType::NoMetadata,
         AccurateFileType::Json | AccurateFileType::Csv | AccurateFileType::Unsupported => {
             MetadataType::NoMetadata
         }
@@ -130,6 +220,23 @@ pub(crate) fn file_type_from_content_type(ct: &str) -> AccurateFileType {
         "image/gif" => AccurateFileType::Gif,
         "image/png" => AccurateFileType::Png,
         "image/heic" => AccurateFileType::Heic,
+        // The same still image, branded `mif1`/`msf1` rather than `heic`. Left
+        // unmapped these fall through to `Unsupported` and the photo is dropped.
+        "image/heif" => AccurateFileType::Heic,
+        "image/heic-sequence" => AccurateFileType::Heic,
+        "image/heif-sequence" => AccurateFileType::Heic,
+        "image/webp" => AccurateFileType::Webp,
+        "image/avif" => AccurateFileType::Avif,
+        "image/avif-sequence" => AccurateFileType::Avif,
+        "image/tiff" => AccurateFileType::Tif,
+        "image/bmp" => AccurateFileType::Bmp,
+        "image/x-canon-cr2" => AccurateFileType::Cr2,
+        "image/x-canon-cr3" => AccurateFileType::Cr3,
+        "image/x-nikon-nef" => AccurateFileType::Nef,
+        "image/x-sony-arw" => AccurateFileType::Arw,
+        "image/x-olympus-orf" => AccurateFileType::Orf,
+        "image/x-fuji-raf" => AccurateFileType::Raf,
+        "image/x-panasonic-rw2" => AccurateFileType::Rw2,
         "video/mp4" => AccurateFileType::Mp4,
         "application/mp4" => AccurateFileType::Mp4,
         "video/quicktime" => AccurateFileType::Mov,
@@ -137,10 +244,21 @@ pub(crate) fn file_type_from_content_type(ct: &str) -> AccurateFileType {
         "video/x-msvideo" => AccurateFileType::Avi,
         "video/mpeg" => AccurateFileType::Mpg,
         "video/x-ms-wmv" => AccurateFileType::Wmv,
+        // `.mts` and `.m2ts` share this one media type, so the distinction
+        // between AVCHD and its Blu-ray variant does not survive the string.
+        "video/mp2t" => AccurateFileType::Mts,
+        "video/3gpp" => AccurateFileType::ThreeGpp,
+        "video/3gpp2" => AccurateFileType::ThreeGpp,
+        "video/matroska" => AccurateFileType::Mkv,
+        "video/webm" => AccurateFileType::Webm,
         // The other two ASF outcomes — `.wma` audio, and the bare container when
         // the header declares neither stream — would otherwise be filed as videos
         // with no picture.
         "audio/x-ms-wma" => AccurateFileType::Unsupported,
+        // Matroska's audio and subtitle halves, which share the container with
+        // a real `.mkv` exactly as `.wma` shares ASF with `.wmv`.
+        "audio/matroska" => AccurateFileType::Unsupported,
+        "application/x-matroska" => AccurateFileType::Unsupported,
         "application/vnd.ms-asf" => AccurateFileType::Unsupported,
         "application/octet-stream" => AccurateFileType::Unsupported,
         "application/json" => AccurateFileType::Unsupported,
@@ -193,6 +311,32 @@ mod tests {
             ("test/test1.jpg", QuickFileType::Media),
             ("test/te.s.jpg", QuickFileType::Media),
             ("test/test1.mp4", QuickFileType::Media),
+            ("test/Hello.webp", QuickFileType::Media),
+            ("test/Hello.WEBP", QuickFileType::Media),
+            // The HEIF spelling of the same still image.
+            ("test/Hello.heif", QuickFileType::Media),
+            ("test/Hello.avif", QuickFileType::Media),
+            ("test/Hello.tif", QuickFileType::Media),
+            ("test/Hello.tiff", QuickFileType::Media),
+            ("test/Hello.bmp", QuickFileType::Media),
+            // JPEG under the names Windows and Outlook hand out.
+            ("test/photo.jfif", QuickFileType::Media),
+            ("test/photo.jpe", QuickFileType::Media),
+            // Raw.
+            ("test/IMG_0001.CR2", QuickFileType::Media),
+            ("test/IMG_0001.cr3", QuickFileType::Media),
+            ("test/DSC_0001.nef", QuickFileType::Media),
+            ("test/DSC00001.arw", QuickFileType::Media),
+            ("test/P1000001.orf", QuickFileType::Media),
+            ("test/DSCF0001.raf", QuickFileType::Media),
+            ("test/P1000001.rw2", QuickFileType::Media),
+            // Video.
+            ("test/Hello.mts", QuickFileType::Media),
+            ("test/00000.m2ts", QuickFileType::Media),
+            ("test/Hello.3gp", QuickFileType::Media),
+            ("test/Hello.3g2", QuickFileType::Media),
+            ("test/Hello.mkv", QuickFileType::Media),
+            ("test/Hello.webm", QuickFileType::Media),
             ("test/Hello.m4v", QuickFileType::Media),
             ("test/Hello.mov", QuickFileType::Media),
             ("test/Hello.avi", QuickFileType::Media),
@@ -262,6 +406,86 @@ mod tests {
                 "m4v",
                 Some("v"),
                 MetadataType::Track,
+            ),
+            // No metadata: the EXIF chunk is there in the bytes, but out of
+            // reach of the parser — see `metadata_type`.
+            (
+                "Hello.webp",
+                "Hello.webp",
+                AccurateFileType::Webp,
+                "webp",
+                Some("p"),
+                MetadataType::NoMetadata,
+            ),
+            // A scanner TIFF carries full EXIF, which is what makes it worth
+            // more than the raw formats it shares a container shape with.
+            (
+                "Hello.tif",
+                "Hello.tif",
+                AccurateFileType::Tif,
+                "tif",
+                Some("p"),
+                MetadataType::ExifTags,
+            ),
+            (
+                "Hello.avif",
+                "Hello.avif",
+                AccurateFileType::Avif,
+                "avif",
+                Some("p"),
+                MetadataType::ExifTags,
+            ),
+            // BMP has nowhere to put EXIF.
+            (
+                "Hello.bmp",
+                "Hello.bmp",
+                AccurateFileType::Bmp,
+                "bmp",
+                Some("p"),
+                MetadataType::NoMetadata,
+            ),
+            (
+                "Hello.3gp",
+                "Hello.3gp",
+                AccurateFileType::ThreeGpp,
+                "3gp",
+                Some("v"),
+                MetadataType::Track,
+            ),
+            // Muxed broadcast format, so there is no container header to read.
+            (
+                "Hello.mts",
+                "Hello.mts",
+                AccurateFileType::Mts,
+                "mts",
+                Some("v"),
+                MetadataType::NoMetadata,
+            ),
+            (
+                "Hello.mkv",
+                "Hello.mkv",
+                AccurateFileType::Mkv,
+                "mkv",
+                Some("v"),
+                MetadataType::Track,
+            ),
+            (
+                "Hello.webm",
+                "Hello.webm",
+                AccurateFileType::Webm,
+                "webm",
+                Some("v"),
+                MetadataType::Track,
+            ),
+            // The Matroska equivalent of `Hello.wma`: same container, audio
+            // only, so it must not arrive as a video with nothing to show.
+            (
+                "Hello.mka",
+                "Hello.mka",
+                AccurateFileType::Unsupported,
+                "bin",
+                None,
+                MetadataType::NoMetadata,
             ),
             (
                 "Hello.avi",
@@ -369,6 +593,110 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// A HEIF-branded still is the same picture as a `heic`-branded one, and a
+    /// phone or Takeout will hand over either under a `.heic` name. Mapping only
+    /// `image/heic` dropped the rest on the floor.
+    #[test]
+    fn test_heif_family_and_webp_content_types() {
+        for (content_type, expected) in [
+            ("image/heic", AccurateFileType::Heic),
+            ("image/heif", AccurateFileType::Heic),
+            ("image/heic-sequence", AccurateFileType::Heic),
+            ("image/heif-sequence", AccurateFileType::Heic),
+            ("image/webp", AccurateFileType::Webp),
+        ] {
+            assert_eq!(
+                file_type_from_content_type(content_type),
+                expected,
+                "content type {content_type}"
+            );
+        }
+    }
+
+    /// Every media type this module matches on, pinned to the `FileFormat`
+    /// variant that actually emits it. A typo in one of those strings is
+    /// otherwise invisible — the arm simply never fires and the file is dropped
+    /// as unsupported, which is exactly how `image/heif` went missing.
+    #[test]
+    fn test_content_type_strings_match_real_file_formats() {
+        use file_format::FileFormat;
+        for (fmt, expected) in [
+            (
+                FileFormat::JointPhotographicExpertsGroup,
+                AccurateFileType::Jpg,
+            ),
+            (FileFormat::PortableNetworkGraphics, AccurateFileType::Png),
+            (FileFormat::GraphicsInterchangeFormat, AccurateFileType::Gif),
+            (FileFormat::Webp, AccurateFileType::Webp),
+            (
+                FileFormat::HighEfficiencyImageCoding,
+                AccurateFileType::Heic,
+            ),
+            (
+                FileFormat::HighEfficiencyImageFileFormat,
+                AccurateFileType::Heic,
+            ),
+            (
+                FileFormat::HighEfficiencyImageCodingSequence,
+                AccurateFileType::Heic,
+            ),
+            (
+                FileFormat::HighEfficiencyImageFileFormatSequence,
+                AccurateFileType::Heic,
+            ),
+            (FileFormat::Av1ImageFileFormat, AccurateFileType::Avif),
+            (
+                FileFormat::Av1ImageFileFormatSequence,
+                AccurateFileType::Avif,
+            ),
+            (FileFormat::TagImageFileFormat, AccurateFileType::Tif),
+            (FileFormat::WindowsBitmap, AccurateFileType::Bmp),
+            (FileFormat::CanonRaw2, AccurateFileType::Cr2),
+            (FileFormat::CanonRaw3, AccurateFileType::Cr3),
+            (FileFormat::NikonElectronicFile, AccurateFileType::Nef),
+            (FileFormat::SonyAlphaRaw, AccurateFileType::Arw),
+            (FileFormat::OlympusRawFormat, AccurateFileType::Orf),
+            (FileFormat::FujifilmRaw, AccurateFileType::Raf),
+            (FileFormat::PanasonicRaw, AccurateFileType::Rw2),
+            (FileFormat::AppleQuicktime, AccurateFileType::Mov),
+            (FileFormat::Mpeg4Part14Video, AccurateFileType::Mp4),
+            (FileFormat::AppleItunesVideo, AccurateFileType::M4v),
+            (FileFormat::AudioVideoInterleave, AccurateFileType::Avi),
+            (FileFormat::Mpeg12Video, AccurateFileType::Mpg),
+            (FileFormat::WindowsMediaVideo, AccurateFileType::Wmv),
+            (FileFormat::Mpeg2TransportStream, AccurateFileType::Mts),
+            (FileFormat::BdavMpeg2TransportStream, AccurateFileType::Mts),
+            (
+                FileFormat::ThirdGenerationPartnershipProject,
+                AccurateFileType::ThreeGpp,
+            ),
+            (
+                FileFormat::ThirdGenerationPartnershipProject2,
+                AccurateFileType::ThreeGpp,
+            ),
+            (FileFormat::MatroskaVideo, AccurateFileType::Mkv),
+            (FileFormat::Matroska3dVideo, AccurateFileType::Mkv),
+            (FileFormat::Webm, AccurateFileType::Webm),
+            // Each of these shares a container with a format that does hold a
+            // picture, so they have to be turned away by media type — the
+            // container alone cannot tell them apart.
+            (FileFormat::MatroskaAudio, AccurateFileType::Unsupported),
+            (FileFormat::MatroskaSubtitles, AccurateFileType::Unsupported),
+            (FileFormat::WindowsMediaAudio, AccurateFileType::Unsupported),
+            (
+                FileFormat::AdvancedSystemsFormat,
+                AccurateFileType::Unsupported,
+            ),
+        ] {
+            assert_eq!(
+                file_type_from_content_type(fmt.media_type()),
+                expected,
+                "{fmt:?} emits {}",
+                fmt.media_type()
+            );
+        }
     }
 
     #[test]

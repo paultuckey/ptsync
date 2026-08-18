@@ -108,32 +108,45 @@ struct PatternMatch {
     g1: String,
 }
 
+/// The media extensions the filename patterns accept, as a regex alternation
+/// substituted in for `{ext}`. Kept in one place because it drifted: the photo
+/// patterns listed only stills and `mov`, so every `.mp4`, `.avi` and `.mpg` —
+/// including Canon's `MVI_*.AVI` — came out of a scan unclassified.
+const MEDIA_EXT: &str = concat!(
+    "heic|heif|avif|jpg|jpeg|jfif|jpe|png|gif|webp|tif|tiff|bmp",
+    "|cr2|cr3|nef|arw|orf|raf|rw2",
+    "|mov|mp4|m4v|avi|mpg|mpeg|wmv|asf|mts|m2ts|3gp|3g2|mkv|webm"
+);
+
 fn make_file_patterns() -> Vec<(Vec<Regex>, MatchingFilePatternFn)> {
     let patterns: Vec<(&[&str], MatchingFilePatternFn)> = vec![
         (
             &[
-                r"^img_([\d_]+)\.(heic|jpg|jpeg|mov|png)$",
-                r"^([\d_]+)\.(heic|jpg|jpeg|mov|png)$",
-                r"^img_([\d_]+)-edited\.(heic|jpg|jpeg|mov|png)$",
-                r"^image_([\d_]+)\.(heic|jpg|jpeg|mov|png)$",
+                r"^img_([\d_]+)\.({ext})$",
+                r"^([\d_]+)\.({ext})$",
+                r"^img_([\d_]+)-edited\.({ext})$",
+                r"^image_([\d_]+)\.({ext})$",
+                // Canon names stills `IMG_1234.JPG` but videos `MVI_1234.AVI`.
+                r"^mvi_([\d_]+)\.({ext})$",
+                r"^mvi_([\d_]+)-edited\.({ext})$",
             ],
             |m| KnownFileType::Photo(m.g1),
         ),
         (
             &[
-                r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(heic|jpg|jpeg|mov|png)$",
-                r"^([0-9]{11}__[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{9})\.(heic|jpg|jpeg|mov|png)$",
-                r"^image_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(heic|jpg|jpeg|mov|png)$",
+                r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.({ext})$",
+                r"^([0-9]{11}__[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{9})\.({ext})$",
+                r"^image_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.({ext})$",
             ],
             |m| KnownFileType::PhotoWithGuid(m.g1),
         ),
         (
             &[
-                r"^image_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(heic|jpg|jpeg|mov|png)\.json$",
-                r"^(.+)\.(heic|jpg|jpeg|mov|png|gif)\.suppl\.json$",
-                r"^(.+)\.(heic|jpg|jpeg|mov|png|gif)\.supplemental-meta\.json$",
-                r"^(.+)\.(heic|jpg|jpeg|mov|png|gif)\.supplemental-metadata\([0-9]+\)\.json$",
-                r"^(.+)\.(heic|jpg|jpeg|mov|png|gif)\.supplemental-metadata.json$",
+                r"^image_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.({ext})\.json$",
+                r"^(.+)\.({ext})\.suppl\.json$",
+                r"^(.+)\.({ext})\.supplemental-meta\.json$",
+                r"^(.+)\.({ext})\.supplemental-metadata\([0-9]+\)\.json$",
+                r"^(.+)\.({ext})\.supplemental-metadata.json$",
             ],
             |m| KnownFileType::GpMetadataJson(m.g1),
         ),
@@ -165,14 +178,14 @@ fn make_file_patterns() -> Vec<(Vec<Regex>, MatchingFilePatternFn)> {
         (&[r"^icloud shared albums.zip$"], |_| {
             KnownFileType::IcpSharedAlbumsZip
         }),
-        (&[r"^\.ds_store$"], |_| KnownFileType::Ignored),
+        (&[r"^\.ds_store$", r"^.+\.thm$"], |_| KnownFileType::Ignored),
     ];
     patterns
         .iter()
         .map(|(patterns, match_fn)| {
             let mut regexes: Vec<Regex> = vec![];
             for p in patterns.iter() {
-                match Regex::new(p) {
+                match Regex::new(&p.replace("{ext}", MEDIA_EXT)) {
                     Ok(re) => regexes.push(re),
                     Err(re_err) => {
                         warn!("Error while parsing: {re_err}");
@@ -295,5 +308,67 @@ mod tests {
             find_known_files("Google Photos/2016-book/IMG_1316.JPG.supplemental-metadata.json"),
             vec![KnownFileType::GpMetadataJson(String::from("img_1316"))]
         );
+    }
+
+    /// The photo patterns listed only stills and `mov`, so a scan left every
+    /// `.mp4`, `.avi` and `.mpg` unclassified — Canon's `MVI_*.AVI` doubly so,
+    /// since its prefix was missing too. One match each, or the regexes overlap.
+    #[test]
+    fn test_videos_are_classified() {
+        crate::test_util::setup_log();
+        for (path, expected) in [
+            ("Photos from 2012/IMG_1234.MP4", "1234"),
+            ("Photos from 2012/IMG_1234.m4v", "1234"),
+            ("Photos from 2009/IMG_0007.mpg", "0007"),
+            ("Photos from 2001/MVI_0028.AVI", "0028"),
+            ("Photos from 2001/MVI_0063.avi", "0063"),
+            ("Photos from 2005/100_0012.mpeg", "100_0012"),
+            // Added alongside the videos, and equally absent before.
+            ("Photos from 2019/IMG_1234.webp", "1234"),
+            ("Photos from 2019/IMG_1234.heif", "1234"),
+            ("Photos from 2019/IMG_1234.avif", "1234"),
+            // Raw, and the scanner format that shares its container shape.
+            ("Photos from 2008/IMG_1234.CR2", "1234"),
+            ("Photos from 2015/IMG_1234.cr3", "1234"),
+            ("Photos from 2008/100_1234.nef", "100_1234"),
+            ("Scans/IMG_1234.tif", "1234"),
+            // The AVCHD and camera-phone video eras.
+            ("Photos from 2010/IMG_1234.mts", "1234"),
+            ("Photos from 2006/IMG_1234.3gp", "1234"),
+            ("Photos from 2016/IMG_1234.mkv", "1234"),
+        ] {
+            assert_eq!(
+                find_known_files(path),
+                vec![KnownFileType::Photo(String::from(expected))],
+                "classifying {path}"
+            );
+        }
+    }
+
+    /// Takeout writes a sidecar for a video just as it does for a still.
+    #[test]
+    fn test_video_supplemental_metadata() {
+        crate::test_util::setup_log();
+        assert_eq!(
+            find_known_files("Google Photos/2016/IMG_1316.MP4.supplemental-metadata.json"),
+            vec![KnownFileType::GpMetadataJson(String::from("img_1316"))]
+        );
+    }
+
+    /// A `.thm` holds JPEG bytes, but it is Canon's sidecar thumbnail of the
+    /// clip beside it rather than a picture of its own, so it is not wanted.
+    #[test]
+    fn test_thm_is_ignored() {
+        crate::test_util::setup_log();
+        for path in [
+            "photo/2001/dover/MVI_0028.THM",
+            "photo/2001/dover/MVI_0063.thm",
+        ] {
+            assert_eq!(
+                find_known_files(path),
+                vec![KnownFileType::Ignored],
+                "classifying {path}"
+            );
+        }
     }
 }
