@@ -55,7 +55,7 @@ aws-config = { version = "1.9.0", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1.138.1"
 nom-exif = "3.6.1"
 hex = "0.4.3"
-base64 = "0.22.1"
+base64 = "0.23.1"
 unicode-normalization = "0.1.25"
 rayon = "1.12.0"
 indicatif = "0.18.6"
