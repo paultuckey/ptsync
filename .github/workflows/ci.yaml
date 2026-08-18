@@ -18,8 +18,8 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -43,3 +43,50 @@ jobs:
 
       - name: Build
         run: cargo build
+
+  # `rust-version` in Cargo.toml is a promise to anyone running `cargo install ptsync`
+  #
+  # 1.94.1 is the floor the dependency graph imposes, from `aws-types` and its `aws-smithy-*`
+  # siblings. Everything else in the tree sits at 1.90 or below, so S3 is what sets this number.
+  msrv:
+    name: MSRV (1.94.1)
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    concurrency:
+      group: "${{ github.workflow }}-${{ github.ref }}-msrv"
+      cancel-in-progress: true
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the MSRV toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+
+      # A separate key from the `ci` job above, which is not cosmetic: that job also runs on
+      # ubuntu, so it resolves to the same `Linux-cargo-<hash>` key, and a `target/` built by
+      # stable would be restored here for a build that is meant to prove 1.94.1 works.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: "${{ runner.os }}-cargo-msrv-1.94.1-${{ hashFiles('Cargo.toml') }}"
+
+      - name: Toolchain info
+        run: |
+          rustc +1.94.1 --version
+          cargo +1.94.1 --version --verbose
+
+      # `check`, not `test`: the question here is whether the crate still compiles on its declared
+      # minimum, and the `ci` job above already runs the suite on stable across two platforms.
+      #
+      # `--all-targets` because dev-dependencies pin the same 1.94.1 floor, so a contributor on the
+      # MSRV toolchain needs the tests to build too, not just the binary.
+      #
+      # `--locked` because a resolver that is free to pick different dependency versions is not
+      # answering the question — this checks the lockfile that ships in the published crate.
+      - name: Check on the MSRV toolchain
+        run: cargo +1.94.1 check --locked --all-targets --verbose

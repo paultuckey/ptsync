@@ -2,9 +2,19 @@ version: 2
 
 updates:
 
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: monthly
+
   - package-ecosystem: "cargo"
-    open-pull-requests-limit: 10
+    directory: "/"
+    open-pull-requests-limit: 3
     allow:
       - dependency-type: direct
+    groups:
+      cargo:
+        patterns:
+          - "*"
     schedule:
       interval: monthly

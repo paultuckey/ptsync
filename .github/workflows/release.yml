@@ -1,0 +1,54 @@
+name: Release
+
+# `cargo release --execute` publishes to crates.io *before* it pushes the tag, so a tag arriving
+# here already means the crate is up. This job only mirrors the changelog entry onto GitHub, so
+# that watchers get a release notification and the version has notes attached. It uploads no
+# binaries: `cargo install ptsync` is the install path, and adding prebuilt artifacts would mean
+# committing to a build matrix and a signing story that nothing needs yet.
+on:
+  push:
+    tags: ["v*"]
+
+# `gh release create` writes to the repo; nothing else here needs a token.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish the GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create the release from the changelog entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+
+          # Take the body straight from CHANGELOG.md rather than generating it from commits, so
+          # there is one set of release notes and it is the one that was written by hand. The
+          # section runs from its `## [x.y.z]` heading to whichever comes first: the next `##`
+          # heading, or the reference-link block at the bottom of the file — the latter matters
+          # because the oldest release has no heading after it.
+          notes="$(awk -v ver="$version" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "## [" ver "]") == 1) found = 1
+              next
+            }
+            found && /^\[[^]]+\]: / { exit }
+            found && !started && !NF { next }
+            found { started = 1; print }
+          ' CHANGELOG.md)"
+
+          # A tag with no changelog section is a mistake in the release, not a reason to publish an
+          # empty release page — `cargo release` rewrites `[Unreleased]` into the version heading,
+          # so this only trips if the changelog was skipped or hand-edited.
+          if [ -z "$notes" ]; then
+            echo "::error file=CHANGELOG.md::No '## [$version]' section found for tag $TAG"
+            exit 1
+          fi
+
+          gh release create "$TAG" --title "$TAG" --notes "$notes"

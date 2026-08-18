@@ -3,13 +3,33 @@ name = "ptsync"
 version = "0.1.0"
 
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.94.1"
 
 description = "Merge Google Takeout and iCloud photo exports into one deduplicated, date-organized archive of ordinary files and Markdown notes"
 license = "MIT"
 repository = "https://github.com/paultuckey/ptsync"
 keywords = ["photos", "google-takeout", "icloud", "deduplication", "backup"]
 categories = ["command-line-utilities", "multimedia::images", "filesystem"]
+authors = ["Paul Tuckey"]
+homepage = "https://github.com/paultuckey/ptsync"
+readme = "README.md"
+# ptsync ships a binary and no library, so docs.rs has nothing to render and serves
+# a bare "ptsync-x.y.z is not a library" page. Naming the README here is what keeps
+# the Documentation link on the crates.io sidebar pointed somewhere real.
+documentation = "https://github.com/paultuckey/ptsync#readme"
+
+# Kept out of the published tarball: CI config, the contributor-facing docs, and the
+# demo recording, which the README links by absolute URL precisely so it need not be
+# shipped. The test fixtures stay in — they are small, and they are what makes the
+# published source a thing you can actually run `cargo test` against.
+exclude = [
+    ".github/",
+    ".gitattributes",
+    "AGENTS.md",
+    "Development.md",
+    "docs/demo.gif",
+    "docs/demo.tape",
+]
 
 [dependencies]
 clap = { version = "4.6.2", features = ["derive", "wrap_help"] }
