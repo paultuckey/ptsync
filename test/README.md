@@ -29,6 +29,54 @@ exiftool -overwrite_original \
 pair: filed on its own it lands under 1904, so a test asserting the still's date proves
 the video really did take the still's name.
 
+### Regenerate Hello.webp
+
+A small WebP that carries a real EXIF block, copied from `Canon_40D.jpg`. The EXIF is
+the point of the fixture: `nom-exif` cannot read a WebP's `EXIF` RIFF chunk, so this
+file is what pins `metadata_type` to `NoMetadata` — if that support ever lands upstream,
+this fixture will start yielding a 2008 capture date and the test will say so.
+
+```shell
+cwebp -metadata exif -q 60 -resize 160 120 Canon_40D.jpg -o Hello.webp
+```
+
+### Regenerate the still-image fixtures
+
+`Hello.tif` and `Hello.avif` keep the EXIF copied across from `Canon_40D.jpg`, because
+the point of both is that the capture clock survives — `nom-exif` reads TIFF and AVIF,
+which is also why raw is routed to the EXIF reader. `Hello.bmp` has no EXIF to keep;
+BMP has nowhere to put it.
+
+```shell
+magick Canon_40D.jpg -resize 80x60 -compress LZW Hello.tif
+exiftool -overwrite_original -tagsfromfile Canon_40D.jpg -all:all Hello.tif
+magick Canon_40D.jpg -resize 80x60 Hello.bmp
+magick Canon_40D.jpg -resize 160x120 Hello.avif
+exiftool -overwrite_original -tagsfromfile Canon_40D.jpg -all:all Hello.avif
+```
+
+### Regenerate the video fixtures
+
+One-second solid-colour clips, the same recipe as `Hello.wmv` below.
+
+```shell
+ffmpeg -y -f lavfi -i color=c=blue:s=160x120:r=10:d=1 -c:v libx264 -b:v 60k -an Hello.3gp
+ffmpeg -y -f lavfi -i color=c=blue:s=160x120:r=10:d=1 -c:v libx264 -b:v 60k -an -f mpegts Hello.mts
+ffmpeg -y -f lavfi -i color=c=blue:s=160x120:r=10:d=1 -c:v libvpx-vp9 -b:v 40k -an Hello.webm
+ffmpeg -y -f lavfi -i color=c=blue:s=160x120:r=10:d=1 -c:v libx264 -b:v 60k -an -f matroska Hello.mkv
+```
+
+### Regenerate Hello.mka
+
+Matroska carrying audio instead of video — the case that must *not* be treated as media,
+and the reason the `reader-ebml` feature is enabled: without it every EBML file looks
+alike and this one would be filed as a video with nothing to show. The Matroska
+equivalent of `Hello.wma`.
+
+```shell
+ffmpeg -y -f lavfi -i "sine=frequency=440:duration=0.5" -c:a aac -b:a 24k -f matroska Hello.mka
+```
+
 ### Regenerate Hello.wmv
 
 A one-second solid-colour clip in an ASF container. It needs a real video stream:
