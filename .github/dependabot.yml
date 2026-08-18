@@ -10,11 +10,9 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/"
     open-pull-requests-limit: 3
-    allow:
-      - dependency-type: direct
     groups:
       cargo:
         patterns:
           - "*"
     schedule:
-      interval: monthly
+      interval: quarterly
