@@ -66,6 +66,26 @@ ffmpeg -y -f lavfi -i color=c=blue:s=160x120:r=10:d=1 -c:v libvpx-vp9 -b:v 40k -
 ffmpeg -y -f lavfi -i color=c=blue:s=160x120:r=10:d=1 -c:v libx264 -b:v 60k -an -f matroska Hello.mkv
 ```
 
+### Regenerate Hello_pnot.mov
+
+A QuickTime file that opens with a `pnot` preview atom instead of a brand, the way
+2000s Nikon compacts wrote them. `file-format` 0.29 does not sniff that shape, so
+these are dropped as arbitrary binary — the fixture is what pins the workaround in
+`is_pnot_quicktime`, and `test_pnot_workaround_still_needed` fails once
+[the upstream fix](https://github.com/mmalecot/file-format/pull/90) is released and
+both can go.
+
+ffmpeg cannot write a preview atom, so the fixture is built from an ordinary clip:
+drop `ftyp` and `wide`, prepend `pnot` and a small `PICT`, and shift every `stco`
+chunk offset by the number of bytes inserted. Skipping that last step leaves a file
+that sniffs correctly but no longer plays, which would make the fixture prove nothing.
+
+```shell
+ffmpeg -y -f lavfi -i color=c=blue:s=160x120:r=10:d=1 -c:v libx264 -b:v 60k -an base.mov
+python3 pnot_fixture.py base.mov Hello_pnot.mov
+ffmpeg -v error -i Hello_pnot.mov -f null -       # must still decode cleanly
+```
+
 ### Regenerate Hello.mka
 
 Matroska carrying audio instead of video — the case that must *not* be treated as media,
