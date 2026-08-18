@@ -267,6 +267,26 @@ pub(crate) fn file_type_from_content_type(ct: &str) -> AccurateFileType {
     }
 }
 
+/// A QuickTime file that opens with a [preview atom][pnot] rather than the usual
+/// `ftyp`. `file-format` 0.29 matches `ftypqt`, `free`, `mdat`, `moov`, `skip`
+/// and `wide` at offset 4, but not `pnot`, so these sniff as arbitrary binary
+/// and the video is dropped — 82 of the 195 clips in one 2000s Nikon archive,
+/// which wrote the preview first as a matter of course.
+///
+/// Deliberately the same bare check as the upstream fix, rather than a stricter
+/// walk of the atom chain, so that behaviour does not change when the dependency
+/// is bumped and this is deleted. `test_pnot_workaround_still_needed` is the
+/// reminder to delete it.
+///
+/// [pnot]: https://developer.apple.com/documentation/quicktime-file-format/preview_atom
+// TODO: remove once https://github.com/mmalecot/file-format/pull/90 is released.
+fn is_pnot_quicktime<R: Read + Seek>(reader: &mut R) -> bool {
+    let mut head = [0u8; 8];
+    reader.seek(SeekFrom::Start(0)).is_ok()
+        && reader.read_exact(&mut head).is_ok()
+        && &head[4..8] == b"pnot"
+}
+
 pub(crate) fn determine_file_type<R: Read + Seek>(
     mut reader: R,
     name: &String,
@@ -276,7 +296,8 @@ pub(crate) fn determine_file_type<R: Read + Seek>(
         return Ok(AccurateFileType::Json);
     }
     reader.seek(SeekFrom::Start(0))?;
-    let fmt = match file_format::FileFormat::from_reader(reader) {
+    // Borrowed, so the bytes are still readable for the `pnot` check below.
+    let fmt = match file_format::FileFormat::from_reader(&mut reader) {
         Err(e) => {
             warn!("  could not determine file format for file:{name:?}, error:{e:?}");
             return Ok(AccurateFileType::Unsupported);
@@ -285,6 +306,10 @@ pub(crate) fn determine_file_type<R: Read + Seek>(
     };
     let mt = fmt.media_type();
     if mt == "application/octet-stream" {
+        if is_pnot_quicktime(&mut reader) {
+            debug!("  file:{name:?}: QuickTime preview atom, file type Mov");
+            return Ok(AccurateFileType::Mov);
+        }
         debug!("  can not calculate mime type file:{name:?}");
         return Ok(AccurateFileType::Unsupported);
     }
@@ -384,6 +409,18 @@ mod tests {
             (
                 "Hello.mov",
                 "Hello.mov",
+                AccurateFileType::Mov,
+                "mov",
+                Some("v"),
+                MetadataType::Track,
+            ),
+            // The same container opening with a `pnot` preview atom instead of
+            // a brand, which is how 2000s Nikons wrote it — see
+            // `is_pnot_quicktime`. The track still parses, so the only thing
+            // standing between these files and the archive was the sniff.
+            (
+                "Hello_pnot.mov",
+                "Hello_pnot.mov",
                 AccurateFileType::Mov,
                 "mov",
                 Some("v"),
@@ -592,6 +629,23 @@ mod tests {
                 "sniffing {name}"
             );
         }
+        Ok(())
+    }
+
+    /// Canary for `is_pnot_quicktime`. The workaround only exists because the
+    /// dependency cannot sniff a `pnot` QuickTime; when it can, this fails and
+    /// the shim, the fixture note and this test all go together.
+    #[test]
+    fn test_pnot_workaround_still_needed() -> anyhow::Result<()> {
+        setup_log();
+        let root = OsFileSystem::new("test");
+        let fmt = file_format::FileFormat::from_reader(root.open("Hello_pnot.mov")?)?;
+        assert_eq!(
+            fmt.media_type(),
+            "application/octet-stream",
+            "file-format now sniffs `pnot` QuickTime, so `is_pnot_quicktime` and this \
+             test can be deleted (mmalecot/file-format#90)"
+        );
         Ok(())
     }
 
