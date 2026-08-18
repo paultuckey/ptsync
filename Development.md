@@ -47,6 +47,8 @@ The source code is located in `src/`:
   -   `info_cmd.rs`: Inspects and displays details for a single file.
 -   **`classify.rs`**: Classifies input directory/zip paths against known Google Takeout / iCloud file and directory patterns using regex. Consumed by `db_cmd.rs` (not a standalone command).
 -   **`media.rs`**: Core data structures (`MediaFileInfo`, `MediaFileDerivedInfo`) and logic for extracting metadata, calculating checksums, and deriving target paths/dates.
+-   **`apple_maker_note.rs`** / **`quicktime_meta.rs`**: The two places a Live Photo's Apple content identifier hides — the still's EXIF `MakerNote` and the video's `moov/meta` QuickTime keys. `nom_exif` reads neither, so both are parsed here.
+-   **`live_photo.rs`**: Pairs stills with videos by that identifier, so `sync_cmd.rs` can write the video as a sidecar of the still rather than as an item in its own right.
 -   **`album.rs`**: Logic for parsing album metadata (from CSV or JSON) and generating album Markdown files.
 -   **`markdown.rs`**: Utilities for reading/writing Markdown files and managing YAML frontmatter.
 -   **`util.rs`**: General utilities, including the `PsContainer` trait which abstracts file system access (supporting both directories and zip files).

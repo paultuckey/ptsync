@@ -31,6 +31,8 @@ app-independent archive you can back up anywhere, this is for you.
   editor and friendly to tools like [Obsidian](https://obsidian.md/).
 - **Albums travel with you** - Google (JSON) and iCloud (CSV) albums become Markdown files
   under `albums/`.
+- **Live Photos stay together** - an iPhone's still and its video are recognized as one
+  thing and filed under one name, with the video referenced from the still's note.
 - **Non-destructive & repeatable** - additive only, and idempotent: running it again
   produces no changes.
 
@@ -166,12 +168,19 @@ part of an archive. See the full [CLI reference](docs/cli.md) for every option, 
 
 ## How it works
 
-- **Dates** are read from EXIF metadata, supplemental JSON sidecars (common in Google
-  Takeout), or the file's modification time as a fallback.
+- **Dates** come from the camera's own record of when the shutter fired - EXIF for photos,
+  the embedded creation time for videos - falling back to supplemental JSON sidecars
+  (common in Google Takeout) and then the file's modification time. Reading the file
+  itself first means a photo lands at the same path on any machine, from any export.
 - **Timezones.** The archive is laid out on the photographer's wall clock: a photo taken
-  at 10am is filed at 10am, wherever it was taken. To pin a particular zone, pass
-  `--timezone` (`-z`) a UTC offset - `+12:00`, `-04:00` or `+00:00` for UTC. Without the flag, a
-  `TZ` env var is used.
+  at 10am is filed at 10am, wherever it was taken. EXIF records that reading directly, so
+  photos need no timezone at all. Videos and sidecar dates are instants rather than
+  readings, so those *are* converted: to pin a particular zone, pass `--timezone` (`-z`) a
+  UTC offset - `+12:00`, `-04:00` or `+00:00` for UTC. Without the flag, a `TZ` env var is
+  used.
+- **Dates you fixed in Google Photos** stay in the note and the database but do not move
+  the file. Google records those only in its own export metadata and never writes them
+  back into the image, and a name meant to last decades is built from the image itself.
 - **File paths** follow `yyyy/mm/dd/hhmm-ssms.ext` - for example
   `2024/07/15/1430-22417.jpg` is 15 July 2024 at 14:30:22.417. If two *different* photos
   share the same instant, the second gets a checksum suffix

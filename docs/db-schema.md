@@ -35,6 +35,7 @@ erDiagram
         INTEGER display_rotate
         TEXT geohash
         TEXT kind
+        TEXT content_identifier
     }
     person {
         TEXT person_id PK

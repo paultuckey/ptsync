@@ -104,7 +104,7 @@ async fn test_db_scan() -> anyhow::Result<()> {
     // track creation time rather than the file timestamps.
     assert_eq!(
         row.get::<Option<String>>(7)?.as_deref(),
-        Some("2024-04-18T11:24:26+00:00")
+        Some("2024-04-18T23:24:26+12:00")
     );
 
     let row = one_row(
@@ -141,6 +141,60 @@ async fn test_db_scan() -> anyhow::Result<()> {
     .get(0)?;
     assert_eq!(unmatched, None);
 
+    Ok(())
+}
+
+/// Both halves of a Live Photo record the identifier that links them, read out
+/// of two different places: the still's Apple maker note and the video's
+/// QuickTime metadata. Storing it is what lets a query find the pair.
+#[tokio::test]
+async fn test_db_scan_records_content_identifiers() -> anyhow::Result<()> {
+    crate::test_util::setup_log();
+    let (_db, conn) = open_conn(":memory:").await?;
+    scan(
+        Arc::new(OsFileSystem::new("test/live_photo")),
+        &conn,
+        "test/live_photo",
+    )
+    .await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT media_path, kind, content_identifier FROM media_item ORDER BY media_path",
+            (),
+        )
+        .await?;
+    let mut found: Vec<(String, String, Option<String>)> = Vec::new();
+    while let Some(row) = rows.next().await? {
+        found.push((row.get(0)?, row.get(1)?, row.get(2)?));
+    }
+    assert_eq!(
+        found,
+        vec![
+            (
+                "clip.mov".to_string(),
+                "v".to_string(),
+                Some("11111111-2222-3333-4444-555555555555".to_string())
+            ),
+            (
+                "still.jpg".to_string(),
+                "p".to_string(),
+                Some("11111111-2222-3333-4444-555555555555".to_string())
+            ),
+        ]
+    );
+
+    // A photo from a camera that writes no Apple maker note leaves the column
+    // NULL rather than filling it with something derived.
+    let (_db, conn) = open_conn(":memory:").await?;
+    scan(Arc::new(OsFileSystem::new("test")), &conn, "test").await?;
+    let row = one_row(
+        &conn,
+        "SELECT content_identifier FROM media_item WHERE media_path = ?1",
+        ["Canon_40D.jpg"],
+    )
+    .await?;
+    assert_eq!(row.get::<Option<String>>(0)?, None);
     Ok(())
 }
 

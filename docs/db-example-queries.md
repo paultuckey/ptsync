@@ -139,6 +139,25 @@ GROUP BY a.album_id
 ORDER BY items DESC;
 ```
 
+## Which of my photos are Live Photos?
+
+An iPhone Live Photo is a still and a short video sharing one Apple
+`content_identifier`. This pairs them up and shows how long each clip runs.
+
+```sqlite
+SELECT still.media_path                      AS still,
+       video.media_path                      AS video,
+       ROUND(video.duration_ms / 1000.0, 1)  AS video_seconds
+FROM media_item still
+JOIN media_item video
+  ON video.content_identifier = still.content_identifier
+ AND video.kind = 'v'
+WHERE still.kind = 'p'
+  AND still.content_identifier IS NOT NULL
+ORDER BY still.media_path
+LIMIT 10;
+```
+
 ## Do I have duplicate files?
 
 Items that share the same content hash are exact duplicates. `wasted_bytes`

@@ -58,6 +58,6 @@ Sleep 2500ms
 # 3. The payoff: a note ptsync wrote, with metadata you own in plain text. This
 #    is the photo that arrived twice, so it carries two original-paths and an
 #    album wikilink — the point ptsync is making.
-Type "cat photo-archive/2024/05/22/1217-51000.md"
+Type "cat photo-archive/2008/05/30/1556-01000.md"
 Enter
 Sleep 4s
