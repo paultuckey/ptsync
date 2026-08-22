@@ -6,6 +6,7 @@ use crate::util::{ScanInfo, checksum_bytes};
 use anyhow::anyhow;
 use rayon::prelude::*;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
 use tracing::debug;
@@ -22,29 +23,50 @@ use tracing::debug;
 /// `container` and `prog` are taken as [`Arc`]s because the worker thread
 /// outlives this call (it is owned by the returned iterator), so they can't be
 /// borrowed from the caller's stack.
+///
+/// Alongside the iterator, an [`AtomicUsize`] counts files that scanned as media
+/// by extension but could not be analyzed (unreadable, unhashable, or not an
+/// actual media type — see [`analyze_file`]). Those files are dropped from the
+/// stream, so this counter is the only signal that they were lost. Read it
+/// *after* the iterator is fully drained: the worker thread keeps incrementing
+/// it until then, and draining joins the worker, which publishes the final
+/// value to the reader.
 pub(crate) fn inspect_media_files(
     container: Arc<dyn FileSystem>,
     media_si_files: Vec<ScanInfo>,
     prog: Arc<Progress>,
-) -> impl Iterator<Item = MediaFileInfo> {
+) -> (impl Iterator<Item = MediaFileInfo>, Arc<AtomicUsize>) {
     // Bound the channel so fast parallel producers can't outrun the single
     // consumer and pile up in memory.
     let channel_capacity = rayon::current_num_threads().saturating_mul(4).max(1);
     let (tx, rx) = std::sync::mpsc::sync_channel(channel_capacity);
 
+    let unprocessed = Arc::new(AtomicUsize::new(0));
+    let unprocessed_worker = unprocessed.clone();
+
     let handle = std::thread::spawn(move || {
         media_si_files.par_iter().for_each(|media_si| {
-            if let Ok(Some(info)) = analyze_file(container.as_ref(), media_si) {
-                let _ = tx.send(info);
+            match analyze_file(container.as_ref(), media_si) {
+                Ok(Some(info)) => {
+                    let _ = tx.send(info);
+                }
+                // Unsupported type (`Ok(None)`) or a read/hash failure (`Err`):
+                // either way the file silently leaves the pipeline, so record it.
+                Ok(None) | Err(_) => {
+                    unprocessed_worker.fetch_add(1, Ordering::Relaxed);
+                }
             }
             prog.inc();
         });
     });
 
-    InspectMediaIter {
-        rx,
-        handle: Some(handle),
-    }
+    (
+        InspectMediaIter {
+            rx,
+            handle: Some(handle),
+        },
+        unprocessed,
+    )
 }
 
 /// Iterator over inspected media that owns the producer thread, joining it once
@@ -126,6 +148,7 @@ mod tests {
     use crate::file_type::QuickFileType;
     use crate::fs::OsFileSystem;
     use crate::util::scan_fs;
+    use std::io::Cursor;
 
     #[test]
     fn test_inspect_media_files_yields_media() -> anyhow::Result<()> {
@@ -137,8 +160,8 @@ mod tests {
             .collect();
         let prog = Arc::new(Progress::new(media_si_files.len() as u64));
 
-        let results: Vec<MediaFileInfo> =
-            inspect_media_files(container, media_si_files, prog).collect();
+        let (media_iter, _unprocessed) = inspect_media_files(container, media_si_files, prog);
+        let results: Vec<MediaFileInfo> = media_iter.collect();
 
         assert!(
             results
@@ -150,6 +173,37 @@ mod tests {
                 .iter()
                 .any(|m| m.original_file_this_run == "Hello.mp4")
         );
+        Ok(())
+    }
+
+    /// A file that scans as media by extension but holds non-media bytes is
+    /// dropped from the stream; the unprocessed counter must report it so the
+    /// loss is visible rather than silent.
+    #[test]
+    fn test_inspect_media_files_counts_unprocessed() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+
+        let dir = tempfile::tempdir()?;
+        let fs = OsFileSystem::new(&dir.path().to_string_lossy());
+        let valid_bytes = std::fs::read("test/Canon_40D.jpg")?;
+        fs.write(false, "valid.jpg", Cursor::new(valid_bytes));
+        fs.write(false, "broken.jpg", Cursor::new(b"not really a jpeg".to_vec()));
+
+        let container: Arc<dyn FileSystem> = Arc::new(fs);
+        let media_si_files: Vec<ScanInfo> = scan_fs(container.as_ref())
+            .into_iter()
+            .filter(|m| m.quick_file_type == QuickFileType::Media)
+            .collect();
+        assert_eq!(media_si_files.len(), 2);
+
+        let prog = Arc::new(Progress::new(media_si_files.len() as u64));
+        let (media_iter, unprocessed) = inspect_media_files(container, media_si_files, prog);
+        let results: Vec<MediaFileInfo> = media_iter.collect();
+
+        // Only the real photo makes it through; the broken file is counted, not silently lost.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].original_file_this_run, "valid.jpg");
+        assert_eq!(unprocessed.load(Ordering::Relaxed), 1);
         Ok(())
     }
 }

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::{debug, info, warn};
 
 pub(crate) fn main(
@@ -72,10 +73,16 @@ pub(crate) fn main(
         // this thread since it mutates the shared collection. Files with the
         // same content hash collapse into one entry, recording each original
         // path (see `Deduplicator`).
-        for media in inspect_media_files(container.clone(), media_si_files, prog.clone()) {
+        let (media_iter, unprocessed) =
+            inspect_media_files(container.clone(), media_si_files, prog.clone());
+        for media in media_iter {
             deduper.add(media);
         }
         drop(prog);
+        let unprocessed = unprocessed.load(Ordering::Relaxed);
+        if unprocessed > 0 {
+            warn!("{unprocessed} files could not be processed");
+        }
 
         if let Some(ref mut output_container) = output_container_o {
             let media_to_write = deduper.sorted_media();
