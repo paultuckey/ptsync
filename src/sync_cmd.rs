@@ -24,13 +24,23 @@ pub(crate) fn main(
 ) -> anyhow::Result<()> {
     let container = open_input(input)?;
 
+    let output_container_o: Option<Arc<dyn WritableFileSystem>> = match output_directory {
+        Some(output) => {
+            let output_container = open_output(output)?;
+            // Before the scan, not after: on a large input the scan and inspection
+            // run for minutes, and a destination that can't be written to should
+            // say so straight away. A dry run writes nothing, so it needs none.
+            if !dry_run {
+                output_container.check_writable()?;
+            }
+            Some(output_container)
+        }
+        None => None,
+    };
+
     let files = scan_fs(container.as_ref());
     info!("Found {} files in input", files.len());
 
-    let output_container_o: Option<Arc<dyn WritableFileSystem>> = match output_directory {
-        Some(output) => Some(open_output(output)?),
-        None => None,
-    };
     let mut deduper = Deduplicator::new();
     let mut final_path_by_checksum = HashMap::<String, String>::new();
 

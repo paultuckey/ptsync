@@ -2,8 +2,8 @@
 # `ptsync sync --input takeout-20240715.zip --output photo-archive` against test/takeout_basic.
 
  INFO Input zip: takeout-20240715.zip
- INFO Found 7 files in input
  INFO Output directory: photo-archive
+ INFO Found 7 files in input
  INFO Inspecting 1 album files
  INFO Inspecting 3 photo and video files
  INFO Outputting 2 photo and video files

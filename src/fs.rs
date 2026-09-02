@@ -43,6 +43,11 @@ pub trait FileSystem: Send + Sync {
 /// Separate from [`FileSystem`] because some backends are read-only — a zip
 /// source implements only `FileSystem`.
 pub trait WritableFileSystem: FileSystem {
+    /// Errors unless the destination really can be written to, creating it if
+    /// that is what it takes. Called once up front so a run that has nowhere to
+    /// put its output fails in seconds rather than after a long scan.
+    fn check_writable(&self) -> Result<()>;
+
     /// Creates any parent directories. Under `dry_run`, logs and writes nothing.
     fn write(&self, dry_run: bool, path: &str, reader: &mut dyn Read) -> Result<()>;
 
@@ -126,6 +131,24 @@ impl FileSystem for OsFileSystem {
 }
 
 impl WritableFileSystem for OsFileSystem {
+    fn check_writable(&self) -> Result<()> {
+        fs::create_dir_all(&self.root)
+            .map_err(|e| anyhow!("Unable to create output directory {:?}: {}", self.root, e))?;
+        // The mode bits alone don't answer this — a read-only mount, an ACL or a
+        // full filesystem each refuse a write the bits say is allowed — so a real
+        // file is created. The pid keeps two runs of the same output apart.
+        let probe = self
+            .root
+            .join(format!(".ptsync-write-check-{}", std::process::id()));
+        File::create(&probe)
+            .map_err(|e| anyhow!("Output directory {:?} is not writable: {}", self.root, e))?;
+        if let Err(e) = fs::remove_file(&probe) {
+            debug!("Could not remove write check file {probe:?}: {e}");
+        }
+        debug!("Output directory {:?} is writable", self.root);
+        Ok(())
+    }
+
     fn write(&self, dry_run: bool, path: &str, reader: &mut dyn Read) -> Result<()> {
         let p = self.root.join(path);
         if dry_run {
@@ -501,6 +524,46 @@ mod tests {
         // Reports it would write, but must not create the file.
         assert!(fs.write_if_changed(true, "albums/trip.md", b"hello")?);
         assert!(!dir.path().join("albums/trip.md").exists());
+        Ok(())
+    }
+
+    /// A missing destination is created rather than refused, and the check
+    /// leaves nothing of its own behind.
+    #[test]
+    fn test_check_writable_creates_missing_output_directory() -> Result<()> {
+        crate::test_util::setup_log();
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join("archive/photos");
+        let fs = OsFileSystem::new(&out.to_string_lossy());
+
+        fs.check_writable()?;
+        assert!(out.is_dir());
+        assert_eq!(fs::read_dir(&out)?.count(), 0, "write check left a file");
+        Ok(())
+    }
+
+    /// Permission bits rather than a read-only mount, but the write is refused
+    /// by the same syscall either way.
+    #[cfg(unix)]
+    #[test]
+    fn test_check_writable_rejects_unwritable_output_directory() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        crate::test_util::setup_log();
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join("archive");
+        fs::create_dir(&out)?;
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o555))?;
+
+        // Root writes straight through the bits, so there is nothing to assert
+        // when the test runs as root.
+        if File::create(out.join("probe")).is_err() {
+            let fs = OsFileSystem::new(&out.to_string_lossy());
+            assert!(fs.check_writable().is_err());
+        } else {
+            debug!("Running as root; skipping the unwritable-directory check");
+        }
+        // Restored so the temp directory can still be cleaned up.
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o755))?;
         Ok(())
     }
 
