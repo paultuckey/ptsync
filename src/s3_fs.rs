@@ -307,6 +307,46 @@ impl FileSystem for S3FileSystem {
 }
 
 impl WritableFileSystem for S3FileSystem {
+    fn check_writable(&self) -> Result<()> {
+        // Whether a PutObject will be allowed is only answerable by making one:
+        // the policy that grants it can turn on the prefix, the bucket's own
+        // policy, or the object lock, none of which are readable from here.
+        let key = self
+            .uri
+            .key_for(&format!(".ptsync-write-check-{}", std::process::id()));
+        self.rt.block_on(async {
+            self.client
+                .put_object()
+                .bucket(&self.uri.bucket)
+                .key(&key)
+                .body(ByteStream::from_static(b""))
+                .send()
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "s3://{}/{} is not writable: {e:?}",
+                        self.uri.bucket,
+                        self.uri.prefix
+                    )
+                })?;
+            // Tidying up only. A credential allowed to write but not delete is
+            // still a usable destination, so this failing is not.
+            if let Err(e) = self
+                .client
+                .delete_object()
+                .bucket(&self.uri.bucket)
+                .key(&key)
+                .send()
+                .await
+            {
+                debug!("Could not remove write check object {key}: {e:?}");
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
+        debug!("s3://{}/{} is writable", self.uri.bucket, self.uri.prefix);
+        Ok(())
+    }
+
     fn write(&self, dry_run: bool, path: &str, reader: &mut dyn Read) -> Result<()> {
         let key = self.uri.key_for(path);
         if dry_run {
@@ -464,6 +504,10 @@ impl crate::fs::FileSystem for FakeS3FileSystem {
 
 #[cfg(test)]
 impl crate::fs::WritableFileSystem for FakeS3FileSystem {
+    fn check_writable(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn write(
         &self,
         dry_run: bool,
@@ -515,10 +559,12 @@ impl crate::fs::WritableFileSystem for FakeS3FileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_s3::error::ErrorMetadata;
+    use aws_sdk_s3::operation::delete_object::DeleteObjectOutput;
     use aws_sdk_s3::operation::get_object::GetObjectOutput;
     use aws_sdk_s3::operation::head_object::HeadObjectOutput;
     use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output;
-    use aws_sdk_s3::operation::put_object::PutObjectOutput;
+    use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
     use aws_sdk_s3::primitives::{ByteStream, DateTime};
     use aws_sdk_s3::types::Object;
     use aws_smithy_mocks::{RuleMode, mock, mock_client};
@@ -641,6 +687,56 @@ mod tests {
         )?;
         // The write is recorded, so a same-run same-path collision is now seen.
         assert!(fs.exists("2024/x.jpg"));
+        Ok(())
+    }
+
+    /// Only a real PutObject settles whether the destination will take writes,
+    /// so the check makes one — under the prefix, and cleaned up after.
+    #[test]
+    fn check_writable_puts_and_removes_a_probe_object() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let list = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .then_output(|| ListObjectsV2Output::builder().is_truncated(false).build());
+        let put = mock!(aws_sdk_s3::Client::put_object)
+            .match_requests(|req| {
+                req.key()
+                    .is_some_and(|k| k.starts_with("out/.ptsync-write-check-"))
+            })
+            .then_output(|| PutObjectOutput::builder().build());
+        let delete = mock!(aws_sdk_s3::Client::delete_object)
+            .match_requests(|req| {
+                req.key()
+                    .is_some_and(|k| k.starts_with("out/.ptsync-write-check-"))
+            })
+            .then_output(|| DeleteObjectOutput::builder().build());
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &put, &delete]);
+        let fs = mock_fs("s3://bucket/out", client)?;
+
+        fs.check_writable()?;
+        // The probe is not a file of the archive, so it must not show up as one.
+        assert!(fs.walk().is_empty());
+        Ok(())
+    }
+
+    /// A bucket that refuses the write has to fail the run, not be reported as a
+    /// usable destination.
+    #[test]
+    fn check_writable_errors_when_put_is_refused() -> anyhow::Result<()> {
+        crate::test_util::setup_log();
+        let list = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .then_output(|| ListObjectsV2Output::builder().is_truncated(false).build());
+        let put = mock!(aws_sdk_s3::Client::put_object).then_error(|| {
+            PutObjectError::generic(
+                ErrorMetadata::builder()
+                    .code("AccessDenied")
+                    .message("Access Denied")
+                    .build(),
+            )
+        });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &put]);
+        let fs = mock_fs("s3://bucket/out", client)?;
+
+        assert!(fs.check_writable().is_err());
         Ok(())
     }
 

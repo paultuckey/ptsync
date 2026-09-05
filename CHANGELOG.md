@@ -32,6 +32,9 @@ version being released. See [docs/Release.md](docs/Release.md).
   it is.
 - **S3 output**, with each object's SHA-256 recorded as its native checksum so re-runs skip what is
   already uploaded without re-downloading it.
+- **The destination is checked before the run starts.** An output directory or bucket that can't be
+  written to fails in seconds, rather than after a long input scan; a missing output directory is
+  created. `--dry-run` writes nothing, so it skips the check.
 - **`ptsync info`** prints the metadata ptsync would extract from a single file as Markdown, and
   **`ptsync db`** scans an archive into a SQLite database for inspection.
 
