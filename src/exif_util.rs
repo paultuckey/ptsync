@@ -369,7 +369,7 @@ mod tests {
         let t = parse_exif_info(reader)?
             .ok_or_else(|| anyhow!("Failed to parse exif"))?
             .tags;
-        assert_eq!(t.len(), 41);
+        assert_eq!(t.len(), 42);
         let mut tag_names: Vec<String> = t.keys().map(|t| t.to_string()).collect();
         tag_names.sort();
 
@@ -396,6 +396,7 @@ mod tests {
             "GPSInfo",
             "GPSVersionID",
             "ISOSpeedRatings",
+            "InteropIndex",
             "InteropOffset",
             "Make",
             "MeteringMode",
